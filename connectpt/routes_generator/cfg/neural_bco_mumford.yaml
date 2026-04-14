@@ -5,6 +5,7 @@ neural_bees: true
 force_linking_unlinked: false
 adjustment_degree_weight: 0.0
 adjustment_degree_gap: 0.1
+adjustment_degree_mode: current
 
 defaults:
   - _self_

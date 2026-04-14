@@ -141,7 +141,7 @@ def floyd_warshall(edge_cost_tensor, return_raw_tensors=True):
     
     Input tensor should be a matrix of edge costs, where element (u,v) is the
     cost of traversing the edge from u to v if there is one, and is otherwise
-    infinity.  It may have a third batch dimension.
+    infinity. It may have a leading batch dimension.
 
     We vectorize the two inner loops of the algorithm.  The outermost loop must
     be sequential: the calculation at i assumes results from iteration i-1 are
@@ -164,15 +164,14 @@ def floyd_warshall(edge_cost_tensor, return_raw_tensors=True):
 
     # set up next-node array
     num_nodes = dists.shape[0]
-    nexts = -torch.ones((num_nodes, num_nodes, batch_size), 
-                        dtype=int, device=device)
-    nexts[torch.eye(num_nodes, dtype=bool)] = \
-        torch.arange(num_nodes, device=device)[:, None]
-    
+    nexts = torch.full((num_nodes, num_nodes, batch_size), -1,
+                       dtype=torch.long, device=device)
+    node_idxs = torch.arange(num_nodes, device=device, dtype=torch.long)
+    nexts[node_idxs, node_idxs] = node_idxs[:, None]
+
     has_edge_mat = dists < float("inf")
-    for vv in range(num_nodes):
-        has_edge_to_v = has_edge_mat[:, vv]
-        nexts[has_edge_to_v, vv] = vv
+    dest_idxs = node_idxs[None, :, None].expand(num_nodes, num_nodes, batch_size)
+    nexts = torch.where(has_edge_mat, dest_idxs, nexts)
 
     # the core loop
     for kk in range(num_nodes):

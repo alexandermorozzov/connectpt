@@ -56,9 +56,9 @@ def needleman_wunsch(scores, gap=0.1):
     return dp[:, -1, -1]
 
 
-def get_adjustment_degrees(candidate_routes, reference_routes, symmetric_routes,
-                           gap=0.1):
-    """Return route-wise adjustment degree in [0, 1], 0 means unchanged."""
+def _get_alignment_scores(candidate_routes, reference_routes, symmetric_routes,
+                          gap):
+    """Return best alignment scores and route lengths for each route pair."""
     if candidate_routes.shape != reference_routes.shape:
         raise ValueError(
             "candidate_routes and reference_routes must have the same shape, "
@@ -88,6 +88,14 @@ def get_adjustment_degrees(candidate_routes, reference_routes, symmetric_routes,
 
     cand_lens = cand_valid.sum(dim=-1)
     ref_lens = ref_valid.sum(dim=-1)
+    return alignment_scores, cand_lens, ref_lens
+
+
+def get_current_adjustment_degrees(candidate_routes, reference_routes,
+                                   symmetric_routes, gap=0.1):
+    """Return the current normalized alignment-based adjustment degree."""
+    alignment_scores, cand_lens, ref_lens = _get_alignment_scores(
+        candidate_routes, reference_routes, symmetric_routes, gap=gap)
     norm = torch.maximum(cand_lens, ref_lens).to(torch.float32)
     match_score = max(1.0 - gap, 1e-6)
     norm = norm * match_score
@@ -102,12 +110,64 @@ def get_adjustment_degrees(candidate_routes, reference_routes, symmetric_routes,
     return adjustment_degrees.reshape(candidate_routes.shape[:-1])
 
 
+def get_paper_adjustment_degrees(candidate_routes, reference_routes,
+                                 symmetric_routes):
+    """Return the paper-style adjustment degree based on LCS F-measure."""
+    lcs_lengths, cand_lens, ref_lens = _get_alignment_scores(
+        candidate_routes, reference_routes, symmetric_routes, gap=0.0)
+    both_empty = (cand_lens == 0) & (ref_lens == 0)
+    either_empty = (cand_lens == 0) | (ref_lens == 0)
+
+    cand_lens = cand_lens.to(torch.float32)
+    ref_lens = ref_lens.to(torch.float32)
+    s_candidate = lcs_lengths / cand_lens.clamp_min(1.0)
+    s_reference = lcs_lengths / ref_lens.clamp_min(1.0)
+
+    eps = 1e-8
+    valid = ~(either_empty | (s_candidate <= eps) | (s_reference <= eps))
+    similarities = torch.zeros_like(lcs_lengths)
+    theta = torch.zeros_like(lcs_lengths)
+    theta[valid] = s_reference[valid] / s_candidate[valid]
+    theta_sq = theta.square()
+    numer = (1.0 + theta_sq) * s_candidate * s_reference
+    denom = s_reference + theta_sq * s_candidate
+    similarities[valid] = numer[valid] / denom[valid].clamp_min(eps)
+    similarities = similarities.clamp(min=0.0, max=1.0)
+    similarities[both_empty] = 1.0
+
+    adjustment_degrees = 1.0 - similarities
+    adjustment_degrees[both_empty] = 0.0
+    return adjustment_degrees.reshape(candidate_routes.shape[:-1])
+
+
+def get_adjustment_degrees(candidate_routes, reference_routes, symmetric_routes,
+                           gap=0.1, mode='current'):
+    """Return route-wise adjustment degree in [0, 1], 0 means unchanged."""
+    if mode == 'current':
+        return get_current_adjustment_degrees(
+            candidate_routes,
+            reference_routes,
+            symmetric_routes,
+            gap=gap,
+        )
+    if mode == 'paper':
+        return get_paper_adjustment_degrees(
+            candidate_routes,
+            reference_routes,
+            symmetric_routes,
+        )
+    raise ValueError(
+        f"Unknown adjustment degree mode '{mode}'. Expected 'current' or 'paper'."
+    )
+
+
 def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5, 
                mod_steps_per_pass=2, shorten_prob=0.2, n_iterations=400, 
                n_type1_bees=None, n_type2_bees=None, silent=False, 
                force_linking_unlinked=False, bee_model=None, 
                sum_writer=None, adjustment_degree_weight=0.0,
-               adjustment_degree_gap=0.1):
+               adjustment_degree_gap=0.1,
+               adjustment_degree_mode='current'):
     """Implementation of the method of  Nikolic and Teodorovic (2013).
     
     state -- A RouteGenBatchState object representing the initial state.
@@ -133,6 +193,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         relative to the original initialized network.
     adjustment_degree_gap -- gap parameter used in sequence alignment when
         computing route similarity.
+    adjustment_degree_mode -- one of "current" or "paper".
     """
     if n_type1_bees is None:
         n_type1_bees = n_bees // 2
@@ -264,6 +325,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                         old_modified_routes, reference_routes,
                         cost_obj.symmetric_routes,
                         gap=adjustment_degree_gap,
+                        mode=adjustment_degree_mode,
                     )
                     new_modified_routes = new_bee_networks.gather(
                         2, gather_idx).squeeze(2)
@@ -271,6 +333,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                         new_modified_routes, reference_routes,
                         cost_obj.symmetric_routes,
                         gap=adjustment_degree_gap,
+                        mode=adjustment_degree_mode,
                     )
                     new_bee_adjustment_degrees = bee_adjustment_degrees + \
                         (new_route_adjustments - old_route_adjustments) / route_count
@@ -662,6 +725,7 @@ def main(cfg: DictConfig, tensors:dict):
     nt2b = cfg.get('n_type2_bees', None)
     adjustment_degree_weight = cfg.get('adjustment_degree_weight', 0.0)
     adjustment_degree_gap = cfg.get('adjustment_degree_gap', 0.1)
+    adjustment_degree_mode = cfg.get('adjustment_degree_mode', 'current')
     test_output = \
         lrnu.test_method(bee_colony, test_dl, cfg.eval, cfg.init, cost_obj, 
             sum_writer=sum_writer, silent=True, n_bees=cfg.n_bees,
@@ -669,7 +733,8 @@ def main(cfg: DictConfig, tensors:dict):
             device=DEVICE, bee_model=bee_model, return_routes=True,
             force_linking_unlinked=force_linking_unlinked,
             adjustment_degree_weight=adjustment_degree_weight,
-            adjustment_degree_gap=adjustment_degree_gap)
+            adjustment_degree_gap=adjustment_degree_gap,
+            adjustment_degree_mode=adjustment_degree_mode)
     routes = test_output[-1]
     metrics = test_output[-2]
     unserved_demand = test_output[-3]
