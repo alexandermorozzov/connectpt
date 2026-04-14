@@ -19,11 +19,95 @@ from .import utils as lrnu
 from .initialization import get_direct_sat_dmd
 
 
+def _reverse_padded_routes(routes):
+    """Reverse the valid part of each padded route and keep -1 padding at end."""
+    route_lens = (routes > -1).sum(dim=-1)
+    max_n_nodes = routes.shape[-1]
+    positions = torch.arange(max_n_nodes, device=routes.device)
+    gather_pos = (route_lens[..., None] - 1 - positions).clamp(min=0)
+    reversed_routes = routes.gather(-1, gather_pos)
+    reversed_routes[positions >= route_lens[..., None]] = -1
+    return reversed_routes
+
+
+def needleman_wunsch(scores, gap=0.1):
+    """Compute batched Needleman-Wunsch alignment scores."""
+    if scores.ndim != 3:
+        raise ValueError(f"Expected scores to have shape (B, N, M), got {scores.shape}")
+    if not 0 <= gap < 1:
+        raise ValueError(f"gap must be in [0, 1), got {gap}")
+
+    batch_size, n_rows, n_cols = scores.shape
+    dp = torch.zeros(batch_size, n_rows + 1, n_cols + 1, device=scores.device,
+                     dtype=scores.dtype)
+    shifted_scores = scores - gap
+
+    for diag_idx in range(2, n_rows + n_cols + 1):
+        row_min = max(1, diag_idx - n_cols)
+        row_max = min(n_rows, diag_idx - 1)
+        row_idxs = torch.arange(row_min, row_max + 1, device=scores.device)
+        col_idxs = diag_idx - row_idxs
+        up = dp[:, row_idxs - 1, col_idxs]
+        left = dp[:, row_idxs, col_idxs - 1]
+        diag = dp[:, row_idxs - 1, col_idxs - 1] + \
+            shifted_scores[:, row_idxs - 1, col_idxs - 1]
+        dp[:, row_idxs, col_idxs] = torch.maximum(torch.maximum(up, left), diag)
+
+    return dp[:, -1, -1]
+
+
+def get_adjustment_degrees(candidate_routes, reference_routes, symmetric_routes,
+                           gap=0.1):
+    """Return route-wise adjustment degree in [0, 1], 0 means unchanged."""
+    if candidate_routes.shape != reference_routes.shape:
+        raise ValueError(
+            "candidate_routes and reference_routes must have the same shape, "
+            f"got {candidate_routes.shape} and {reference_routes.shape}"
+        )
+
+    max_n_nodes = candidate_routes.shape[-1]
+    flat_candidates = candidate_routes.reshape(-1, max_n_nodes)
+    flat_references = reference_routes.reshape(-1, max_n_nodes)
+
+    cand_valid = flat_candidates > -1
+    ref_valid = flat_references > -1
+    pairwise_matches = flat_candidates[:, :, None] == flat_references[:, None, :]
+    valid_pairwise_matches = pairwise_matches & cand_valid[:, :, None] & ref_valid[:, None, :]
+    alignment_scores = needleman_wunsch(valid_pairwise_matches.to(torch.float32),
+                                        gap=gap)
+
+    if symmetric_routes:
+        reversed_refs = _reverse_padded_routes(flat_references)
+        reversed_valid = reversed_refs > -1
+        reversed_matches = flat_candidates[:, :, None] == reversed_refs[:, None, :]
+        valid_reversed_matches = reversed_matches & cand_valid[:, :, None] & \
+            reversed_valid[:, None, :]
+        reversed_scores = needleman_wunsch(
+            valid_reversed_matches.to(torch.float32), gap=gap)
+        alignment_scores = torch.maximum(alignment_scores, reversed_scores)
+
+    cand_lens = cand_valid.sum(dim=-1)
+    ref_lens = ref_valid.sum(dim=-1)
+    norm = torch.maximum(cand_lens, ref_lens).to(torch.float32)
+    match_score = max(1.0 - gap, 1e-6)
+    norm = norm * match_score
+    both_empty = (cand_lens == 0) & (ref_lens == 0)
+    norm[both_empty] = 1.0
+
+    similarities = alignment_scores / norm
+    similarities = similarities.clamp(min=0.0, max=1.0)
+    adjustment_degrees = 1.0 - similarities
+    adjustment_degrees[both_empty] = 0.0
+
+    return adjustment_degrees.reshape(candidate_routes.shape[:-1])
+
+
 def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5, 
                mod_steps_per_pass=2, shorten_prob=0.2, n_iterations=400, 
                n_type1_bees=None, n_type2_bees=None, silent=False, 
                force_linking_unlinked=False, bee_model=None, 
-               sum_writer=None):
+               sum_writer=None, adjustment_degree_weight=0.0,
+               adjustment_degree_gap=0.1):
     """Implementation of the method of  Nikolic and Teodorovic (2013).
     
     state -- A RouteGenBatchState object representing the initial state.
@@ -45,6 +129,10 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         so by default we make it half-and-half.
     silent -- if true, no tqdm output or printing
     bee_model -- if a torch model is provided, use it as the only bee type.
+    adjustment_degree_weight -- penalty weight for changing routes too much
+        relative to the original initialized network.
+    adjustment_degree_gap -- gap parameter used in sequence alignment when
+        computing route similarity.
     """
     if n_type1_bees is None:
         n_type1_bees = n_bees // 2
@@ -73,6 +161,9 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     best_networks = torch.full((batch_size, n_routes, max_n_nodes), -1,
                                 device=dev)
     best_networks[:, :, :init_network.shape[-1]] = init_network
+    reference_networks = best_networks.clone()
+    use_adjustment_penalty = adjustment_degree_weight > 0
+    route_count = max(float(n_routes.item()), 1.0)
 
     # expand state to networks
 
@@ -111,17 +202,25 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     # batch size x n_bees x n_routes x max_n_nodes
     bee_networks = best_networks[:, None].repeat(1, n_bees, 1, 1)
     # evaluate and record the reward of the initial network
-    bee_costs, bee_metrics = batched_cost_fn(bee_networks)
-    best_costs, best_idxs = bee_costs.min(1)
+    bee_raw_costs, bee_metrics = batched_cost_fn(bee_networks)
+    bee_adjustment_degrees = torch.zeros_like(bee_raw_costs)
+    bee_objective_costs = bee_raw_costs + \
+        adjustment_degree_weight * bee_adjustment_degrees
+    best_objective_costs, best_idxs = bee_objective_costs.min(1)
+    best_raw_costs = bee_raw_costs[batch_idxs, best_idxs]
     best_metrics = bee_metrics[batch_idxs, best_idxs]
+    best_adjustment_degrees = bee_adjustment_degrees[batch_idxs, best_idxs]
 
     if sum_writer is not None:
         # log the initial values of various metrics
         for name, vals in zip(metric_names, best_metrics.unbind(-1)):
             sum_writer.add_scalar(f'best {name}', vals.mean(), 0)
+        if use_adjustment_penalty:
+            sum_writer.add_scalar('best adjustment degree',
+                                  best_adjustment_degrees.mean(), 0)
 
     cost_history = torch.zeros((batch_size, n_iterations + 1), device=dev)
-    cost_history[:, 0] = best_costs
+    cost_history[:, 0] = best_raw_costs
 
     for iteration in tqdm(range(n_iterations), disable=silent):
         for pi in range(passes_per_it):
@@ -144,7 +243,10 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                 # unlike the original paper, choose routes uniformly at random
                 chosen_route_idxs = torch.randint(high=n_routes.item(), 
                                                   size=(batch_size, n_bees), 
-                                                  device=dev)                
+                                                  device=dev)
+                gather_idx = chosen_route_idxs[..., None, None]
+                gather_idx = gather_idx.expand(-1, -1, -1, max_n_nodes)
+                old_modified_routes = bee_networks.gather(2, gather_idx).squeeze(2)
                 new_bee_networks = \
                     get_mutants(bee_networks, chosen_route_idxs, n_type1_bees, 
                                 n_type2_bees, direct_sat_dmd, shorten_prob, 
@@ -152,35 +254,69 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                                 force_linking_unlinked, bee_model, rpc_model, 
                                 bee_states)
 
-                new_bee_costs, new_bee_metrics = \
+                new_bee_raw_costs, new_bee_metrics = \
                     batched_cost_fn(new_bee_networks)
 
-                better_idxs = new_bee_costs < bee_costs
+                if use_adjustment_penalty:
+                    reference_routes = reference_networks[:, None].expand(
+                        -1, n_bees, -1, -1).gather(2, gather_idx).squeeze(2)
+                    old_route_adjustments = get_adjustment_degrees(
+                        old_modified_routes, reference_routes,
+                        cost_obj.symmetric_routes,
+                        gap=adjustment_degree_gap,
+                    )
+                    new_modified_routes = new_bee_networks.gather(
+                        2, gather_idx).squeeze(2)
+                    new_route_adjustments = get_adjustment_degrees(
+                        new_modified_routes, reference_routes,
+                        cost_obj.symmetric_routes,
+                        gap=adjustment_degree_gap,
+                    )
+                    new_bee_adjustment_degrees = bee_adjustment_degrees + \
+                        (new_route_adjustments - old_route_adjustments) / route_count
+                else:
+                    new_bee_adjustment_degrees = bee_adjustment_degrees
+
+                new_bee_objective_costs = new_bee_raw_costs + \
+                    adjustment_degree_weight * new_bee_adjustment_degrees
+
+                better_idxs = new_bee_objective_costs < bee_objective_costs
                 bee_networks[better_idxs] = new_bee_networks[better_idxs]
-                bee_costs[better_idxs] = new_bee_costs[better_idxs]
+                bee_raw_costs[better_idxs] = new_bee_raw_costs[better_idxs]
+                bee_objective_costs[better_idxs] = \
+                    new_bee_objective_costs[better_idxs]
+                bee_adjustment_degrees[better_idxs] = \
+                    new_bee_adjustment_degrees[better_idxs]
                 bee_metrics[better_idxs] = new_bee_metrics[better_idxs]        
 
             # do "backward pass"
 
             # update the best solution found so far
-            current_best_cost, current_best_idx = bee_costs.min(1)
-            is_improvement = current_best_cost < best_costs
+            current_best_objective_cost, current_best_idx = \
+                bee_objective_costs.min(1)
+            is_improvement = current_best_objective_cost < best_objective_costs
             improvement_idx = current_best_idx[is_improvement]
-            best_costs[is_improvement] = current_best_cost[is_improvement]
+            best_objective_costs[is_improvement] = \
+                current_best_objective_cost[is_improvement]
             best_networks[is_improvement] = \
                 bee_networks[is_improvement, improvement_idx]
-            cost_history[:, iteration + 1] = best_costs
+            best_raw_costs[is_improvement] = \
+                bee_raw_costs[is_improvement, improvement_idx]
+            best_adjustment_degrees[is_improvement] = \
+                bee_adjustment_degrees[is_improvement, improvement_idx]
+            cost_history[:, iteration + 1] = best_raw_costs
             new_best = bee_metrics[is_improvement, improvement_idx]
             best_metrics[is_improvement] = new_best     
 
             # decide whether each bee is a recruiter or follower
-            max_bee_costs, _ = bee_costs.max(dim=1)
-            min_bee_costs, _ = bee_costs.min(dim=1)
+            max_bee_costs, _ = bee_objective_costs.max(dim=1)
+            min_bee_costs, _ = bee_objective_costs.min(dim=1)
             spread = max_bee_costs - min_bee_costs
             # avoid division by 0
             spread[spread == 0] = 1
 
-            qualities = (max_bee_costs[:, None] - bee_costs) / spread[:, None]
+            qualities = (max_bee_costs[:, None] - bee_objective_costs) / \
+                spread[:, None]
             min_quality, _ = qualities.min(1)
             follow_probs = (-qualities + min_quality[:, None]).exp()
             are_recruiters = follow_probs < torch.rand(n_bees, device=dev)
@@ -206,13 +342,21 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
 
             # update the networks and costs of the followers
             bee_networks = bee_networks[batch_idxs[:, None], recruiters]
-            bee_costs = bee_costs[batch_idxs[:, None], recruiters]
+            bee_raw_costs = bee_raw_costs[batch_idxs[:, None], recruiters]
+            bee_objective_costs = \
+                bee_objective_costs[batch_idxs[:, None], recruiters]
+            bee_adjustment_degrees = \
+                bee_adjustment_degrees[batch_idxs[:, None], recruiters]
             bee_metrics = bee_metrics[batch_idxs[:, None], recruiters]
 
         if sum_writer is not None:
             # log the various metrics
             for name, vals in zip(metric_names, best_metrics.unbind(-1)):
                 sum_writer.add_scalar(f'best {name}', vals.mean(), iteration+1)
+            if use_adjustment_penalty:
+                sum_writer.add_scalar('best adjustment degree',
+                                      best_adjustment_degrees.mean(),
+                                      iteration + 1)
 
     # return the best solution
     state.replace_routes(best_networks)
@@ -516,12 +660,16 @@ def main(cfg: DictConfig, tensors:dict):
 
     nt1b = cfg.get('n_type1_bees', None)
     nt2b = cfg.get('n_type2_bees', None)
+    adjustment_degree_weight = cfg.get('adjustment_degree_weight', 0.0)
+    adjustment_degree_gap = cfg.get('adjustment_degree_gap', 0.1)
     test_output = \
         lrnu.test_method(bee_colony, test_dl, cfg.eval, cfg.init, cost_obj, 
             sum_writer=sum_writer, silent=True, n_bees=cfg.n_bees,
             n_iterations=cfg.n_iterations, n_type1_bees=nt1b, n_type2_bees=nt2b,  
             device=DEVICE, bee_model=bee_model, return_routes=True,
-            force_linking_unlinked=force_linking_unlinked)
+            force_linking_unlinked=force_linking_unlinked,
+            adjustment_degree_weight=adjustment_degree_weight,
+            adjustment_degree_gap=adjustment_degree_gap)
     routes = test_output[-1]
     metrics = test_output[-2]
     unserved_demand = test_output[-3]

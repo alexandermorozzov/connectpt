@@ -3,6 +3,8 @@ n_type1_bees: 5
 n_iterations: 150
 batch_size: 10
 force_linking_unlinked: false
+adjustment_degree_weight: 0.0
+adjustment_degree_gap: 0.1
 
 defaults:
   - _self_
