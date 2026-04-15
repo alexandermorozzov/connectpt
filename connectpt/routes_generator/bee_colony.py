@@ -161,13 +161,32 @@ def get_adjustment_degrees(candidate_routes, reference_routes, symmetric_routes,
     )
 
 
+def get_adjustment_penalties(adjustment_degrees, objective='raw', target=0.2):
+    """Convert raw adjustment degrees into the penalty used in the objective."""
+    if objective == 'raw':
+        return adjustment_degrees
+    if objective == 'target':
+        if not 0.0 <= target <= 1.0:
+            raise ValueError(
+                f"adjustment_degree_target must be in [0, 1], got {target}"
+            )
+        target_tensor = adjustment_degrees.new_tensor(target)
+        return (adjustment_degrees - target_tensor).abs()
+    raise ValueError(
+        f"Unknown adjustment degree objective '{objective}'. "
+        "Expected 'raw' or 'target'."
+    )
+
+
 def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5, 
                mod_steps_per_pass=2, shorten_prob=0.2, n_iterations=400, 
                n_type1_bees=None, n_type2_bees=None, silent=False, 
                force_linking_unlinked=False, bee_model=None, 
                sum_writer=None, adjustment_degree_weight=0.0,
                adjustment_degree_gap=0.1,
-               adjustment_degree_mode='current'):
+               adjustment_degree_mode='current',
+               adjustment_degree_objective='raw',
+               adjustment_degree_target=0.2):
     """Implementation of the method of  Nikolic and Teodorovic (2013).
     
     state -- A RouteGenBatchState object representing the initial state.
@@ -194,6 +213,11 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     adjustment_degree_gap -- gap parameter used in sequence alignment when
         computing route similarity.
     adjustment_degree_mode -- one of "current" or "paper".
+    adjustment_degree_objective -- one of "raw" or "target".  "target"
+        optimizes the distance between the network's adjustment degree and
+        adjustment_degree_target instead of the raw adjustment itself.
+    adjustment_degree_target -- target adjustment value when using the
+        "target" objective.
     """
     if n_type1_bees is None:
         n_type1_bees = n_bees // 2
@@ -265,12 +289,18 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     # evaluate and record the reward of the initial network
     bee_raw_costs, bee_metrics = batched_cost_fn(bee_networks)
     bee_adjustment_degrees = torch.zeros_like(bee_raw_costs)
+    bee_adjustment_penalties = get_adjustment_penalties(
+        bee_adjustment_degrees,
+        objective=adjustment_degree_objective,
+        target=adjustment_degree_target,
+    )
     bee_objective_costs = bee_raw_costs + \
-        adjustment_degree_weight * bee_adjustment_degrees
+        adjustment_degree_weight * bee_adjustment_penalties
     best_objective_costs, best_idxs = bee_objective_costs.min(1)
     best_raw_costs = bee_raw_costs[batch_idxs, best_idxs]
     best_metrics = bee_metrics[batch_idxs, best_idxs]
     best_adjustment_degrees = bee_adjustment_degrees[batch_idxs, best_idxs]
+    best_adjustment_penalties = bee_adjustment_penalties[batch_idxs, best_idxs]
 
     if sum_writer is not None:
         # log the initial values of various metrics
@@ -279,6 +309,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         if use_adjustment_penalty:
             sum_writer.add_scalar('best adjustment degree',
                                   best_adjustment_degrees.mean(), 0)
+            sum_writer.add_scalar('best adjustment penalty',
+                                  best_adjustment_penalties.mean(), 0)
 
     cost_history = torch.zeros((batch_size, n_iterations + 1), device=dev)
     cost_history[:, 0] = best_raw_costs
@@ -340,8 +372,13 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                 else:
                     new_bee_adjustment_degrees = bee_adjustment_degrees
 
+                new_bee_adjustment_penalties = get_adjustment_penalties(
+                    new_bee_adjustment_degrees,
+                    objective=adjustment_degree_objective,
+                    target=adjustment_degree_target,
+                )
                 new_bee_objective_costs = new_bee_raw_costs + \
-                    adjustment_degree_weight * new_bee_adjustment_degrees
+                    adjustment_degree_weight * new_bee_adjustment_penalties
 
                 better_idxs = new_bee_objective_costs < bee_objective_costs
                 bee_networks[better_idxs] = new_bee_networks[better_idxs]
@@ -350,6 +387,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                     new_bee_objective_costs[better_idxs]
                 bee_adjustment_degrees[better_idxs] = \
                     new_bee_adjustment_degrees[better_idxs]
+                bee_adjustment_penalties[better_idxs] = \
+                    new_bee_adjustment_penalties[better_idxs]
                 bee_metrics[better_idxs] = new_bee_metrics[better_idxs]        
 
             # do "backward pass"
@@ -367,6 +406,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                 bee_raw_costs[is_improvement, improvement_idx]
             best_adjustment_degrees[is_improvement] = \
                 bee_adjustment_degrees[is_improvement, improvement_idx]
+            best_adjustment_penalties[is_improvement] = \
+                bee_adjustment_penalties[is_improvement, improvement_idx]
             cost_history[:, iteration + 1] = best_raw_costs
             new_best = bee_metrics[is_improvement, improvement_idx]
             best_metrics[is_improvement] = new_best     
@@ -410,6 +451,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                 bee_objective_costs[batch_idxs[:, None], recruiters]
             bee_adjustment_degrees = \
                 bee_adjustment_degrees[batch_idxs[:, None], recruiters]
+            bee_adjustment_penalties = \
+                bee_adjustment_penalties[batch_idxs[:, None], recruiters]
             bee_metrics = bee_metrics[batch_idxs[:, None], recruiters]
 
         if sum_writer is not None:
@@ -419,6 +462,9 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
             if use_adjustment_penalty:
                 sum_writer.add_scalar('best adjustment degree',
                                       best_adjustment_degrees.mean(),
+                                      iteration + 1)
+                sum_writer.add_scalar('best adjustment penalty',
+                                      best_adjustment_penalties.mean(),
                                       iteration + 1)
 
     # return the best solution
@@ -726,6 +772,8 @@ def main(cfg: DictConfig, tensors:dict):
     adjustment_degree_weight = cfg.get('adjustment_degree_weight', 0.0)
     adjustment_degree_gap = cfg.get('adjustment_degree_gap', 0.1)
     adjustment_degree_mode = cfg.get('adjustment_degree_mode', 'current')
+    adjustment_degree_objective = cfg.get('adjustment_degree_objective', 'raw')
+    adjustment_degree_target = cfg.get('adjustment_degree_target', 0.2)
     test_output = \
         lrnu.test_method(bee_colony, test_dl, cfg.eval, cfg.init, cost_obj, 
             sum_writer=sum_writer, silent=True, n_bees=cfg.n_bees,
@@ -734,7 +782,9 @@ def main(cfg: DictConfig, tensors:dict):
             force_linking_unlinked=force_linking_unlinked,
             adjustment_degree_weight=adjustment_degree_weight,
             adjustment_degree_gap=adjustment_degree_gap,
-            adjustment_degree_mode=adjustment_degree_mode)
+            adjustment_degree_mode=adjustment_degree_mode,
+            adjustment_degree_objective=adjustment_degree_objective,
+            adjustment_degree_target=adjustment_degree_target)
     routes = test_output[-1]
     metrics = test_output[-2]
     unserved_demand = test_output[-3]
