@@ -245,7 +245,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     n_routes = state.n_routes_to_plan
     best_networks = torch.full((batch_size, n_routes, max_n_nodes), -1,
                                 device=dev)
-    best_networks[:, :, :init_network.shape[-1]] = init_network
+    n_init_routes = init_network.shape[1]
+    best_networks[:, :n_init_routes, :init_network.shape[-1]] = init_network
     reference_networks = best_networks.clone()
     use_adjustment_penalty = adjustment_degree_weight > 0
     route_count = max(float(n_routes.item()), 1.0)
@@ -483,12 +484,29 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
     max_n_nodes = bee_networks.shape[3]
     gather_idx = gather_idx.expand(-1, -1, -1, max_n_nodes)
     modified_routes = bee_networks.gather(2, gather_idx).squeeze(2)
+    empty_routes = (modified_routes > -1).sum(-1) == 0
 
     n_bees = bee_networks.shape[1]
     scen_idxs = torch.randperm(n_bees, device=bee_networks.device)
     type1_idxs = scen_idxs[:n_type1]
     type2_idxs = scen_idxs[n_type1:n_type1 + n_type2]
     type3_idxs = scen_idxs[n_type1 + n_type2:]
+
+    remaining_state = None
+    if bee_model is None or (empty_routes.any() and force_linking_unlinked):
+        unsel_routes = tu.get_unselected_routes(bee_networks, chosen_route_idxs)
+        remaining_state = env_state.clone()
+        remaining_state.replace_routes(unsel_routes.flatten(0,1))
+
+    if empty_routes.any():
+        new_routes = get_new_route_variants(
+            modified_routes,
+            direct_sat_dmd,
+            shortest_paths,
+            force_linking_unlinked=force_linking_unlinked,
+            remaining_state=remaining_state,
+        )
+        modified_routes[empty_routes] = new_routes[empty_routes]
 
     # modify type 1 routes
     if bee_model is not None:
@@ -499,9 +517,6 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
         # ...and keep only the type 1 bee routes
         new_type1_routes = new_type1_networks[:, type1_idxs, -1]
     else:
-        unsel_routes = tu.get_unselected_routes(bee_networks, chosen_route_idxs)
-        remaining_state = env_state.clone()
-        remaining_state.replace_routes(unsel_routes.flatten(0,1))
         new_type1_routes = get_bee_1_variants(remaining_state, modified_routes,
                                               direct_sat_dmd, shortest_paths,
                                               force_linking_unlinked)
@@ -526,6 +541,50 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
 
     bee_networks.scatter_(2, gather_idx, new_routes[..., None, :])
     return bee_networks
+
+
+def get_new_route_variants(batch_bee_routes, direct_sat_dmd_mat, shortest_paths,
+                           force_linking_unlinked=False, remaining_state=None):
+    """Construct fresh routes for bees that selected empty route slots."""
+    batch_size, n_bees, max_n_nodes = batch_bee_routes.shape
+    dev = batch_bee_routes.device
+    n_nodes = direct_sat_dmd_mat.shape[-1] - 1
+
+    route_scores = direct_sat_dmd_mat[:, :-1, :-1].clamp_min(0).clone()
+    diag = torch.eye(n_nodes, device=dev, dtype=bool)
+    route_scores[:, diag] = 0
+
+    per_bee_scores = route_scores[:, None].expand(-1, n_bees, -1, -1).clone()
+
+    if force_linking_unlinked and remaining_state is not None:
+        candidate_routes = shortest_paths[:, None].expand(-1, n_bees, -1, -1, -1)
+        extends_if_needed = check_extensions_add_connections(
+            remaining_state.has_path,
+            candidate_routes.flatten(0, 1),
+        )
+        extends_if_needed = extends_if_needed.reshape(batch_size, n_bees, n_nodes, n_nodes)
+        filtered_scores = per_bee_scores * extends_if_needed
+        has_valid_extensions = filtered_scores.sum(dim=(-1, -2)) > 0
+        per_bee_scores[has_valid_extensions] = filtered_scores[has_valid_extensions]
+
+    flat_scores = per_bee_scores.reshape(batch_size * n_bees, -1)
+    off_diag = (~diag).reshape(1, -1).to(flat_scores.dtype)
+    no_demand = flat_scores.sum(-1) == 0
+    if no_demand.any():
+        flat_scores[no_demand] = off_diag.expand(no_demand.sum(), -1)
+
+    flat_choices = flat_scores.multinomial(1).squeeze(-1)
+    repeated_batch_idxs = torch.arange(batch_size, device=dev).repeat_interleave(n_bees)
+    starts = torch.div(flat_choices, n_nodes, rounding_mode='floor')
+    ends = flat_choices % n_nodes
+    new_routes = shortest_paths[repeated_batch_idxs, starts, ends]
+    new_routes = new_routes.reshape(batch_size, n_bees, -1)
+
+    pad_size = max_n_nodes - new_routes.shape[-1]
+    if pad_size > 0:
+        new_routes = torch.nn.functional.pad(new_routes, (0, pad_size), value=-1)
+
+    return new_routes
 
 
 def get_neural_variants(model, env_state, bee_networks, drop_route_idxs,

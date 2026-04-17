@@ -221,9 +221,9 @@ def test_method(method_fn, dataloader, eval_cfg, init_cfg, cost_obj,
                                    eval_cfg.max_route_len)
 
         init_network = init_from_cfg(state, init_cfg, routes_tensor)
-        assert init_network is None or init_network.shape[1] == eval_cfg.n_routes, \
+        assert init_network is None or init_network.shape[1] <= eval_cfg.n_routes, \
             "initial solution has wrong number of routes "\
-            f"{init_network.shape[1]}, should be {eval_cfg.n_routes}"
+            f"{init_network.shape[1]}, should be at most {eval_cfg.n_routes}"
 
         if method_fn is not None:
             state, cost_history = method_fn(state, cost_obj, silent=silent,

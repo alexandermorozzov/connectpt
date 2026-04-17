@@ -1,14 +1,17 @@
 # """
 # Python package boilerplate for IDU.
-
+#
 # This package serves as a boilerplate for developing Python packages
 # for Institute of Design and Urban Studies (IDU). It includes basic metadata
 # such as versioning, author information, and license details.
 # """
 
-import importlib
+from importlib.metadata import PackageNotFoundError, version
 
-__version__ = importlib.metadata.version("connectpt") # TODO поменять название в соответствии с pyproject.toml
+try:
+    __version__ = version("connectpt")
+except PackageNotFoundError:
+    __version__ = "0+unknown"
 # __author__ = "Vasilii Starikov"
 # __email__ = "vasilstar97@gmail.com"
 # __credits__ = []

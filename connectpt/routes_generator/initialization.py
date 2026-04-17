@@ -9,6 +9,37 @@ from .torch_utils import get_batch_tensor_from_routes, load_routes_tensor, \
 from .transit_time_estimator import RouteGenBatchState
 
 
+def prepare_init_network(init_network, batch_size, n_routes, device=None):
+    """Validate and broadcast an initial network tensor if needed."""
+    if init_network is None:
+        return None
+
+    if init_network.ndim != 3:
+        raise ValueError(
+            "Expected 3D tensor with shape "
+            f"(batch, n_routes, max_route_len), got {init_network.shape}"
+        )
+
+    if init_network.shape[0] == 1 and batch_size > 1:
+        init_network = init_network.expand(batch_size, -1, -1)
+    elif init_network.shape[0] != batch_size:
+        raise ValueError(
+            "Initial network batch size does not match evaluation batch size: "
+            f"{init_network.shape[0]} vs {batch_size}"
+        )
+
+    if init_network.shape[1] > n_routes:
+        raise ValueError(
+            "Initial network has too many routes: "
+            f"{init_network.shape[1]} vs allowed {n_routes}"
+        )
+
+    if device is not None and init_network.device != device:
+        init_network = init_network.to(device)
+
+    return init_network
+
+
 def init_from_cfg(state, init_cfg, routes_tensor):
     """Initializes the network according to the configuration.
     
@@ -20,21 +51,27 @@ def init_from_cfg(state, init_cfg, routes_tensor):
         The initial network.
     """
     if init_cfg is None:
-        # return torch.zeros((0, 0, 0), device=state.device, dtype=torch.long)
         return None
-    elif init_cfg.method == 'load':
-        return load_routes_tensor(init_cfg.path, state.device)
+
+    if init_cfg.method == 'load':
+        init_network = load_routes_tensor(init_cfg.path, state.device)
     elif init_cfg.method == 'tensor' and routes_tensor is not None:
-        assert routes_tensor.dim() == 3, \
-    f"Expected 3D tensor with shape (batch, n_routes, max_route_len), got {routes_tensor.shape}"
-        return routes_tensor.to(state.device)
+        init_network = routes_tensor
     elif init_cfg.method == 'john':
         alpha = init_cfg.get('alpha', state.alpha)
-        return john_init(state, alpha, init_cfg.prioritize_direct_connections)
+        init_network = john_init(state, alpha, init_cfg.prioritize_direct_connections)
     elif init_cfg.method == 'nikolic':
-        return nikolic_init(state)
+        init_network = nikolic_init(state)
     else:
         raise ValueError(f'Unknown initialization method: {init_cfg.method}')
+
+    max_routes = int(state.n_routes_to_plan.min().item())
+    return prepare_init_network(
+        init_network,
+        batch_size=state.batch_size,
+        n_routes=max_routes,
+        device=state.device,
+    )
 
 
 

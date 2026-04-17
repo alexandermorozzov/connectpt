@@ -391,6 +391,10 @@ class RouteGenBatchState:
                 if type(route) is list:
                     route = torch.tensor(route, device=self.device)
                 length = (route > -1).sum()
+                if length == 0:
+                    # empty placeholder route, e.g. an unfilled slot in a
+                    # partially initialized network
+                    continue
                 if length < 2:
                     # this is an invalid route
                     log.warn('invalid route!')
