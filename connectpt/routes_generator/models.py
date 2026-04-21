@@ -1251,6 +1251,15 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         # self.value_net = ValueNetScorer(self.embed_dim, self.nonlin_type, 
         #                                 self.dropout, n_halt_layers)
 
+    def clear_step_counts_log(self):
+        """Reset the per-route step-count log accumulated by forward/plan_new_route."""
+        self.route_step_counts_log = []
+
+    def _log_step_counts(self, counts: list):
+        if not hasattr(self, 'route_step_counts_log'):
+            self.route_step_counts_log = []
+        self.route_step_counts_log.extend(counts)
+
     def forward(self, state: RouteGenBatchState, greedy=False):
         # do a full rollout
         state = self.setup_planning(state)
@@ -1258,6 +1267,12 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         log.debug("starting route-generation loop")
         all_logits = []
         all_entropy = 0
+
+        # Track GNN calls per route using element 0 of the batch as the
+        # representative sample (works for any batch size).
+        _route_steps = []
+        _cur_steps = 0
+        _prev_n_finished = int(state.n_finished_routes[0].item())
 
         while not state.is_done().all():
             action, logits, entropy = self.step(state, greedy)
@@ -1269,10 +1284,22 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             all_logits.append(logits)
             all_entropy += entropy
 
+            _cur_steps += 1
+            _new_n = int(state.n_finished_routes[0].item())
+            while _new_n > _prev_n_finished:
+                _route_steps.append(_cur_steps)
+                _cur_steps = 0
+                _prev_n_finished += 1
+
+        self._log_step_counts(_route_steps)
+
         routes_tensor = tu.get_batch_tensor_from_routes(state.routes, 
                                                         state.device)
-        
-        logits = torch.stack(all_logits, dim=1)
+        if len(all_logits) == 0:
+            logits = torch.empty((state.batch_size, 0), device=state.device)
+            entropy = torch.zeros((state.batch_size,), device=state.device)
+        else:
+            logits = torch.stack(all_logits, dim=1)
         result = PlanResults(
             state=state, stop_logits=None,
             route_logits=logits, freq_logits=None, entropy=entropy, 
@@ -1283,6 +1310,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
     
     def plan_new_route(self, state: RouteGenBatchState, greedy=False, 
                        actions=None):
+        state = self.setup_planning(state)
         # generate the input batch
         encoding = self._encode_graph(state)
         init_n_routes = state.n_finished_routes
@@ -1295,6 +1323,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
                             device=state.device)
         all_logits = 0
         all_entropy = 0.0
+        _plan_steps_0 = 0   # GNN calls until element-0's route halts
+        _elem0_done = False
         while not ended.all():
             # call step, passing in the input batch
             if ext_actions_given:
@@ -1303,7 +1333,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
                 actions = actions[:, 1:]
             else:
                 action = None
-            action, logits, entropy = self.step(state, greedy, action, 
+            action, logits, entropy = self.step(state, greedy, action,
                                                 encoding)
 
             # sum the logits and entropy where a real action was taken
@@ -1318,12 +1348,18 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             # apply the action to the state
             state.shortest_path_action(action)
 
+            if not _elem0_done:
+                _plan_steps_0 += 1
+                if just_ended[0]:
+                    _elem0_done = True
+
             if not ext_actions_given:
                 # append the action to the collection
                 actions.append(action)
 
-        # return the updated state, the logit, and the actions
+        # log step count for the route just planned (element 0)
         if not ext_actions_given:
+            self._log_step_counts([_plan_steps_0])
             actions = torch.stack(actions, dim=1)
 
         return actions, all_logits, all_entropy
@@ -1351,7 +1387,11 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         # don't choose segments greater than the max route length
         path_lens = (path_seqs > -1).sum(dim=-1)
         current_route_lens = state.current_route_n_stops
-        post_ext_lens = current_route_lens[:, None, None] + path_lens
+        # When extending a non-empty route the chosen shortest path shares one
+        # endpoint with the route, so only path_len - 1 new stops are added.
+        overlap = (current_route_lens > 0)[:, None, None].to(path_lens.dtype)
+        added_path_lens = (path_lens - overlap).clamp_min(0)
+        post_ext_lens = current_route_lens[:, None, None] + added_path_lens
         exts_are_too_long = post_ext_lens > state.max_route_len[:, None, None]
         paths_are_invalid = exts_are_too_long | ~state.valid_terms_mat
 

@@ -178,15 +178,113 @@ def get_adjustment_penalties(adjustment_degrees, objective='raw', target=0.2):
     )
 
 
-def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5, 
-               mod_steps_per_pass=2, shorten_prob=0.2, n_iterations=400, 
-               n_type1_bees=None, n_type2_bees=None, silent=False, 
-               force_linking_unlinked=False, bee_model=None, 
-               sum_writer=None, adjustment_degree_weight=0.0,
+def _ensure_mutation_stats_bucket(mutation_counts_out, bucket_name):
+    if mutation_counts_out is None:
+        return None
+    bucket = mutation_counts_out.setdefault(bucket_name, {})
+    for type_name in ('type1', 'type2', 'type3', 'type4'):
+        bucket.setdefault(type_name, 0)
+    return bucket
+
+
+def _record_attempted_mutations(mutation_counts_out, *, n_type1, n_type2,
+                                n_type3, n_type4):
+    if mutation_counts_out is None:
+        return
+    attempted = _ensure_mutation_stats_bucket(mutation_counts_out, 'attempted')
+    increments = {
+        'type1': int(n_type1),
+        'type2': int(n_type2),
+        'type3': int(n_type3),
+        'type4': int(n_type4),
+    }
+    for type_name, inc in increments.items():
+        attempted[type_name] += inc
+        # Keep the legacy flat keys as aliases for attempted counts so older
+        # callers keep seeing the same numbers.
+        mutation_counts_out[type_name] = attempted[type_name]
+
+
+def _record_accepted_mutations(mutation_counts_out, mutation_types,
+                               accepted_mask):
+    if mutation_counts_out is None:
+        return
+    accepted = _ensure_mutation_stats_bucket(mutation_counts_out, 'accepted')
+    if mutation_types is None:
+        return
+
+    for type_idx, type_name in enumerate(('type1', 'type2', 'type3', 'type4'),
+                                         start=1):
+        type_mask = mutation_types == type_idx
+        if not type_mask.any():
+            continue
+        accepted[type_name] += int(accepted_mask[:, type_mask].sum().item())
+
+
+def _get_route_selection_weights(bee_networks, demand,
+                                 use_demand_weighted_route_selection=False):
+    """Return per-route sampling weights for choosing mutation targets.
+
+    When demand weighting is enabled, routes that directly satisfy less demand
+    get larger weights, so they are sampled more often but not deterministically.
+    """
+    batch_size, n_bees, n_routes, _ = bee_networks.shape
+    dev = bee_networks.device
+    weights = torch.ones((batch_size, n_bees, n_routes), dtype=torch.float32,
+                         device=dev)
+    if not use_demand_weighted_route_selection:
+        return weights
+
+    expanded_demand = demand[:, None].expand(-1, n_bees, -1, -1)
+    flat_expanded_demand = expanded_demand.flatten(0, 1)
+    flat_bee_networks = bee_networks.flatten(0, 1)
+    direct_demand = tu.aggr_edges_over_sequences(
+        flat_bee_networks,
+        flat_expanded_demand[..., None],
+    ).squeeze(-1)
+    direct_demand = direct_demand.reshape(batch_size, n_bees, n_routes)
+
+    # Turn "how much demand this route directly serves" into a "badness"
+    # score so worse-covered routes are sampled more often.
+    max_direct_demand = direct_demand.max(dim=-1, keepdim=True).values
+    weights = (max_direct_demand - direct_demand).clamp_min(0)
+    no_positive_weights = weights.sum(dim=-1) == 0
+    weights[no_positive_weights] = 1.0
+    return weights
+
+
+def _choose_route_indices(bee_networks, demand, n_routes,
+                          use_demand_weighted_route_selection=False):
+    """Sample one route index per bee for mutation."""
+    if not use_demand_weighted_route_selection:
+        return torch.randint(
+            high=int(n_routes.item()),
+            size=bee_networks.shape[:2],
+            device=bee_networks.device,
+        )
+
+    weights = _get_route_selection_weights(
+        bee_networks,
+        demand,
+        use_demand_weighted_route_selection=True,
+    )
+    flat_weights = weights.flatten(0, 1)
+    chosen_flat = flat_weights.multinomial(1).squeeze(-1)
+    return chosen_flat.reshape(bee_networks.shape[:2])
+
+
+def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
+               mod_steps_per_pass=2, shorten_prob=0.2, n_iterations=400,
+               n_type1_bees=None, n_type2_bees=None, n_type4_bees=0,
+               silent=False, force_linking_unlinked=False, bee_model=None,
+               sum_writer=None, mutation_counts_out=None,
+               adjustment_degree_weight=0.0,
                adjustment_degree_gap=0.1,
                adjustment_degree_mode='current',
                adjustment_degree_objective='raw',
-               adjustment_degree_target=0.2):
+               adjustment_degree_target=0.2,
+               ignore_type4_max_route_len=False,
+               use_demand_weighted_route_selection=False):
     """Implementation of the method of  Nikolic and Teodorovic (2013).
     
     state -- A RouteGenBatchState object representing the initial state.
@@ -218,13 +316,15 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         adjustment_degree_target instead of the raw adjustment itself.
     adjustment_degree_target -- target adjustment value when using the
         "target" objective.
+    use_demand_weighted_route_selection -- if True, choose routes for mutation
+        by sampling routes that directly satisfy less demand more often.
     """
     if n_type1_bees is None:
         n_type1_bees = n_bees // 2
     if n_type2_bees is None:
-        # assume no type-3 bees if not specified
-        n_type2_bees = n_bees - n_type1_bees
-    n_type3_bees = n_bees - n_type1_bees - n_type2_bees
+        # assume no type-3/4 bees if not specified
+        n_type2_bees = n_bees - n_type1_bees - n_type4_bees
+    n_type3_bees = n_bees - n_type1_bees - n_type2_bees - n_type4_bees
 
     if n_type3_bees > 0:
         # instantiate a random path-combining model
@@ -334,19 +434,32 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                 # chosen_route_idxs = flat_chosen_route_idxs.reshape(batch_size, 
                 #                                                    n_bees)                
 
-                # unlike the original paper, choose routes uniformly at random
-                chosen_route_idxs = torch.randint(high=n_routes.item(), 
-                                                  size=(batch_size, n_bees), 
-                                                  device=dev)
+                chosen_route_idxs = _choose_route_indices(
+                    bee_networks,
+                    demand,
+                    n_routes,
+                    use_demand_weighted_route_selection=
+                    use_demand_weighted_route_selection,
+                )
                 gather_idx = chosen_route_idxs[..., None, None]
                 gather_idx = gather_idx.expand(-1, -1, -1, max_n_nodes)
                 old_modified_routes = bee_networks.gather(2, gather_idx).squeeze(2)
-                new_bee_networks = \
-                    get_mutants(bee_networks, chosen_route_idxs, n_type1_bees, 
-                                n_type2_bees, direct_sat_dmd, shorten_prob, 
-                                street_node_neighbours, shortest_paths, 
-                                force_linking_unlinked, bee_model, rpc_model, 
-                                bee_states)
+                _record_attempted_mutations(
+                    mutation_counts_out,
+                    n_type1=n_type1_bees,
+                    n_type2=n_type2_bees,
+                    n_type3=n_type3_bees,
+                    n_type4=n_type4_bees,
+                )
+                new_bee_networks, mutation_types = \
+                    get_mutants(bee_networks, chosen_route_idxs, n_type1_bees,
+                                n_type2_bees, direct_sat_dmd, shorten_prob,
+                                street_node_neighbours, shortest_paths,
+                                force_linking_unlinked, bee_model, rpc_model,
+                                bee_states, n_type4=n_type4_bees,
+                                ignore_type4_max_route_len=
+                                ignore_type4_max_route_len,
+                                return_mutation_metadata=True)
 
                 new_bee_raw_costs, new_bee_metrics = \
                     batched_cost_fn(new_bee_networks)
@@ -382,6 +495,11 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                     adjustment_degree_weight * new_bee_adjustment_penalties
 
                 better_idxs = new_bee_objective_costs < bee_objective_costs
+                _record_accepted_mutations(
+                    mutation_counts_out,
+                    mutation_types,
+                    better_idxs,
+                )
                 bee_networks[better_idxs] = new_bee_networks[better_idxs]
                 bee_raw_costs[better_idxs] = new_bee_raw_costs[better_idxs]
                 bee_objective_costs[better_idxs] = \
@@ -475,8 +593,10 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
 
 def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
                 direct_sat_dmd, shorten_prob, street_node_neighbours,
-                shortest_paths, force_linking_unlinked, bee_model=None, 
-                rpc_model=None, env_state=None):
+                shortest_paths, force_linking_unlinked, bee_model=None,
+                rpc_model=None, env_state=None, n_type4=0,
+                ignore_type4_max_route_len=False,
+                return_mutation_metadata=False):
     bee_networks = bee_networks.clone()
 
     # flatten batch and bee dimensions
@@ -487,10 +607,18 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
     empty_routes = (modified_routes > -1).sum(-1) == 0
 
     n_bees = bee_networks.shape[1]
+    n_type3 = n_bees - n_type1 - n_type2 - n_type4
     scen_idxs = torch.randperm(n_bees, device=bee_networks.device)
     type1_idxs = scen_idxs[:n_type1]
     type2_idxs = scen_idxs[n_type1:n_type1 + n_type2]
-    type3_idxs = scen_idxs[n_type1 + n_type2:]
+    type3_idxs = scen_idxs[n_type1 + n_type2:n_type1 + n_type2 + n_type3]
+    type4_idxs = scen_idxs[n_type1 + n_type2 + n_type3:]
+    mutation_types = torch.zeros(n_bees, device=bee_networks.device,
+                                 dtype=torch.long)
+    mutation_types[type1_idxs] = 1
+    mutation_types[type2_idxs] = 2
+    mutation_types[type3_idxs] = 3
+    mutation_types[type4_idxs] = 4
 
     remaining_state = None
     if bee_model is None or (empty_routes.any() and force_linking_unlinked):
@@ -528,18 +656,38 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
                                           shorten_prob, street_node_neighbours)
     assert ((new_type2_routes > -1).sum(dim=-1) > 0).all()
 
-    # insert the modified routes in the new network
-    new_routes = torch.cat((new_type1_routes, new_type2_routes), 
-                            dim=1)
+    # Reassemble the selected-route mutations in the original bee order.
+    # Each mutation type is computed on a permuted bee subset, so concatenating
+    # by type would misalign routes and copy one bee's result into another.
+    new_routes = modified_routes.clone()
+    new_routes[:, type1_idxs] = new_type1_routes
+    new_routes[:, type2_idxs] = new_type2_routes
     if rpc_model is not None:
         # modify type 3 routes
         new_type3_networks = get_neural_variants(rpc_model, env_state,
                                                   bee_networks,
                                                   chosen_route_idxs)
         new_type3_routes = new_type3_networks[:, type3_idxs, -1]
-        new_routes = torch.cat((new_routes, new_type3_routes), dim=1)
+        new_routes[:, type3_idxs] = new_type3_routes
+
+    if bee_model is not None and n_type4 > 0:
+        # modify type 4 routes: single-step GNN extension of the chosen route
+        new_type4_all = get_neural_extend_variants(
+            bee_model,
+            env_state,
+            bee_networks,
+            chosen_route_idxs,
+            ignore_max_route_len=ignore_type4_max_route_len,
+        )
+        type4_gather = chosen_route_idxs[:, type4_idxs, None, None].expand(
+            -1, -1, -1, max_n_nodes)
+        new_type4_routes = new_type4_all[:, type4_idxs].gather(
+            2, type4_gather).squeeze(2)
+        new_routes[:, type4_idxs] = new_type4_routes
 
     bee_networks.scatter_(2, gather_idx, new_routes[..., None, :])
+    if return_mutation_metadata:
+        return bee_networks, mutation_types
     return bee_networks
 
 
@@ -585,6 +733,75 @@ def get_new_route_variants(batch_bee_routes, direct_sat_dmd_mat, shortest_paths,
         new_routes = torch.nn.functional.pad(new_routes, (0, pad_size), value=-1)
 
     return new_routes
+
+
+def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs,
+                               greedy=False, ignore_max_route_len=False):
+    """Extend chosen routes with a single GNN step instead of rebuilding them.
+
+    For each bee, the chosen route is set as the current in-progress route and
+    the model is asked for exactly one action (a path-segment extension or halt).
+    If the model halts the route stays unchanged; if it extends, the segment is
+    appended.
+    """
+    bee_dim = bee_networks.ndim == 4
+    if not bee_dim:
+        bee_networks = bee_networks.unsqueeze(1)
+        chosen_route_idxs = chosen_route_idxs.unsqueeze(1)
+
+    batch_size = bee_networks.shape[0]
+    n_bees = bee_networks.shape[1]
+    n_routes = bee_networks.shape[2]
+    max_n_nodes = bee_networks.shape[3]
+
+    gather_idx = chosen_route_idxs[..., None, None].expand(-1, -1, -1, max_n_nodes)
+    chosen_routes = bee_networks.gather(2, gather_idx).squeeze(2)
+    flat_chosen = chosen_routes.flatten(0, 1)
+
+    keep_mask = torch.ones(bee_networks.shape[:3], dtype=bool,
+                           device=bee_networks.device)
+    keep_mask.scatter_(2, chosen_route_idxs[..., None], False)
+    flat_kept = bee_networks[keep_mask].reshape(
+        batch_size * n_bees, n_routes - 1, max_n_nodes)
+
+    env_state.replace_routes(flat_kept)
+    env_state.set_current_routes(flat_chosen)
+    env_state = model.setup_planning(env_state)
+
+    pre_step_routes = env_state.current_routes.clone()
+
+    if ignore_max_route_len:
+        original_max_route_len = env_state.extra_data.max_route_len.clone()
+        env_state.extra_data.max_route_len = env_state.n_nodes.clone()
+        try:
+            action, _, _ = model.step(env_state, greedy=greedy)
+        finally:
+            env_state.extra_data.max_route_len = original_max_route_len
+    else:
+        action, _, _ = model.step(env_state, greedy=greedy)
+    halted = action[:, 0] == -1
+
+    env_state.shortest_path_action(action)
+
+    post_step_routes = env_state.current_routes.clone()
+
+    new_flat_routes = pre_step_routes.clone()
+    new_flat_routes[~halted] = post_step_routes[~halted]
+
+    pad_size = max_n_nodes - new_flat_routes.shape[-1]
+    if pad_size > 0:
+        new_flat_routes = torch.nn.functional.pad(
+            new_flat_routes, (0, pad_size), value=-1)
+
+    new_routes = new_flat_routes.reshape(batch_size, n_bees, max_n_nodes)
+
+    result_networks = bee_networks.clone()
+    result_networks.scatter_(2, gather_idx, new_routes.unsqueeze(2))
+
+    if not bee_dim:
+        result_networks = result_networks.squeeze(1)
+
+    return result_networks
 
 
 def get_neural_variants(model, env_state, bee_networks, drop_route_idxs,
@@ -819,6 +1036,9 @@ def main(cfg: DictConfig, tensors:dict):
     test_dl = DataLoader(test_ds, batch_size=cfg.batch_size)
 
     force_linking_unlinked = cfg.get('force_linking_unlinked', False)
+    ignore_type4_max_route_len = cfg.get('ignore_type4_max_route_len', False)
+    use_demand_weighted_route_selection = \
+        cfg.get('use_demand_weighted_route_selection', False)
 
     if not use_neural_bees:
         bee_model = None
@@ -843,7 +1063,10 @@ def main(cfg: DictConfig, tensors:dict):
             adjustment_degree_gap=adjustment_degree_gap,
             adjustment_degree_mode=adjustment_degree_mode,
             adjustment_degree_objective=adjustment_degree_objective,
-            adjustment_degree_target=adjustment_degree_target)
+            adjustment_degree_target=adjustment_degree_target,
+            ignore_type4_max_route_len=ignore_type4_max_route_len,
+            use_demand_weighted_route_selection=
+            use_demand_weighted_route_selection)
     routes = test_output[-1]
     metrics = test_output[-2]
     unserved_demand = test_output[-3]

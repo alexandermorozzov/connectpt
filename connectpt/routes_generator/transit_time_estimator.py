@@ -358,6 +358,82 @@ class RouteGenBatchState:
         if len(batch_index) > 0:
             self._clear_routes_helper(batch_index)
 
+    def set_current_routes(self, batch_current_routes):
+        """Seed the state with an in-progress route for each batch element."""
+        if self.has_current_route.any():
+            raise RuntimeError(
+                "Cannot seed current routes when the state already has an "
+                "active route"
+            )
+
+        if type(batch_current_routes) is list:
+            is_single_route = len(batch_current_routes) == 0 or \
+                isinstance(batch_current_routes[0], (int, np.integer)) or \
+                (isinstance(batch_current_routes[0], Tensor) and
+                 batch_current_routes[0].ndim == 0)
+            if is_single_route:
+                batch_current_routes = [batch_current_routes]
+            batch_current_routes, _ = tu.get_tensor_from_varlen_lists(
+                batch_current_routes,
+                self.device,
+            )
+
+        if batch_current_routes.ndim == 1:
+            batch_current_routes = batch_current_routes.unsqueeze(0)
+        elif batch_current_routes.ndim == 3 and batch_current_routes.shape[1] == 1:
+            batch_current_routes = batch_current_routes.squeeze(1)
+        elif batch_current_routes.ndim != 2:
+            raise ValueError(
+                "Expected current routes to have shape "
+                f"(batch, max_route_len), got {batch_current_routes.shape}"
+            )
+
+        if batch_current_routes.shape[0] == 1 and self.batch_size > 1:
+            batch_current_routes = batch_current_routes.expand(self.batch_size,
+                                                               -1)
+        elif batch_current_routes.shape[0] != self.batch_size:
+            raise ValueError(
+                "Current-route batch size does not match state batch size: "
+                f"{batch_current_routes.shape[0]} vs {self.batch_size}"
+            )
+
+        if batch_current_routes.shape[-1] > self.max_n_nodes:
+            raise ValueError(
+                "Current route is longer than the scenario node capacity: "
+                f"{batch_current_routes.shape[-1]} vs allowed "
+                f"{self.max_n_nodes}"
+            )
+
+        if batch_current_routes.shape[-1] < self.max_n_nodes:
+            pad_len = self.max_n_nodes - batch_current_routes.shape[-1]
+            batch_current_routes = torch.nn.functional.pad(
+                batch_current_routes, (0, pad_len), value=-1
+            )
+
+        batch_current_routes = batch_current_routes.to(
+            device=self.device,
+            dtype=torch.long,
+        )
+        invalid_nodes = (batch_current_routes < -1) | \
+            (batch_current_routes >= self.max_n_nodes)
+        invalid_nodes &= batch_current_routes != -1
+        if invalid_nodes.any():
+            raise ValueError("Current routes contain invalid node indices")
+
+        self.extra_data.current_routes = batch_current_routes
+        self.extra_data.current_route_time = \
+            self.get_total_route_time(batch_current_routes)
+
+        ncr_times_from_start = torch.zeros_like(self.current_routes,
+                                                dtype=torch.float32)
+        ncr_leg_times = tu.get_route_leg_times(self.current_routes,
+                                               self.drive_times,
+                                               self.mean_stop_time)
+        ncr_times_from_start[:, 1:] = ncr_leg_times.cumsum(dim=1)
+        self.extra_data.current_route_times_from_start = ncr_times_from_start
+
+        self._add_routes_to_tensors(batch_current_routes[:, None])
+
     def add_new_routes(self, batch_new_routes,
                        only_routes_with_demand_are_valid=False, 
                        invalid_directly_connected=False):

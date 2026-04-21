@@ -1,10 +1,12 @@
 import logging as log
+from numbers import Integral
 
 import torch
 from tqdm import tqdm
 import networkx as nx
 
-from .torch_utils import get_batch_tensor_from_routes, load_routes_tensor, \
+from .torch_utils import get_batch_tensor_from_routes, \
+    get_tensor_from_varlen_lists, load_routes_tensor, \
     aggr_edges_over_sequences, reconstruct_all_paths
 from .transit_time_estimator import RouteGenBatchState
 
@@ -38,6 +40,59 @@ def prepare_init_network(init_network, batch_size, n_routes, device=None):
         init_network = init_network.to(device)
 
     return init_network
+
+
+def prepare_current_routes(current_routes, batch_size, max_n_nodes, device=None):
+    """Validate and broadcast an in-progress route tensor if needed."""
+    if current_routes is None:
+        return None
+
+    if type(current_routes) is list:
+        is_single_route = len(current_routes) == 0 or \
+            isinstance(current_routes[0], Integral) or \
+            (isinstance(current_routes[0], torch.Tensor) and
+             current_routes[0].ndim == 0)
+        if is_single_route:
+            current_routes = [current_routes]
+        current_routes, _ = get_tensor_from_varlen_lists(current_routes,
+                                                         device=device)
+
+    if current_routes.ndim == 1:
+        current_routes = current_routes.unsqueeze(0)
+    elif current_routes.ndim == 3 and current_routes.shape[1] == 1:
+        current_routes = current_routes.squeeze(1)
+    elif current_routes.ndim != 2:
+        raise ValueError(
+            "Expected current_routes to have shape "
+            f"(batch, max_route_len), got {current_routes.shape}"
+        )
+
+    if current_routes.shape[0] == 1 and batch_size > 1:
+        current_routes = current_routes.expand(batch_size, -1)
+    elif current_routes.shape[0] != batch_size:
+        raise ValueError(
+            "Current-route batch size does not match evaluation batch size: "
+            f"{current_routes.shape[0]} vs {batch_size}"
+        )
+
+    if current_routes.shape[-1] > max_n_nodes:
+        raise ValueError(
+            "Current route is longer than the scenario node capacity: "
+            f"{current_routes.shape[-1]} vs allowed {max_n_nodes}"
+        )
+
+    if current_routes.shape[-1] < max_n_nodes:
+        pad_len = max_n_nodes - current_routes.shape[-1]
+        current_routes = torch.nn.functional.pad(current_routes, (0, pad_len),
+                                                 value=-1)
+
+    current_routes = current_routes.to(device=device, dtype=torch.long)
+    invalid_nodes = (current_routes < -1) | (current_routes >= max_n_nodes)
+    invalid_nodes &= current_routes != -1
+    if invalid_nodes.any():
+        raise ValueError("Current routes contain invalid node indices")
+
+    return current_routes
 
 
 def init_from_cfg(state, init_cfg, routes_tensor):

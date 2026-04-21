@@ -14,12 +14,13 @@ from .citygraph_dataset import CityGraphData, \
     get_dataset_from_config, STOP_KEY
 from .transit_time_estimator import RouteGenBatchState
 from . import utils as lrnu
-from .initialization import prepare_init_network
+from .initialization import prepare_current_routes, prepare_init_network
 from .torch_utils import get_batch_tensor_from_routes, dump_routes
 
 
 def sample_from_model(model, state, cost_obj, n_samples=20, 
-                      sample_batch_size=None, init_network=None):
+                      sample_batch_size=None, init_network=None,
+                      init_current_routes=None, revisit_routes=None):
     model.eval()
     # duplicate the state across the samples
     graph_data = state.graph_data
@@ -35,8 +36,20 @@ def sample_from_model(model, state, cost_obj, n_samples=20,
     all_plans = []
     all_costs = []
     sampled_init_network = None
+    sampled_current_routes = None
+    sampled_revisit_routes = None
     if init_network is not None:
         sampled_init_network = init_network.repeat(n_samples, 1, 1)
+    if init_current_routes is not None:
+        prepared_current_routes = prepare_current_routes(
+            init_current_routes,
+            batch_size=state.batch_size,
+            max_n_nodes=state.max_n_nodes,
+            device=state.device,
+        )
+        sampled_current_routes = prepared_current_routes.repeat(n_samples, 1)
+    if revisit_routes is not None:
+        sampled_revisit_routes = revisit_routes.repeat(n_samples, 1, 1)
 
     for ii in range(0, len(flat_sample_inputs), sample_batch_size):
         chunk = flat_sample_inputs[ii:ii+sample_batch_size]
@@ -62,6 +75,33 @@ def sample_from_model(model, state, cost_obj, n_samples=20,
             )
             if init_chunk.shape[1] > 0:
                 batch_state.add_new_routes(init_chunk)
+        if sampled_current_routes is not None:
+            current_chunk = prepare_current_routes(
+                sampled_current_routes[ii:ii+sample_batch_size],
+                batch_size=batch_state.batch_size,
+                max_n_nodes=batch_state.max_n_nodes,
+                device=batch_state.device,
+            )
+            if (current_chunk > -1).any():
+                batch_state.set_current_routes(current_chunk)
+        if sampled_revisit_routes is not None:
+            revisit_chunk = prepare_init_network(
+                sampled_revisit_routes[ii:ii+sample_batch_size],
+                batch_size=batch_state.batch_size,
+                n_routes=int(batch_state.n_routes_to_plan.min().item()),
+                device=batch_state.device,
+            )
+            if revisit_chunk.shape[1] > 0:
+                batch_state = _revisit_seeded_routes(
+                    model,
+                    batch_state,
+                    revisit_chunk,
+                    greedy=False,
+                )
+        if batch_state.is_done().all():
+            all_plans += batch_state.routes
+            all_costs.append(cost_obj(batch_state).cost)
+            continue
         with torch.no_grad():
             plan_out = model(batch_state, greedy=False)
             batch_costs = cost_obj(plan_out.state).cost
@@ -85,30 +125,92 @@ def sample_from_model(model, state, cost_obj, n_samples=20,
     return state
 
 
-def _seed_state_with_init_network(state, init_network):
-    if init_network is None:
+def _seed_state_with_init_network(state, init_network, init_current_routes=None):
+    if init_network is not None:
+        init_network = prepare_init_network(
+            init_network,
+            batch_size=state.batch_size,
+            n_routes=int(state.n_routes_to_plan.min().item()),
+            device=state.device,
+        )
+        if init_network.shape[1] > 0:
+            state.add_new_routes(init_network)
+
+    if init_current_routes is None:
         return state
 
-    init_network = prepare_init_network(
-        init_network,
+    init_current_routes = prepare_current_routes(
+        init_current_routes,
+        batch_size=state.batch_size,
+        max_n_nodes=state.max_n_nodes,
+        device=state.device,
+    )
+    if (init_current_routes > -1).any():
+        state.set_current_routes(init_current_routes)
+    return state
+
+
+def _revisit_seeded_routes(model, state, revisit_routes, greedy=False):
+    if revisit_routes is None:
+        return state
+
+    if not hasattr(model, "plan_new_route"):
+        raise ValueError(
+            "This model does not support revisiting seeded routes"
+        )
+
+    revisit_routes = prepare_init_network(
+        revisit_routes,
         batch_size=state.batch_size,
         n_routes=int(state.n_routes_to_plan.min().item()),
         device=state.device,
     )
-    if init_network.shape[1] > 0:
-        state.add_new_routes(init_network)
+    if revisit_routes.shape[1] == 0:
+        return state
+
+    for route_idx in range(revisit_routes.shape[1]):
+        route_batch = revisit_routes[:, route_idx]
+        has_route = (route_batch > -1).any(dim=-1)
+        if not has_route.any():
+            continue
+        if not has_route.all():
+            raise NotImplementedError(
+                "Revisiting seeded routes with uneven route counts across "
+                "the batch is not supported"
+            )
+        state.set_current_routes(route_batch)
+        model.plan_new_route(state, greedy=greedy)
+
     return state
 
 
 def eval_model(model, eval_dataloader, eval_cfg, cost_obj, sum_writer=None, 
                iter_num=0, n_samples=None, silent=False, 
                sample_batch_size=None, return_routes=False, device=None,
-               init_cfg=None, routes_tensor=None):
+               init_cfg=None, routes_tensor=None, current_routes_tensor=None,
+               revisit_routes_tensor=None):
     log.debug("evaluating our model on test set")
     model.eval()
+    if current_routes_tensor is not None and revisit_routes_tensor is not None:
+        raise ValueError(
+            "Only one of current_routes_tensor or revisit_routes_tensor may "
+            "be provided"
+        )
     if n_samples is None:
         def method_fn(state, *args, init_network=None, **kwargs):
-            state = _seed_state_with_init_network(state, init_network)
+            state = _seed_state_with_init_network(
+                state,
+                init_network,
+                init_current_routes=current_routes_tensor,
+            )
+            state = _revisit_seeded_routes(
+                model,
+                state,
+                revisit_routes_tensor,
+                greedy=True,
+            )
+            if state.is_done().all():
+                return state, None
             return model(state, greedy=True).state, None
     else:
         def method_fn(state, cost_obj, *args, init_network=None, **kwargs):
@@ -119,6 +221,8 @@ def eval_model(model, eval_dataloader, eval_cfg, cost_obj, sum_writer=None,
                 n_samples=n_samples,
                 sample_batch_size=sample_batch_size,
                 init_network=init_network,
+                init_current_routes=current_routes_tensor,
+                revisit_routes=revisit_routes_tensor,
             )
             return sampled_state, None
     cost, _, unserved_demand, metrics, routes = \
