@@ -25,6 +25,11 @@ AVG_TRANSFER_WAIT_TIME_S = 300
 UNSAT_PENALTY_EXTRA_S = 3000
 EPSILON = 1e-6
 
+ROUTE_ACTION_EXTEND = 0
+ROUTE_ACTION_TRIM_START = 1
+ROUTE_ACTION_TRIM_END = 2
+ROUTE_ACTION_HALT = 3
+
 
 def enforce_correct_batch(matrix, batch_size):
     if matrix.ndim == 2:
@@ -269,6 +274,180 @@ class RouteGenBatchState:
             ncr_times_from_start
 
         self._add_routes_to_tensors(updated_routes[:, None])
+
+    def apply_route_actions(self, action_kinds, path_indices):
+        """Apply typed route-planning actions.
+
+        The legacy action representation only had terminal pairs plus
+        ``(-1, -1)`` halt.  Trim actions can remove already-added edges, so we
+        rebuild route tensors after them to avoid stale connectivity.
+        """
+        if action_kinds is None:
+            self.shortest_path_action(path_indices)
+            return
+
+        action_kinds = action_kinds.to(device=self.device, dtype=torch.long)
+        path_indices = path_indices.to(device=self.device, dtype=torch.long)
+        if action_kinds.ndim != 1 or action_kinds.shape[0] != self.batch_size:
+            raise ValueError(
+                "Expected action_kinds to have shape (batch_size,), got "
+                f"{action_kinds.shape}"
+            )
+        if path_indices.shape != (self.batch_size, 2):
+            raise ValueError(
+                "Expected path_indices to have shape (batch_size, 2), got "
+                f"{path_indices.shape}"
+            )
+
+        is_halt = action_kinds == ROUTE_ACTION_HALT
+        uses_legacy_actions = (action_kinds == ROUTE_ACTION_EXTEND) | is_halt
+        if uses_legacy_actions.all():
+            legacy_actions = path_indices.clone()
+            legacy_actions[is_halt] = -1
+            self.shortest_path_action(legacy_actions)
+            return
+
+        valid_action_kinds = uses_legacy_actions | \
+            (action_kinds == ROUTE_ACTION_TRIM_START) | \
+            (action_kinds == ROUTE_ACTION_TRIM_END)
+        if not valid_action_kinds.all():
+            raise ValueError("Unknown route action kind")
+
+        updated_routes = self.current_routes.clone()
+        planning_already_done = self.is_done()
+        can_act = ~planning_already_done
+        extend_mask = (action_kinds == ROUTE_ACTION_EXTEND) & can_act
+        trim_start_mask = (action_kinds == ROUTE_ACTION_TRIM_START) & can_act
+        trim_end_mask = (action_kinds == ROUTE_ACTION_TRIM_END) & can_act
+        halt_mask = is_halt & can_act
+
+        if extend_mask.any():
+            ext_routes = self._get_routes_after_shortest_path_actions(
+                path_indices, active_mask=extend_mask
+            )
+            updated_routes[extend_mask] = ext_routes[extend_mask]
+
+        if trim_start_mask.any() or trim_end_mask.any():
+            self._apply_trim_actions_to_routes(
+                updated_routes, path_indices, trim_start_mask, trim_end_mask
+            )
+
+        for bi in range(self.batch_size):
+            if not planning_already_done[bi] and halt_mask[bi]:
+                route = updated_routes[bi].clone()
+                route = route[route > -1]
+                if len(route) > 0:
+                    self._finished_routes[bi].append(route)
+            if planning_already_done[bi] or halt_mask[bi]:
+                updated_routes[bi] = -1
+
+        finished_routes = [
+            [route.clone() for route in batch_routes]
+            for batch_routes in self._finished_routes
+        ]
+        self._replace_planned_routes(finished_routes, updated_routes)
+
+    def _get_routes_after_shortest_path_actions(self, path_indices,
+                                                active_mask=None):
+        if active_mask is None:
+            active_mask = torch.ones((self.batch_size,), dtype=torch.bool,
+                                     device=self.device)
+
+        path_seqs = self.get_shortest_path_sequences()
+        safe_indices = path_indices.clamp(min=0)
+        new_parts = path_seqs[self.batch_indices, safe_indices[:, 0],
+                              safe_indices[:, 1]]
+        new_len = self.current_routes.shape[-1]
+        n_pad = max(new_len - new_parts.shape[-1], 0)
+        new_parts = torch.nn.functional.pad(new_parts, (0, n_pad), value=-1)
+
+        starting = (self.current_routes[:, 0] == -1) & active_mask
+        extending = ~starting & active_mask
+        ends_at_cur_start = path_indices[:, 1] == self.current_routes[:, 0]
+        last_nodes = self.current_routes[self.batch_indices,
+                                         self.current_route_n_stops - 1]
+        starts_at_cur_end = path_indices[:, 0] == last_nodes
+        valid_action = ~active_mask | starting | ends_at_cur_start | \
+            starts_at_cur_end
+        assert valid_action.all(), "invalid action!"
+
+        chose_prev = extending & ends_at_cur_start
+        chose_next = extending & ~ends_at_cur_start
+
+        first_parts = new_parts * (starting | chose_prev)[:, None] + \
+            self.current_routes * (chose_next | ~active_mask)[:, None]
+        second_parts = new_parts * chose_next[:, None] + \
+            self.current_routes * chose_prev[:, None] + \
+            -1 * ~(chose_next | chose_prev)[:, None]
+        second_parts = second_parts[..., 1:]
+
+        updated_routes = torch.full((self.batch_size, self.max_n_nodes), -1,
+                                    device=self.device)
+        updated_routes[..., :first_parts.shape[-1]] = first_parts
+        first_part_lens = (first_parts > -1).sum(dim=-1)
+        scnd_part_lens = (second_parts > -1).sum(dim=-1)
+        new_route_lens = first_part_lens + scnd_part_lens
+        scnd_part_mask = tu.get_variable_slice_mask(
+            updated_routes, dim=1, froms=first_part_lens, tos=new_route_lens)
+        scnd_part_len_mask = tu.get_variable_slice_mask(
+            second_parts, dim=1, tos=scnd_part_lens)
+        updated_routes[scnd_part_mask] = second_parts[scnd_part_len_mask]
+        assert updated_routes.max() < self.max_n_nodes
+
+        updated_routes = updated_routes.clamp(min=-1)
+        updated_routes[~active_mask] = self.current_routes[~active_mask]
+        return updated_routes
+
+    def _apply_trim_actions_to_routes(self, updated_routes, path_indices,
+                                      trim_start_mask, trim_end_mask):
+        for bi in range(self.batch_size):
+            if not (trim_start_mask[bi] or trim_end_mask[bi]):
+                continue
+
+            route = updated_routes[bi]
+            route = route[route > -1]
+            if len(route) == 0:
+                raise ValueError("Cannot trim an empty current route")
+
+            if trim_start_mask[bi]:
+                new_start = path_indices[bi, 1]
+                matches = torch.where(route == new_start)[0]
+                if len(matches) == 0:
+                    raise ValueError("trim_start terminal is not on route")
+                start_idx = int(matches[0].item())
+                trimmed = route[start_idx:]
+            else:
+                new_end = path_indices[bi, 0]
+                matches = torch.where(route == new_end)[0]
+                if len(matches) == 0:
+                    raise ValueError("trim_end terminal is not on route")
+                end_idx = int(matches[-1].item())
+                trimmed = route[:end_idx + 1]
+
+            if len(trimmed) < self.min_route_len[bi]:
+                raise ValueError("Trim action would violate min_route_len")
+
+            updated_routes[bi] = -1
+            updated_routes[bi, :len(trimmed)] = trimmed
+
+    def _replace_planned_routes(self, finished_routes, current_routes):
+        self._clear_routes_helper()
+        if self.extra_data.fixed_routes.numel() > 0:
+            self._add_routes_to_tensors(self.extra_data.fixed_routes)
+
+        has_finished_routes = any(len(routes) > 0 for routes in finished_routes)
+        if has_finished_routes:
+            finished_tensor = tu.get_batch_tensor_from_routes(
+                finished_routes, self.device
+            )
+            self.add_new_routes(finished_tensor)
+        else:
+            self._update_route_data()
+
+        if current_routes.device != self.device:
+            current_routes = current_routes.to(self.device)
+        if (current_routes > -1).any():
+            self.set_current_routes(current_routes)
 
     def _clear_routes_helper(self, batch_index=None):
         if batch_index is None:

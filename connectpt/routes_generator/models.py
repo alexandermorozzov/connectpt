@@ -19,7 +19,14 @@ from .trunc_normal import TruncatedNormal
 
 from .citygraph_dataset import \
     DEMAND_KEY, STOP_KEY, STREET_KEY, ROUTE_KEY, CityGraphData
-from .transit_time_estimator import RouteGenBatchState
+from .transit_time_estimator import (
+    EPSILON,
+    ROUTE_ACTION_EXTEND,
+    ROUTE_ACTION_HALT,
+    ROUTE_ACTION_TRIM_END,
+    ROUTE_ACTION_TRIM_START,
+    RouteGenBatchState,
+)
 
 Q_FUNC_MODE = "q function"
 PLCY_MODE = "policy"
@@ -1775,6 +1782,459 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
         return updated_path_scores
     
+
+
+class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
+    """Path-combining generator with explicit route-trimming actions.
+
+    The legacy generator can start/extend/halt routes.  This subclass keeps
+    that behaviour but adds two extra action kinds for non-empty current routes:
+    trim_start keeps the suffix beginning at a chosen existing stop, and
+    trim_end keeps the prefix ending at a chosen existing stop.
+    """
+
+    supports_trim_actions = True
+
+    def __init__(self, *args, n_trim_scorer_layers=3,
+                 trim_scorer_hidden_dim=16, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.trim_action_feat_dim = 6
+        trim_scorer_indim = self.full_nodepair_dim + self.trim_action_feat_dim
+        self.trim_scorer = nn.Sequential(
+            FeatureNorm(trim_scorer_indim),
+            get_mlp(n_trim_scorer_layers, trim_scorer_hidden_dim,
+                    self.nonlin_type, self.dropout,
+                    in_dim=trim_scorer_indim, out_dim=1)
+        )
+
+    def forward(self, state: RouteGenBatchState, greedy=False):
+        state = self.setup_planning(state)
+
+        log.debug("starting trim route-generation loop")
+        all_logits = []
+        all_entropy = 0
+        _route_steps = []
+        _cur_steps = 0
+        _prev_n_finished = int(state.n_finished_routes[0].item())
+
+        while not state.is_done().all():
+            action_kinds, action, logits, entropy = \
+                self.step_route_action(state, greedy)
+            assert not state.is_done()[action_kinds != ROUTE_ACTION_HALT].any(), \
+                "non-null action when state is done!"
+            state.apply_route_actions(action_kinds, action)
+
+            all_logits.append(logits)
+            all_entropy += entropy
+
+            _cur_steps += 1
+            _new_n = int(state.n_finished_routes[0].item())
+            while _new_n > _prev_n_finished:
+                _route_steps.append(_cur_steps)
+                _cur_steps = 0
+                _prev_n_finished += 1
+
+        self._log_step_counts(_route_steps)
+
+        routes_tensor = tu.get_batch_tensor_from_routes(state.routes,
+                                                        state.device)
+        if len(all_logits) == 0:
+            logits = torch.empty((state.batch_size, 0), device=state.device)
+            entropy = torch.zeros((state.batch_size,), device=state.device)
+        else:
+            logits = torch.stack(all_logits, dim=1)
+        return PlanResults(
+            state=state, stop_logits=None,
+            route_logits=logits, freq_logits=None, entropy=entropy,
+            stops_tensor=None, routes_tensor=routes_tensor, freqs_tensor=None,
+            stop_est_vals=None, route_est_vals=None, freq_est_vals=None
+        )
+
+    def plan_new_route(self, state: RouteGenBatchState, greedy=False,
+                       actions=None, action_kinds=None):
+        state = self.setup_planning(state)
+        encoding = self._encode_graph(state)
+
+        actions_given = actions is not None
+        kinds_given = action_kinds is not None
+        if not actions_given:
+            actions = []
+            action_kinds_log = []
+
+        ended = torch.zeros((state.batch_size,), dtype=torch.bool,
+                            device=state.device)
+        all_logits = 0
+        all_entropy = 0.0
+        _plan_steps_0 = 0
+        _elem0_done = False
+        while not ended.all():
+            if actions_given:
+                action = actions[:, 0]
+                actions = actions[:, 1:]
+                if kinds_given:
+                    step_kinds = action_kinds[:, 0]
+                    action_kinds = action_kinds[:, 1:]
+                else:
+                    step_kinds = None
+            else:
+                action = None
+                step_kinds = None
+
+            step_kinds, action, logits, entropy = self.step_route_action(
+                state, greedy, action, encoding, step_kinds
+            )
+
+            all_logits += logits * (~ended)
+            all_entropy += entropy * (~ended)
+            just_ended = step_kinds == ROUTE_ACTION_HALT
+            ended = ended | just_ended
+            step_kinds[ended] = ROUTE_ACTION_HALT
+            action[ended] = -1
+
+            state.apply_route_actions(step_kinds, action)
+
+            if not _elem0_done:
+                _plan_steps_0 += 1
+                if just_ended[0]:
+                    _elem0_done = True
+
+            if not actions_given:
+                actions.append(action)
+                action_kinds_log.append(step_kinds)
+
+        if not actions_given:
+            self._log_step_counts([_plan_steps_0])
+            actions = torch.stack(actions, dim=1)
+            self.last_route_action_kinds = torch.stack(action_kinds_log, dim=1)
+
+        return actions, all_logits, all_entropy
+
+    def step(self, state: RouteGenBatchState, greedy=False, actions=None,
+             precalc_data=None):
+        action_kinds, actions, logits, entropy = self.step_route_action(
+            state, greedy, actions, precalc_data
+        )
+        selected_trim = (action_kinds == ROUTE_ACTION_TRIM_START) | \
+            (action_kinds == ROUTE_ACTION_TRIM_END)
+        if selected_trim.any():
+            raise RuntimeError(
+                "TrimPathCombiningRouteGenerator.step() cannot represent "
+                "trim actions in the legacy terminal-pair API. Use "
+                "step_route_action() and RouteGenBatchState.apply_route_actions()."
+            )
+        actions = actions.clone()
+        actions[action_kinds == ROUTE_ACTION_HALT] = -1
+        return actions, logits, entropy
+
+    def step_route_action(self, state: RouteGenBatchState, greedy=False,
+                          actions=None, precalc_data=None,
+                          action_kinds=None):
+        """Take one typed route action for the given state."""
+        log.debug("stepping with trim actions")
+
+        if precalc_data is None:
+            node_descs, node_pad_mask, np_embeds, path_scores = \
+                self._encode_graph(state)
+        else:
+            node_descs, node_pad_mask, np_embeds, path_scores = precalc_data
+
+        batch_size = state.batch_size
+        path_seqs = state.get_shortest_path_sequences()
+        path_lens = (path_seqs > -1).sum(dim=-1)
+        current_route_lens = state.current_route_n_stops
+        overlap = (current_route_lens > 0)[:, None, None].to(path_lens.dtype)
+        added_path_lens = (path_lens - overlap).clamp_min(0)
+        post_ext_lens = current_route_lens[:, None, None] + added_path_lens
+        exts_are_too_long = post_ext_lens > state.max_route_len[:, None, None]
+        paths_are_invalid = exts_are_too_long | ~state.valid_terms_mat
+
+        if self.max_act_len is not None:
+            path_too_long = path_lens > self.max_act_len
+            paths_are_invalid = paths_are_invalid | path_too_long
+
+        if self.force_linking_unlinked:
+            extends_coverage_if_needed = check_extensions_add_connections(
+                state.has_path, path_seqs)
+            paths_are_invalid |= ~extends_coverage_if_needed
+
+        path_scores = self.set_invalid_scores_to_fmin(path_scores,
+                                                      ~paths_are_invalid)
+        trim_np_embeds = np_embeds
+
+        starting = ~state.is_done() & (current_route_lens == 0)
+
+        padding = (0, 1, 0, 1, 0, 0)
+        drive_times = torch.nn.functional.pad(state.drive_times, padding)
+        padding = (0, 0) + padding
+        np_embeds = torch.nn.functional.pad(np_embeds, padding)
+        are_on_routes = torch.zeros((batch_size, state.max_n_nodes + 1),
+                                    device=state.device).bool()
+        batch_idxs = state.batch_indices
+        are_on_routes[batch_idxs[:, None], state.current_routes] = True
+        are_on_routes[:, -1] = False
+        getext_args = (state, current_route_lens, are_on_routes, path_seqs,
+                       np_embeds, drive_times, path_scores, path_lens,
+                       paths_are_invalid)
+        prev_scores, prev_valid = self._get_extension_scores(
+            *getext_args, before_or_after='before')
+        next_scores, next_valid = self._get_extension_scores(
+            *getext_args, before_or_after='after')
+
+        ext_valid = prev_valid | next_valid
+        ext_scores = prev_scores * prev_valid + next_scores * next_valid + \
+            TORCH_FMIN * ~ext_valid
+        start_scores = self._update_path_scores(state, path_scores, path_lens,
+                                                state.drive_times)
+
+        trim_start_scores, trim_start_valid = self._get_trim_action_scores(
+            state, trim_np_embeds, trim_start=True)
+        trim_end_scores, trim_end_valid = self._get_trim_action_scores(
+            state, trim_np_embeds, trim_start=False)
+
+        if self.force_linking_unlinked:
+            not_fully_linked = ~(state.has_path.all(-1).all(-1))
+            trim_start_scores[not_fully_linked] = TORCH_FMIN
+            trim_end_scores[not_fully_linked] = TORCH_FMIN
+            trim_start_valid[not_fully_linked] = False
+            trim_end_valid[not_fully_linked] = False
+
+        no_route_action_yet = torch.zeros((batch_size,), dtype=torch.bool,
+                                          device=state.device)
+        route_is_done = state.is_done()
+        chose_halt = route_is_done.clone()
+        corh_logit = torch.zeros((batch_size,), device=state.device)
+        corh_ent = torch.zeros((batch_size,), device=state.device)
+
+        extending = ~starting & ~route_is_done
+        xtnding_exp = extending[:, None, None]
+        ppe_scores = start_scores * ~xtnding_exp + ext_scores * xtnding_exp
+        ppe_valid = (~paths_are_invalid) * ~xtnding_exp + ext_valid * xtnding_exp
+        ppe_valid = ppe_valid.bool()
+
+        flat_extend_scores = ppe_scores.reshape(batch_size, -1)
+        flat_extend_valid = ppe_valid.reshape(batch_size, -1)
+        flat_trim_start_scores = trim_start_scores.reshape(batch_size, -1)
+        flat_trim_start_valid = trim_start_valid.reshape(batch_size, -1)
+        flat_trim_end_scores = trim_end_scores.reshape(batch_size, -1)
+        flat_trim_end_valid = trim_end_valid.reshape(batch_size, -1)
+        flat_route_scores = torch.cat((
+            flat_extend_scores,
+            flat_trim_start_scores,
+            flat_trim_end_scores,
+        ), dim=-1)
+        flat_route_valid = torch.cat((
+            flat_extend_valid,
+            flat_trim_start_valid,
+            flat_trim_end_valid,
+        ), dim=-1)
+        no_route_action_yet = ~flat_route_valid.any(-1)
+
+        halt_scores = self.halt_scorer(state, node_descs, state.current_routes,
+                                       state.current_route_time, node_pad_mask)
+        if self.force_linking_unlinked:
+            not_fully_linked = ~(state.has_path.all(-1).all(-1))
+            halt_scores[not_fully_linked] = TORCH_FMIN
+
+        halt_scores[current_route_lens < state.min_route_len] = TORCH_FMIN
+        old_route_is_done = state.is_done() | no_route_action_yet
+        halt_scores[old_route_is_done] = TORCH_FMAX
+
+        if self.serial_halting:
+            continue_scores = -halt_scores
+            cont_or_halt = torch.cat((continue_scores, halt_scores), dim=-1)
+
+            given_halt_actions = None
+            if actions is not None:
+                action_kinds = self._coerce_action_kinds(actions, action_kinds,
+                                                         state.device)
+                given_halt_actions = \
+                    (action_kinds == ROUTE_ACTION_HALT).to(torch.long)
+
+            halt, corh_logit, corh_ent = select(cont_or_halt, not greedy,
+                                                self.temperature,
+                                                selection=given_halt_actions)
+            assert (corh_logit > TORCH_FMIN).all(), "halt score is too low!"
+            corh_logit = corh_logit.squeeze(1)
+            chose_halt = halt.squeeze(1).bool()
+            route_is_done = old_route_is_done | chose_halt
+        else:
+            route_is_done = old_route_is_done
+
+        if not self.serial_halting:
+            flat_route_scores = torch.cat((flat_route_scores, halt_scores),
+                                          dim=-1)
+            halt_idx = flat_route_scores.shape[-1] - 1
+
+        given_route_actions = None
+        if actions is not None:
+            action_kinds = self._coerce_action_kinds(actions, action_kinds,
+                                                     state.device)
+            given_route_actions = self._encode_route_action_selection(
+                state, actions, action_kinds
+            )
+            if self.serial_halting:
+                given_route_actions[route_is_done] = 0
+            else:
+                given_route_actions[route_is_done] = halt_idx
+                given_route_actions[action_kinds == ROUTE_ACTION_HALT] = halt_idx
+
+        flat_idxs, route_logit, route_ent = select(
+            flat_route_scores, not greedy, self.temperature,
+            selection=given_route_actions
+        )
+        flat_idxs = flat_idxs.squeeze(-1)
+        route_logit = route_logit.squeeze(-1)
+
+        if self.serial_halting:
+            route_logit[chose_halt] = 0.0
+            route_ent[chose_halt] = 0.0
+        else:
+            chose_halt = flat_idxs == halt_idx
+            route_is_done = route_is_done | chose_halt
+
+        assert ((route_logit > TORCH_FMIN) | route_is_done).all()
+
+        action_kinds, folded_idxs = self._decode_route_action_selection(
+            state, flat_idxs
+        )
+        action_kinds[route_is_done] = ROUTE_ACTION_HALT
+        folded_idxs[route_is_done] = -1
+
+        if self.serial_halting:
+            logits = corh_logit + route_logit
+            entropy = corh_ent + route_ent
+        else:
+            logits = route_logit
+            entropy = route_ent
+
+        return action_kinds, folded_idxs, logits, entropy
+
+    def _coerce_action_kinds(self, actions, action_kinds, device):
+        if action_kinds is not None:
+            return action_kinds.to(device=device, dtype=torch.long)
+
+        inferred = torch.full((actions.shape[0],), ROUTE_ACTION_EXTEND,
+                              dtype=torch.long, device=device)
+        inferred[actions[:, 0] < 0] = ROUTE_ACTION_HALT
+        return inferred
+
+    def _encode_route_action_selection(self, state, actions, action_kinds):
+        n_nodes = state.max_n_nodes
+        n_node_pairs = n_nodes * n_nodes
+        safe_actions = actions.clamp(min=0)
+        pair_idxs = safe_actions[:, 0] * n_nodes + safe_actions[:, 1]
+        selection = pair_idxs.clone()
+        selection[action_kinds == ROUTE_ACTION_TRIM_START] = \
+            n_node_pairs + pair_idxs[action_kinds == ROUTE_ACTION_TRIM_START]
+        selection[action_kinds == ROUTE_ACTION_TRIM_END] = \
+            2 * n_node_pairs + pair_idxs[action_kinds == ROUTE_ACTION_TRIM_END]
+        return selection
+
+    def _decode_route_action_selection(self, state, flat_idxs):
+        n_nodes = state.max_n_nodes
+        n_node_pairs = n_nodes * n_nodes
+        action_kinds = torch.full_like(flat_idxs, ROUTE_ACTION_EXTEND)
+
+        trim_start = (flat_idxs >= n_node_pairs) & \
+            (flat_idxs < 2 * n_node_pairs)
+        trim_end = (flat_idxs >= 2 * n_node_pairs) & \
+            (flat_idxs < 3 * n_node_pairs)
+        action_kinds[trim_start] = ROUTE_ACTION_TRIM_START
+        action_kinds[trim_end] = ROUTE_ACTION_TRIM_END
+
+        pair_idxs = flat_idxs % n_node_pairs
+        from_idxs = torch.div(pair_idxs, n_nodes, rounding_mode='floor')
+        to_idxs = pair_idxs % n_nodes
+        folded_idxs = torch.stack((from_idxs, to_idxs), dim=-1)
+        return action_kinds, folded_idxs
+
+    def _get_trim_action_scores(self, state, nodepair_embeds,
+                                trim_start=True):
+        batch_size = state.batch_size
+        scores = torch.full((batch_size, state.max_n_nodes, state.max_n_nodes),
+                            TORCH_FMIN, device=state.device,
+                            dtype=nodepair_embeds.dtype)
+        valid = torch.zeros_like(scores, dtype=torch.bool)
+        features = torch.zeros(
+            (batch_size, state.max_n_nodes, state.max_n_nodes,
+             self.trim_action_feat_dim),
+            device=state.device,
+        )
+
+        for bi in range(batch_size):
+            route = state.current_routes[bi]
+            route = route[route > -1]
+            route_len = len(route)
+            if route_len <= state.min_route_len[bi]:
+                continue
+
+            min_len = int(state.min_route_len[bi].item())
+            max_len = max(int(state.max_route_len[bi].item()), 1)
+            route_time = state.current_route_time[bi].clamp_min(EPSILON)
+            times_from_start = state.current_route_times_from_start[bi]
+
+            if trim_start:
+                old_start = route[0]
+                for route_pos in range(1, route_len):
+                    remaining_len = route_len - route_pos
+                    if remaining_len < min_len:
+                        continue
+                    new_start = route[route_pos]
+                    removed_time = times_from_start[route_pos]
+                    remaining_time = route_time - removed_time
+                    scores_from = old_start
+                    scores_to = new_start
+                    direction_flag = 0.0
+                    removed_len = route_pos
+                    self._write_trim_features(
+                        features, valid, bi, scores_from, scores_to,
+                        removed_len, remaining_len, route_len, max_len,
+                        removed_time, remaining_time, route_time,
+                        direction_flag
+                    )
+            else:
+                old_end = route[-1]
+                for route_pos in range(route_len - 1):
+                    remaining_len = route_pos + 1
+                    if remaining_len < min_len:
+                        continue
+                    new_end = route[route_pos]
+                    remaining_time = times_from_start[route_pos]
+                    removed_time = route_time - remaining_time
+                    scores_from = new_end
+                    scores_to = old_end
+                    direction_flag = 1.0
+                    removed_len = route_len - remaining_len
+                    self._write_trim_features(
+                        features, valid, bi, scores_from, scores_to,
+                        removed_len, remaining_len, route_len, max_len,
+                        removed_time, remaining_time, route_time,
+                        direction_flag
+                    )
+
+        if valid.any():
+            trim_inputs = torch.cat((nodepair_embeds, features), dim=-1)
+            scored = self.trim_scorer(trim_inputs[valid]).squeeze(-1)
+            scores[valid] = scored
+        return scores, valid
+
+    def _write_trim_features(self, features, valid, batch_idx, from_node,
+                             to_node, removed_len, remaining_len, route_len,
+                             max_len, removed_time, remaining_time,
+                             route_time, direction_flag):
+        features[batch_idx, from_node, to_node] = torch.stack((
+            torch.as_tensor(removed_len / route_len,
+                            device=features.device, dtype=features.dtype),
+            torch.as_tensor(remaining_len / max_len,
+                            device=features.device, dtype=features.dtype),
+            torch.as_tensor(route_len / max_len,
+                            device=features.device, dtype=features.dtype),
+            removed_time / route_time,
+            remaining_time / route_time,
+            torch.as_tensor(direction_flag, device=features.device,
+                            dtype=features.dtype),
+        ))
+        valid[batch_idx, from_node, to_node] = True
 
 
 class RandomPathCombiningRouteGenerator(PathCombiningRouteGenerator):

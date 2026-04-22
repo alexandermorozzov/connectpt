@@ -1,0 +1,11 @@
+type: TrimPathCombiningRouteGenerator
+kwargs:
+  n_nodepair_layers: 3
+  n_pathscorer_layers: 3
+  pathscorer_hidden_dim: 16
+  n_trim_scorer_layers: 3
+  trim_scorer_hidden_dim: 16
+  n_halt_layers: 3
+  halt_scorer_type: "endpoints"
+  # n_halt_heads: 4
+  serial_halting: true

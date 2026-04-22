@@ -65,6 +65,10 @@ from .transit_time_estimator import (
     MyCostModule,
     MultiObjectiveCostModule,
     NikolicCostModule,
+    ROUTE_ACTION_EXTEND,
+    ROUTE_ACTION_HALT,
+    ROUTE_ACTION_TRIM_END,
+    ROUTE_ACTION_TRIM_START,
     get_cost_module_from_cfg,
 )
 
@@ -99,6 +103,7 @@ from .inductive_route_learning import (
 # === Models & Architectures ===
 from .models import (
     PathCombiningRouteGenerator,
+    TrimPathCombiningRouteGenerator,
     RandomPathCombiningRouteGenerator,
     UnbiasedPathCombiner,
     NodeWalker,

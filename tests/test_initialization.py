@@ -7,9 +7,14 @@ from connectpt.routes_generator.initialization import (
     prepare_current_routes,
     prepare_init_network,
 )
-from connectpt.routes_generator.models import PathCombiningRouteGenerator
+from connectpt.routes_generator.models import (
+    PathCombiningRouteGenerator,
+    TrimPathCombiningRouteGenerator,
+)
 from connectpt.routes_generator.transit_time_estimator import (
     MyCostModule,
+    ROUTE_ACTION_TRIM_END,
+    ROUTE_ACTION_TRIM_START,
     RouteGenBatchState,
 )
 
@@ -60,6 +65,43 @@ class FakePlanNewRouteModel:
         logits = torch.zeros(state.batch_size, device=state.device)
         entropy = torch.zeros(state.batch_size, device=state.device)
         return halt, logits, entropy
+
+    def _log_step_counts(self, counts):
+        pass
+
+
+class IdentityGraphNet(torch.nn.Module):
+    in_node_dim = 2
+    in_edge_dim = 14
+    gives_edge_features = False
+
+    def forward(self, data):
+        return data.x
+
+
+def make_line_state(n_nodes=4, n_routes_to_plan=1, min_route_len=2,
+                    max_route_len=4):
+    node_locs = torch.stack((
+        torch.arange(n_nodes, dtype=torch.float32),
+        torch.zeros(n_nodes, dtype=torch.float32),
+    ), dim=-1)
+    street_adj = torch.full((n_nodes, n_nodes), float("inf"))
+    street_adj.fill_diagonal_(0.0)
+    for node_idx in range(n_nodes - 1):
+        street_adj[node_idx, node_idx + 1] = 1.0
+        street_adj[node_idx + 1, node_idx] = 1.0
+    demand = torch.zeros((n_nodes, n_nodes), dtype=torch.float32)
+    demand[0, n_nodes - 1] = 5.0
+    demand[n_nodes - 1, 0] = 5.0
+    graph = CityGraphData.from_tensors(node_locs, street_adj, demand,
+                                       pos_only=False)
+    return RouteGenBatchState(
+        graph,
+        MyCostModule(),
+        n_routes_to_plan=n_routes_to_plan,
+        min_route_len=min_route_len,
+        max_route_len=max_route_len,
+    )
 
 
 def test_prepare_init_network_broadcasts_single_batch():
@@ -198,6 +240,68 @@ def test_set_current_routes_can_continue_and_finalize_route():
     assert state.n_routes_left_to_plan.item() == 0
     assert len(state.routes[0]) == 1
     assert state.routes[0][0].tolist() == [0, 1, 2]
+
+
+def test_route_state_trim_actions_rebuild_current_route_graph():
+    state = make_line_state(n_nodes=4, max_route_len=4)
+    state.set_current_routes([0, 1, 2, 3])
+
+    action_kinds = torch.tensor([ROUTE_ACTION_TRIM_START], dtype=torch.long)
+    actions = torch.tensor([[0, 2]], dtype=torch.long)
+    state.apply_route_actions(action_kinds, actions)
+
+    assert state.current_routes[0, :2].tolist() == [2, 3]
+    assert torch.isinf(state.route_mat[0, 0, 1])
+    assert torch.isfinite(state.route_mat[0, 2, 3])
+
+    state = make_line_state(n_nodes=4, max_route_len=4)
+    state.set_current_routes([0, 1, 2, 3])
+
+    action_kinds = torch.tensor([ROUTE_ACTION_TRIM_END], dtype=torch.long)
+    actions = torch.tensor([[1, 3]], dtype=torch.long)
+    state.apply_route_actions(action_kinds, actions)
+
+    assert state.current_routes[0, :2].tolist() == [0, 1]
+    assert torch.isinf(state.route_mat[0, 2, 3])
+    assert torch.isfinite(state.route_mat[0, 0, 1])
+
+
+def test_untrained_trim_model_can_emit_and_apply_forced_trim_action():
+    state = make_line_state(n_nodes=4, max_route_len=4)
+    state.set_current_routes([0, 1, 2, 3])
+    model = TrimPathCombiningRouteGenerator(
+        backbone_net=IdentityGraphNet(),
+        mean_stop_time_s=0,
+        embed_dim=2,
+        n_nodepair_layers=1,
+        n_pathscorer_layers=1,
+        pathscorer_hidden_dim=8,
+        n_trim_scorer_layers=1,
+        trim_scorer_hidden_dim=8,
+        n_halt_layers=1,
+        symmetric_routes=True,
+        serial_halting=True,
+    )
+    state = model.setup_planning(state)
+
+    forced_kind = torch.tensor([ROUTE_ACTION_TRIM_START], dtype=torch.long)
+    forced_action = torch.tensor([[0, 2]], dtype=torch.long)
+    action_kinds, actions, logits, entropy = model.step_route_action(
+        state,
+        greedy=True,
+        actions=forced_action,
+        action_kinds=forced_kind,
+    )
+
+    assert action_kinds.tolist() == [ROUTE_ACTION_TRIM_START]
+    assert actions.tolist() == [[0, 2]]
+    assert logits.shape == (1,)
+    assert entropy.shape == (1,)
+
+    state.apply_route_actions(action_kinds, actions)
+
+    assert state.current_routes[0, :2].tolist() == [2, 3]
+    assert state.current_route_n_stops.item() == 2
 
 
 def test_sample_from_model_skips_rollout_for_fully_seeded_network():

@@ -44,6 +44,8 @@ def build_model_from_cfg(model_cfg, exp_cfg):
     gen_type = model_cfg.route_generator.type
     if gen_type == "PathCombiningRouteGenerator":
         gen_class = models.PathCombiningRouteGenerator
+    elif gen_type == "TrimPathCombiningRouteGenerator":
+        gen_class = models.TrimPathCombiningRouteGenerator
     elif gen_type == "RandomPathCombiningRouteGenerator":
         gen_class = models.RandomPathCombiningRouteGenerator
     elif gen_type == "UnbiasedPathCombiner":

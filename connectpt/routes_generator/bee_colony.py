@@ -14,7 +14,7 @@ import hydra
 from .models import check_extensions_add_connections
 from . import torch_utils as tu
 from .citygraph_dataset import get_dataset_from_config
-from .transit_time_estimator import RouteGenBatchState
+from .transit_time_estimator import ROUTE_ACTION_HALT, RouteGenBatchState
 from .import utils as lrnu
 from .initialization import get_direct_sat_dmd
 
@@ -770,18 +770,32 @@ def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs
 
     pre_step_routes = env_state.current_routes.clone()
 
+    supports_trim_actions = getattr(model, 'supports_trim_actions', False)
+
     if ignore_max_route_len:
         original_max_route_len = env_state.extra_data.max_route_len.clone()
         env_state.extra_data.max_route_len = env_state.n_nodes.clone()
         try:
-            action, _, _ = model.step(env_state, greedy=greedy)
+            if supports_trim_actions:
+                action_kinds, action, _, _ = model.step_route_action(
+                    env_state, greedy=greedy)
+            else:
+                action, _, _ = model.step(env_state, greedy=greedy)
         finally:
             env_state.extra_data.max_route_len = original_max_route_len
     else:
-        action, _, _ = model.step(env_state, greedy=greedy)
-    halted = action[:, 0] == -1
+        if supports_trim_actions:
+            action_kinds, action, _, _ = model.step_route_action(
+                env_state, greedy=greedy)
+        else:
+            action, _, _ = model.step(env_state, greedy=greedy)
 
-    env_state.shortest_path_action(action)
+    if supports_trim_actions:
+        halted = action_kinds == ROUTE_ACTION_HALT
+        env_state.apply_route_actions(action_kinds, action)
+    else:
+        halted = action[:, 0] == -1
+        env_state.shortest_path_action(action)
 
     post_step_routes = env_state.current_routes.clone()
 
