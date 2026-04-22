@@ -1851,7 +1851,8 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         )
 
     def plan_new_route(self, state: RouteGenBatchState, greedy=False,
-                       actions=None, action_kinds=None):
+                       actions=None, action_kinds=None,
+                       force_nonhalt_first_step=False, max_steps=None):
         state = self.setup_planning(state)
         encoding = self._encode_graph(state)
 
@@ -1860,6 +1861,8 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         if not actions_given:
             actions = []
             action_kinds_log = []
+            step_logits_log = []
+            step_entropies_log = []
 
         ended = torch.zeros((state.batch_size,), dtype=torch.bool,
                             device=state.device)
@@ -1867,8 +1870,24 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         all_entropy = 0.0
         _plan_steps_0 = 0
         _elem0_done = False
+        step_idx = 0
         while not ended.all():
-            if actions_given:
+            was_ended = ended.clone()
+            force_halt = (
+                max_steps is not None and not actions_given and
+                step_idx >= max_steps
+            )
+            if force_halt:
+                step_kinds = torch.full(
+                    (state.batch_size,), ROUTE_ACTION_HALT,
+                    dtype=torch.long, device=state.device)
+                action = torch.full(
+                    (state.batch_size, 2), -1,
+                    dtype=torch.long, device=state.device)
+                logits = torch.zeros((state.batch_size,), device=state.device)
+                entropy = torch.zeros((state.batch_size,),
+                                      device=state.device)
+            elif actions_given:
                 action = actions[:, 0]
                 actions = actions[:, 1:]
                 if kinds_given:
@@ -1880,9 +1899,15 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                 action = None
                 step_kinds = None
 
-            step_kinds, action, logits, entropy = self.step_route_action(
-                state, greedy, action, encoding, step_kinds
-            )
+            if not force_halt:
+                allow_halt = not (
+                    force_nonhalt_first_step and not actions_given and
+                    step_idx == 0
+                )
+                step_kinds, action, logits, entropy = self.step_route_action(
+                    state, greedy, action, encoding, step_kinds,
+                    allow_halt=allow_halt
+                )
 
             all_logits += logits * (~ended)
             all_entropy += entropy * (~ended)
@@ -1901,11 +1926,22 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             if not actions_given:
                 actions.append(action)
                 action_kinds_log.append(step_kinds)
+                step_logits = logits.detach().clone()
+                step_entropies = entropy.detach().clone()
+                step_logits[was_ended] = 0
+                step_entropies[was_ended] = 0
+                step_logits_log.append(step_logits)
+                step_entropies_log.append(step_entropies)
+
+            step_idx += 1
 
         if not actions_given:
             self._log_step_counts([_plan_steps_0])
             actions = torch.stack(actions, dim=1)
             self.last_route_action_kinds = torch.stack(action_kinds_log, dim=1)
+            self.last_route_step_logits = torch.stack(step_logits_log, dim=1)
+            self.last_route_step_entropies = \
+                torch.stack(step_entropies_log, dim=1)
 
         return actions, all_logits, all_entropy
 
@@ -1928,7 +1964,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
 
     def step_route_action(self, state: RouteGenBatchState, greedy=False,
                           actions=None, precalc_data=None,
-                          action_kinds=None):
+                          action_kinds=None, allow_halt=True):
         """Take one typed route action for the given state."""
         log.debug("stepping with trim actions")
 
@@ -2038,6 +2074,9 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         halt_scores[current_route_lens < state.min_route_len] = TORCH_FMIN
         old_route_is_done = state.is_done() | no_route_action_yet
         halt_scores[old_route_is_done] = TORCH_FMAX
+        if not allow_halt:
+            halt_scores = halt_scores.clone()
+            halt_scores[~old_route_is_done] = TORCH_FMIN
 
         if self.serial_halting:
             continue_scores = -halt_scores
