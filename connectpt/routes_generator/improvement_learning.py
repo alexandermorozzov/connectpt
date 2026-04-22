@@ -13,7 +13,10 @@ from .citygraph_dataset import (
     InsertPosFeatures,
     SpaceScaleTransform,
 )
-from .transit_time_estimator import RouteGenBatchState
+from .transit_time_estimator import (
+    ROUTE_ACTION_HALT,
+    RouteGenBatchState,
+)
 from .torch_utils import get_batch_tensor_from_routes
 
 
@@ -76,7 +79,7 @@ def _clone_cost_weights(cost_weights):
 
 def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
                            min_route_len, max_route_len, greedy=False,
-                           cost_weights=None):
+                           cost_weights=None, return_actions=False):
     if cost_weights is None:
         cost_weights = cost_obj.sample_variable_weights(graph_batch.num_graphs,
                                                         graph_batch[STOP_KEY].x.device)
@@ -94,20 +97,119 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
 
     route_logits = []
     route_entropies = []
+    route_actions = []
+    route_action_kinds = []
     for route_idx in range(n_routes):
         state.set_current_routes(route_batch[:, route_idx])
-        _, logits, entropy = model.plan_new_route(state, greedy=greedy)
+        actions, logits, entropy = model.plan_new_route(state, greedy=greedy)
         route_logits.append(logits)
         route_entropies.append(entropy)
+        if return_actions:
+            route_actions.append(actions.detach().clone())
+            if hasattr(model, "last_route_action_kinds"):
+                route_action_kinds.append(
+                    model.last_route_action_kinds.detach().clone())
+            else:
+                route_action_kinds.append(None)
 
     final_result = cost_obj(state)
-    return (
+    output = (
         state,
         seed_result,
         final_result,
         torch.stack(route_logits, dim=1),
         torch.stack(route_entropies, dim=1),
     )
+    if return_actions:
+        output = output + (route_actions, route_action_kinds)
+    return output
+
+
+def _backward_on_sampled_actions(model, cost_obj, graph_batch, route_batch,
+                                 min_route_len, max_route_len, cost_weights,
+                                 route_actions, route_action_kinds,
+                                 advantages, entropy_weight):
+    """Replay sampled actions and backprop before mutating the state.
+
+    The sampled rollout mutates RouteGenBatchState many times.  Backpropagating
+    through a graph that still references those mutable LongTensor indices can
+    trigger version-counter errors.  This helper replays fixed actions and calls
+    backward on each step before applying that step to the replay state.
+    """
+    n_routes = route_batch.shape[1]
+    state = RouteGenBatchState(
+        graph_batch, cost_obj, n_routes, min_route_len, max_route_len,
+        cost_weights=_clone_cost_weights(cost_weights))
+    supports_route_actions = getattr(model, "supports_trim_actions", False)
+    objective_values = []
+
+    for route_idx in range(n_routes):
+        state.set_current_routes(route_batch[:, route_idx])
+        state = model.setup_planning(state)
+        actions_for_route = route_actions[route_idx]
+        kinds_for_route = route_action_kinds[route_idx]
+        ended = torch.zeros((state.batch_size,), dtype=torch.bool,
+                            device=state.device)
+
+        for step_idx in range(actions_for_route.shape[1]):
+            if ended.all():
+                break
+
+            sampled_actions = actions_for_route[:, step_idx].clone()
+            if supports_route_actions:
+                sampled_kinds = kinds_for_route[:, step_idx].clone()
+                active = ~ended
+                score_mask = active & (sampled_kinds != ROUTE_ACTION_HALT)
+                if score_mask.any():
+                    score_idxs = torch.where(score_mask)[0]
+                    score_state = state.index_select(score_idxs)
+                    score_state = model.setup_planning(score_state)
+                    _, _, logits, entropy = model.step_route_action(
+                        score_state, greedy=False,
+                        actions=sampled_actions[score_mask],
+                        action_kinds=sampled_kinds[score_mask])
+                    objective = \
+                        (advantages[score_mask] * logits).mean()
+                    objective = objective + entropy_weight * entropy.mean()
+                    (-objective).backward()
+                    objective_values.append(objective.detach())
+
+                apply_kinds = sampled_kinds.detach().clone()
+                apply_actions = sampled_actions.detach().clone()
+                apply_kinds[ended] = ROUTE_ACTION_HALT
+                apply_actions[ended] = -1
+                just_ended = apply_kinds == ROUTE_ACTION_HALT
+                apply_actions[just_ended] = -1
+                with torch.no_grad():
+                    state.apply_route_actions(apply_kinds, apply_actions)
+                ended = ended | just_ended
+            else:
+                active = ~ended
+                sampled_halts = sampled_actions[:, 0] == -1
+                score_mask = active & ~sampled_halts
+                if score_mask.any():
+                    score_idxs = torch.where(score_mask)[0]
+                    score_state = state.index_select(score_idxs)
+                    score_state = model.setup_planning(score_state)
+                    _, logits, entropy = model.step(
+                        score_state, greedy=False,
+                        actions=sampled_actions[score_mask])
+                    objective = \
+                        (advantages[score_mask] * logits).mean()
+                    objective = objective + entropy_weight * entropy.mean()
+                    (-objective).backward()
+                    objective_values.append(objective.detach())
+
+                apply_actions = sampled_actions.detach().clone()
+                apply_actions[ended] = -1
+                just_ended = apply_actions[:, 0] == -1
+                with torch.no_grad():
+                    state.shortest_path_action(apply_actions)
+                ended = ended | just_ended
+
+    if len(objective_values) == 0:
+        return torch.zeros((), device=graph_batch[STOP_KEY].x.device)
+    return torch.stack(objective_values).mean()
 
 
 @torch.no_grad()
@@ -186,21 +288,25 @@ def train_lc_improvement(model, cost_obj, graphs, seed_routes, device,
                                   desc=f"epoch {epoch + 1}/{n_epochs}"):
             graph_batch, route_batch = make_improvement_batch(
                 graphs, seed_routes, batch_indices, device, training=True)
-            _, seed_result, final_result, route_logits, route_entropies = \
-                rollout_lc_improvement(model, cost_obj, graph_batch,
-                                       route_batch, min_route_len,
-                                       max_route_len, greedy=False)
+            cost_weights = cost_obj.sample_variable_weights(
+                graph_batch.num_graphs, device)
+            with torch.no_grad():
+                _, seed_result, final_result, _, _, route_actions, \
+                    route_action_kinds = rollout_lc_improvement(
+                        model, cost_obj, graph_batch, route_batch,
+                        min_route_len, max_route_len, greedy=False,
+                        cost_weights=cost_weights, return_actions=True)
 
             improvement = seed_result.cost - final_result.cost
             advantages = improvement.detach() - improvement.detach().mean()
             if advantages.numel() > 1:
                 advantages = advantages / (advantages.std() + 1e-8)
 
-            objective = (advantages[:, None] * route_logits).mean()
-            objective = objective + entropy_weight * route_entropies.mean()
-
             optimizer.zero_grad()
-            (-objective).backward()
+            objective = _backward_on_sampled_actions(
+                model, cost_obj, graph_batch, route_batch, min_route_len,
+                max_route_len, cost_weights, route_actions,
+                route_action_kinds, advantages, entropy_weight)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 

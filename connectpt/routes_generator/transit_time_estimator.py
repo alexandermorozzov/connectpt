@@ -733,11 +733,19 @@ class RouteGenBatchState:
     def index_select(self, idx: Union[slice, Tensor, ndarray, Sequence]):
         """return a new state with only the given indices."""
         state = copy.copy(self)
-        state.graph_data = self.graph_data.index_select(idx)
-        state.extra_data = self.extra_data.index_select(idx)
+        graph_data = self.graph_data.index_select(idx)
+        extra_data = self.extra_data.index_select(idx)
+        if isinstance(graph_data, list):
+            graph_data = Batch.from_data_list(graph_data)
+        if isinstance(extra_data, list):
+            extra_data = Batch.from_data_list(extra_data)
+        state.graph_data = graph_data
+        state.extra_data = extra_data
         if isinstance(idx, slice):
             state._finished_routes = self._finished_routes[idx]
         else:
+            if isinstance(idx, Tensor):
+                idx = idx.detach().cpu().tolist()
             state._finished_routes = [self._finished_routes[ii] for ii in idx]
         return state
 
