@@ -64,3 +64,4 @@ examples/route_generator/output_routes
 examples/route_generator/training_logs
 data/*
 data/MandlCoords.txt
+examples/

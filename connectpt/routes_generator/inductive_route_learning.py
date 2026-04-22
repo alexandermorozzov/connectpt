@@ -20,7 +20,7 @@ import hydra
 from .citygraph_dataset import CityGraphData, CityGraphDataset, \
     get_default_train_and_eval_split, get_dynamic_training_set, STOP_KEY, \
     DEMAND_KEY
-from .transit_time_estimator import RouteGenBatchState
+from .transit_time_estimator import ROUTE_ACTION_EXTEND, RouteGenBatchState
 from . import utils as lrnu
 from .models import FeatureNorm, get_mlp
 from .eval_route_generator import eval_model
@@ -298,6 +298,7 @@ def train_ppo(model, min_n_routes, max_n_routes, cfg, optimizer,
     best_val_cost = float('inf')
     n_routes = max_n_routes
     model.eval()
+    supports_route_actions = getattr(model, 'supports_trim_actions', False)
     n_states_per_minibatch = cfg.ppo.minibatch_size // batch_size
     gamma = cfg.discount_rate
     epsilon = cfg.ppo.epsilon
@@ -375,6 +376,9 @@ def train_ppo(model, min_n_routes, max_n_routes, cfg, optimizer,
 
         buf_actions = torch.full((horizon, state.batch_size, 2), -1,
                                  device=device, dtype=torch.long)
+        buf_action_kinds = torch.full((horizon, state.batch_size),
+                                      ROUTE_ACTION_EXTEND,
+                                      device=device, dtype=torch.long)
         buf_states = []
 
         # roll out the specified number of steps
@@ -384,10 +388,18 @@ def train_ppo(model, min_n_routes, max_n_routes, cfg, optimizer,
                 val_ests = val_module.from_state(state)
                 buf_val_ests[tt] = val_ests
                 buf_states.append(state.clone().to_device('cpu'))
-                actions, logits, _ = model.step(state)
+                if supports_route_actions:
+                    action_kinds, actions, logits, _ = \
+                        model.step_route_action(state)
+                    buf_action_kinds[tt] = action_kinds
+                else:
+                    actions, logits, _ = model.step(state)
                 buf_actions[tt] = actions
                 # update the states with the actions
-                state.shortest_path_action(actions)
+                if supports_route_actions:
+                    state.apply_route_actions(action_kinds, actions)
+                else:
+                    state.shortest_path_action(actions)
     
                 buf_logits[tt] = logits
                 if cfg.diff_reward:
@@ -466,6 +478,8 @@ def train_ppo(model, min_n_routes, max_n_routes, cfg, optimizer,
             # move states to chosen device
             mb_states = mb_states.to_device(device)
             mb_acts = buf_actions[idxs].flatten(0, 1)
+            if supports_route_actions:
+                mb_action_kinds = buf_action_kinds[idxs].flatten(0, 1)
             mb_old_logits = buf_logits[idxs].flatten(0, 1)
             mb_returns = buf_returns[idxs].flatten(0, 1)
             mb_advs = buf_advantages[idxs].flatten(0, 1)
@@ -475,7 +489,11 @@ def train_ppo(model, min_n_routes, max_n_routes, cfg, optimizer,
             val_module.update(mb_returns)
 
             # step model forward
-            _, logits, entropy = model.step(mb_states, actions=mb_acts)
+            if supports_route_actions:
+                _, _, logits, entropy = model.step_route_action(
+                    mb_states, actions=mb_acts, action_kinds=mb_action_kinds)
+            else:
+                _, logits, entropy = model.step(mb_states, actions=mb_acts)
             
             # normalize advantages by the minibatch statistics
             mb_advs = (mb_advs - mb_advs.mean()) / (mb_advs.std() + 1e-8)
@@ -562,6 +580,7 @@ def train(model, min_n_routes, max_n_routes, cfg, optimizer, train_dataloader,
         device = DEVICE
 
     log.info(f"discount rate is {cfg.discount_rate}")
+    supports_route_actions = getattr(model, 'supports_trim_actions', False)
 
     n_routes = None
     for epoch in range(cfg.reinforce.n_epochs):
@@ -619,8 +638,13 @@ def train(model, min_n_routes, max_n_routes, cfg, optimizer, train_dataloader,
             while not state.is_done().all():
                 n_routes_so_far.append(state.n_finished_routes)
                 state_vecs.append(state.get_global_state_features())
-                actions, logits, entropy = model.step(state)
-                state.shortest_path_action(actions)
+                if supports_route_actions:
+                    action_kinds, actions, logits, entropy = \
+                        model.step_route_action(state)
+                    state.apply_route_actions(action_kinds, actions)
+                else:
+                    actions, logits, entropy = model.step(state)
+                    state.shortest_path_action(actions)
                 if cfg.diff_reward:
                     result = cost_obj(state)
                     reward = (prev_cost - result.cost) * cfg.reward_scale

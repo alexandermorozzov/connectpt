@@ -320,7 +320,7 @@ class DynamicCityGraphDataset(torch.utils.data.IterableDataset):
         
 
 class InsertPosFeatures(BaseTransform):
-    def __call__(self, data):
+    def forward(self, data):
         data = data.clone()
         for key in [STOP_KEY]:
             val = data[key]
@@ -335,8 +335,8 @@ class RandomFlipCity(RandomFlip):
     def __init__(self, axis=0) -> None:
         super().__init__(axis)
 
-    def __call__(self, data: Data) -> Data:
-        super().__call__(data[STOP_KEY])
+    def forward(self, data: Data) -> Data:
+        super().forward(data[STOP_KEY])
         return data
 
 
@@ -346,7 +346,7 @@ class SpaceScaleTransform(BaseTransform):
         self.min_scale = min_scale
         self.max_scale = max_scale
 
-    def __call__(self, data):
+    def forward(self, data):
         data = data.clone()
         scale_range = self.max_scale - self.min_scale
         scale = torch.rand(1) * scale_range + self.min_scale
@@ -362,7 +362,7 @@ class DemandScaleTransform(BaseTransform):
         self.min_scale = min_scale
         self.max_scale = max_scale
 
-    def __call__(self, data):
+    def forward(self, data):
         data = data.clone()
         scale_range = self.max_scale - self.min_scale
         scale = torch.rand(1) * scale_range + self.min_scale
