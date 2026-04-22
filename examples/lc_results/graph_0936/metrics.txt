@@ -1,0 +1,8 @@
+Graph index: 936
+Run name: lc_lc_graph_0936
+Number of nodes: 50
+Cost: 6.0928
+ATT: 7.5380
+RTT: 50.1707
+Unserved demand: 993786.7500
+Routes shape: (1, 3, 5)

@@ -1,0 +1,8 @@
+Graph index: 712
+Run name: lc_lc_graph_0712
+Number of nodes: 50
+Cost: 6.0083
+ATT: 20.0638
+RTT: 126.6205
+Unserved demand: 972597.2500
+Routes shape: (1, 3, 5)
