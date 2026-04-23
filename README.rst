@@ -188,6 +188,21 @@ Seed routes are loaded as a tensor with shape:
 
 Padding uses ``-1``.
 
+The improvement pipeline can optionally use more route slots than the LC seed
+file contains. ``make_improvement_batch(..., target_n_routes=K)`` appends
+empty all-``-1`` route slots until the tensor has ``K`` routes. For example,
+LC route files with 3 routes can be trained as a 5-route problem by adding 2
+empty slots. Empty slots are not added as finished routes, so
+``RouteGenBatchState`` treats them as routes still left to plan and the cost
+function can penalize them through the usual unstarted-route constraint term.
+For this to matter, ``cost_obj.ignore_stops_oob`` should be ``False``. The
+``stops_oob`` term is broader than its name suggests: it also includes missing
+stops from unstarted routes and routes shorter than ``min_route_len``. If
+``target_n_routes=12`` and the seed file contains 3 LC routes, the other 9
+slots start empty. With ``ignore_stops_oob=True`` those 9 empty slots are almost
+optional from the cost perspective; with ``ignore_stops_oob=False`` they receive
+the normal penalty until the model fills them with valid routes.
+
 For every route index ``i`` in the seed network, LC improvement creates a
 temporary planning state:
 
@@ -442,17 +457,34 @@ When working on LC improvement, the most useful sanity checks are:
    part of the same action distribution as extend and trim.
 
 ``min_route_len`` and ``max_route_len``
-   Trim cannot make a route shorter than ``min_route_len``. Extend cannot make
-   it longer than ``max_route_len``.
+   Trim is masked so it should not make a route shorter than
+   ``min_route_len``. Extend is masked so it should not make a route longer
+   than ``max_route_len``. These action masks are not a substitute for the
+   final cost constraint: a route can still be invalid if it starts empty and
+   immediately halts, if it has only one stop, if a seeded route was already
+   too long, or if an older/debug rollout path bypasses the usual planning
+   limits.
 
 ``max_route_edit_steps``
    Caps the number of edit actions for one route. This prevents greedy eval
-   from hanging in a trim/extend loop.
+   from hanging in a trim/extend loop. This is not the same thing as
+   ``max_route_len``: ``max_route_len`` constrains the number of stops in the
+   final route, while ``max_route_edit_steps`` constrains how many edit
+   decisions the policy may take before forced halt.
+
+``ignore_stops_oob``
+   Should normally be ``False`` for LC improvement when
+   ``target_n_routes`` is larger than the seed route count. Otherwise empty
+   extra route slots are not directly penalized as unstarted routes, so the
+   model gets a much weaker signal to turn them into valid routes.
 
 ``n_routes``
-   The improvement pipeline preserves the number of route slots from the seed
-   route tensor. It edits each slot rather than inventing an additional route
-   count.
+   By default the improvement pipeline preserves the number of route slots
+   from the seed route tensor. Passing ``target_n_routes`` to
+   ``make_improvement_batch``, ``evaluate_lc_improvement`` or one of the
+   improvement trainers increases the route-slot count by appending empty
+   routes. Existing LC routes are edited in their original slots; extra slots
+   start empty and can be filled by ``extend`` actions.
 
 
 Data and Examples
