@@ -433,6 +433,16 @@ def get_path_length(G, path, weight='weight'):
     
     return length    
 
+def _format_hydra_override_value(value):
+    if isinstance(value, str):
+        value = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{value}"'
+    if isinstance(value, bool):
+        return str(value).lower()
+    if value is None:
+        return "null"
+    return str(value)
+
 def get_eval_cfg(cfg_dir: str, base_cfg_name: str = "eval_model_mumford", params: dict | None = None):
     """
     Creates a Hydra config for model evaluation.
@@ -482,7 +492,7 @@ def get_eval_cfg(cfg_dir: str, base_cfg_name: str = "eval_model_mumford", params
     for k, v in params.items():
         path = key_map.get(k)
         if path:
-            overrides.append(f"{path}={v}")
+            overrides.append(f"{path}={_format_hydra_override_value(v)}")
         else:
             print(f"[Warning] Ignored unknown parameter: {k}")
 
