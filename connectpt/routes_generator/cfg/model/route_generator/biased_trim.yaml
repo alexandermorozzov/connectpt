@@ -9,3 +9,4 @@ kwargs:
   halt_scorer_type: "endpoints"
   # n_halt_heads: 4
   serial_halting: true
+  forbid_halt_when_overlong: false

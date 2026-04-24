@@ -1796,9 +1796,11 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
     supports_trim_actions = True
 
     def __init__(self, *args, n_trim_scorer_layers=3,
-                 trim_scorer_hidden_dim=16, **kwargs):
+                 trim_scorer_hidden_dim=16,
+                 forbid_halt_when_overlong=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.trim_action_feat_dim = 6
+        self.forbid_halt_when_overlong = forbid_halt_when_overlong
         trim_scorer_indim = self.full_nodepair_dim + self.trim_action_feat_dim
         self.trim_scorer = nn.Sequential(
             FeatureNorm(trim_scorer_indim),
@@ -2074,6 +2076,13 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         halt_scores[current_route_lens < state.min_route_len] = TORCH_FMIN
         old_route_is_done = state.is_done() | no_route_action_yet
         halt_scores[old_route_is_done] = TORCH_FMAX
+        if self.forbid_halt_when_overlong:
+            overlong_routes = current_route_lens > state.max_route_len
+            can_trim = trim_start_valid.reshape(batch_size, -1).any(-1) | \
+                trim_end_valid.reshape(batch_size, -1).any(-1)
+            repairable_overlong = overlong_routes & can_trim & \
+                ~old_route_is_done
+            halt_scores[repairable_overlong] = TORCH_FMIN
         if not allow_halt:
             halt_scores = halt_scores.clone()
             halt_scores[~old_route_is_done] = TORCH_FMIN
