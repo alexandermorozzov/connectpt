@@ -1125,6 +1125,7 @@ def train_lc_improvement(model, cost_obj, graphs, seed_routes, device,
     else:
         best_model_path = Path(best_model_path)
     history = []
+    last_val = None
 
     for epoch in range(n_epochs):
         model.train()
@@ -1177,16 +1178,27 @@ def train_lc_improvement(model, cost_obj, graphs, seed_routes, device,
         train_final = torch.cat(train_final_costs).mean().item()
         train_changed = torch.stack(train_route_change_rates).mean().item()
         train_action_stats = _finalize_action_stats(train_action_counts)
-        val = evaluate_lc_improvement(
-            model, cost_obj, graphs, seed_routes, val_indices, device,
-            min_route_len, max_route_len, batch_size=batch_size,
-            force_nonhalt_first_step=force_nonhalt_first_step,
-            max_route_edit_steps=max_route_edit_steps,
-            target_n_routes=target_n_routes)
+        eval_due = epoch > 0 or epoch == n_epochs - 1
+        if eval_due:
+            last_val = evaluate_lc_improvement(
+                model, cost_obj, graphs, seed_routes, val_indices, device,
+                min_route_len, max_route_len, batch_size=batch_size,
+                force_nonhalt_first_step=force_nonhalt_first_step,
+                max_route_edit_steps=max_route_edit_steps,
+                target_n_routes=target_n_routes)
 
-        if val["final_cost"] < best_val_cost:
-            best_val_cost = val["final_cost"]
-            torch.save(model.state_dict(), best_model_path)
+            if last_val["final_cost"] < best_val_cost:
+                best_val_cost = last_val["final_cost"]
+                torch.save(model.state_dict(), best_model_path)
+
+        val = last_val or {
+            "seed_cost": float("nan"),
+            "final_cost": float("nan"),
+            "delta": float("nan"),
+            "win_rate": float("nan"),
+            "changed_route_rate": float("nan"),
+            "changed_graph_rate": float("nan"),
+        }
 
         row = {
             "epoch": epoch + 1,
@@ -1294,6 +1306,7 @@ def train_lc_improvement_ppo(model, cost_obj, graphs, seed_routes, device,
     else:
         best_model_path = Path(best_model_path)
     history = []
+    last_val = None
 
     for epoch in range(n_epochs):
         model.train()
@@ -1366,21 +1379,31 @@ def train_lc_improvement_ppo(model, cost_obj, graphs, seed_routes, device,
         train_final = torch.cat(train_final_costs).mean().item()
         train_changed = torch.stack(train_route_change_rates).mean().item()
         train_action_stats = _finalize_action_stats(train_action_counts)
-        val = evaluate_lc_improvement(
-            model, cost_obj, graphs, seed_routes, val_indices, device,
-            min_route_len, max_route_len, batch_size=batch_size,
-            force_nonhalt_first_step=force_nonhalt_first_step,
-            max_route_edit_steps=max_route_edit_steps,
-            target_n_routes=target_n_routes)
+        eval_due = epoch > 0 or epoch == n_epochs - 1
+        if eval_due:
+            last_val = evaluate_lc_improvement(
+                model, cost_obj, graphs, seed_routes, val_indices, device,
+                min_route_len, max_route_len, batch_size=batch_size,
+                force_nonhalt_first_step=force_nonhalt_first_step,
+                max_route_edit_steps=max_route_edit_steps,
+                target_n_routes=target_n_routes)
 
-        if val["final_cost"] < best_val_cost:
-            best_val_cost = val["final_cost"]
-            torch.save(model.state_dict(), best_model_path)
+            if last_val["final_cost"] < best_val_cost:
+                best_val_cost = last_val["final_cost"]
+                torch.save(model.state_dict(), best_model_path)
 
         ppo_ratio_mean = ppo_ratio_sum / max(ppo_ratio_count, 1)
         ppo_clip_fraction = ppo_clipped_count / max(ppo_ratio_count, 1)
         ppo_objective = float(np.mean(ppo_objectives)) \
             if len(ppo_objectives) > 0 else 0.0
+        val = last_val or {
+            "seed_cost": float("nan"),
+            "final_cost": float("nan"),
+            "delta": float("nan"),
+            "win_rate": float("nan"),
+            "changed_route_rate": float("nan"),
+            "changed_graph_rate": float("nan"),
+        }
 
         row = {
             "epoch": epoch + 1,
@@ -1625,9 +1648,11 @@ def train_lc_improvement_cfg_ppo(
             train_final = float("nan")
             train_delta = float("nan")
 
-        eval_due = iteration % max(int(val_period), 1) == 0 or \
-            iteration == int(n_iterations) - 1
-        if eval_due or last_val is None:
+        eval_due = (
+            (iteration > 0 and (iteration + 1) % max(int(val_period), 1) == 0)
+            or iteration == int(n_iterations) - 1
+        )
+        if eval_due:
             last_val = evaluate_lc_improvement(
                 model, cost_obj, graphs, seed_routes, val_indices, device,
                 min_route_len, max_route_len,
@@ -1642,6 +1667,14 @@ def train_lc_improvement_cfg_ppo(
         ratio_mean = ppo_stats["ratio_sum"] / max(ppo_stats["ratio_count"], 1)
         clip_fraction = ppo_stats["clipped_count"] / \
             max(ppo_stats["ratio_count"], 1)
+        val = last_val or {
+            "seed_cost": float("nan"),
+            "final_cost": float("nan"),
+            "delta": float("nan"),
+            "win_rate": float("nan"),
+            "changed_route_rate": float("nan"),
+            "changed_graph_rate": float("nan"),
+        }
         row = {
             "iteration": iteration + 1,
             "epoch": iteration + 1,
@@ -1668,12 +1701,12 @@ def train_lc_improvement_cfg_ppo(
             "train_ppo_clip_fraction": clip_fraction,
             "train_ppo_objective": ppo_stats["objective"],
             "is_eval_iteration": eval_due,
-            "val_seed_cost": last_val["seed_cost"],
-            "val_final_cost": last_val["final_cost"],
-            "val_delta": last_val["delta"],
-            "val_win_rate": last_val["win_rate"],
-            "val_changed_route_rate": last_val["changed_route_rate"],
-            "val_changed_graph_rate": last_val["changed_graph_rate"],
+            "val_seed_cost": val["seed_cost"],
+            "val_final_cost": val["final_cost"],
+            "val_delta": val["delta"],
+            "val_win_rate": val["win_rate"],
+            "val_changed_route_rate": val["changed_route_rate"],
+            "val_changed_graph_rate": val["changed_graph_rate"],
         }
         row.update({
             f"train_action_{key}": value
