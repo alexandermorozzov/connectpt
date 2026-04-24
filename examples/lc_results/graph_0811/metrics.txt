@@ -1,8 +1,15 @@
 Graph index: 811
+Group: 3 (graphs 750–999)
+n_routes: 12, min_route_len: 10, max_route_len: 14
+weight_combo_index: 11
+demand_time_weight: 0.0000
+route_time_weight: 0.5000
+median_connectivity_weight: 0.5000
+weights_sum: 1.0000
 Run name: lc_lc_graph_0811
 Number of nodes: 50
-Cost: 6.0469
-ATT: 18.8102
-RTT: 106.1095
-Unserved demand: 968844.8125
-Routes shape: (1, 3, 5)
+Cost: 0.8167
+ATT: 28.5615
+RTT: 995.2566
+Unserved demand: 0.0000
+Routes shape: (1, 12, 12)

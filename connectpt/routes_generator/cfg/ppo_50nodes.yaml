@@ -1,5 +1,5 @@
 ppo:
-  n_iterations: 20 #200
+  n_iterations: 200
   val_period: 10
   n_epochs: 1
   minibatch_size: 32
