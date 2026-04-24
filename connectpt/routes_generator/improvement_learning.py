@@ -120,6 +120,30 @@ def pad_seed_routes_to_n_routes(route_batch, target_n_routes=None):
     return torch.cat((route_batch, empty_routes), dim=1)
 
 
+def _get_graph_batch_max_n_nodes(graph_batch):
+    stop_data = graph_batch[STOP_KEY]
+    if hasattr(stop_data, "ptr") and stop_data.ptr is not None:
+        node_counts = stop_data.ptr[1:] - stop_data.ptr[:-1]
+        return int(node_counts.max().item())
+    return int(stop_data.num_nodes)
+
+
+def _trim_route_batch_to_graph_capacity(route_batch, graph_batch):
+    max_n_nodes = _get_graph_batch_max_n_nodes(graph_batch)
+    if route_batch.shape[-1] <= max_n_nodes:
+        return route_batch
+
+    route_tail = route_batch[..., max_n_nodes:]
+    if (route_tail >= 0).any():
+        raise ValueError(
+            "Loaded route has real stops beyond the scenario node "
+            "capacity. This is not just padding: "
+            f"route width {route_batch.shape[-1]}, "
+            f"batch max nodes {max_n_nodes}."
+        )
+    return route_batch[..., :max_n_nodes]
+
+
 def make_improvement_batch(graphs, seed_routes, indices, device, training=False,
                            space_scale=None, demand_scale=None,
                            insert_pos=None, target_n_routes=None):
@@ -143,18 +167,8 @@ def make_improvement_batch(graphs, seed_routes, indices, device, training=False,
     graph_batch = Batch.from_data_list(batch_graphs).to(device)
     route_batch = seed_routes[torch.as_tensor(indices, dtype=torch.long)].to(
         device)
-    batch_max_n_nodes = max(
-        int(graph[STOP_KEY].num_nodes) for graph in batch_graphs)
-    if route_batch.shape[-1] > batch_max_n_nodes:
-        route_tail = route_batch[..., batch_max_n_nodes:]
-        if (route_tail >= 0).any():
-            raise ValueError(
-                "Loaded route has real stops beyond the scenario node "
-                "capacity. This is not just padding: "
-                f"route width {route_batch.shape[-1]}, "
-                f"batch max nodes {batch_max_n_nodes}."
-            )
-        route_batch = route_batch[..., :batch_max_n_nodes]
+    route_batch = _trim_route_batch_to_graph_capacity(route_batch,
+                                                      graph_batch)
     route_batch = pad_seed_routes_to_n_routes(route_batch, target_n_routes)
     return graph_batch, route_batch
 
@@ -169,6 +183,8 @@ def _clone_cost_weights(cost_weights):
 def _make_route_context_state(cost_obj, graph_batch, route_batch, route_idx,
                               min_route_len, max_route_len, cost_weights,
                               invalid_directly_connected=False):
+    route_batch = _trim_route_batch_to_graph_capacity(route_batch,
+                                                      graph_batch)
     n_routes = route_batch.shape[1]
     state = RouteGenBatchState(
         graph_batch, cost_obj, n_routes, min_route_len, max_route_len,
@@ -236,6 +252,8 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
                                                         graph_batch[STOP_KEY].x.device)
     if max_route_edit_steps is None:
         max_route_edit_steps = _get_default_max_route_edit_steps(max_route_len)
+    route_batch = _trim_route_batch_to_graph_capacity(route_batch,
+                                                      graph_batch)
 
     n_routes = route_batch.shape[1]
     seed_state = RouteGenBatchState(
