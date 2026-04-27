@@ -1,15 +1,15 @@
 Graph index: 351
 Group: 1 (graphs 250–499)
-n_routes: 8, min_route_len: 4, max_route_len: 9
-weight_combo_index: 1
-demand_time_weight: 0.0000
-route_time_weight: 1.0000
+n_routes: 4, min_route_len: 2, max_route_len: 6
+weight_combo_index: 0
+demand_time_weight: 1.0000
+route_time_weight: 0.0000
 median_connectivity_weight: 0.0000
 weights_sum: 1.0000
 Run name: lc_lc_graph_0351
 Number of nodes: 50
-Cost: 1.7219
-ATT: 40.4907
-RTT: 282.3822
-Unserved demand: 88010.1719
-Routes shape: (1, 8, 9)
+Cost: 6.3822
+ATT: 23.7717
+RTT: 137.3442
+Unserved demand: 857001.5000
+Routes shape: (1, 4, 6)

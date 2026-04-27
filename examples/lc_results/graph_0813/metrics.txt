@@ -1,15 +1,15 @@
 Graph index: 813
 Group: 3 (graphs 750–999)
-n_routes: 12, min_route_len: 10, max_route_len: 14
-weight_combo_index: 13
-demand_time_weight: 0.2000
-route_time_weight: 0.6000
-median_connectivity_weight: 0.2000
+n_routes: 8, min_route_len: 2, max_route_len: 8
+weight_combo_index: 0
+demand_time_weight: 1.0000
+route_time_weight: 0.0000
+median_connectivity_weight: 0.0000
 weights_sum: 1.0000
 Run name: lc_lc_graph_0813
 Number of nodes: 50
-Cost: 0.9314
-ATT: 22.9807
-RTT: 694.4819
-Unserved demand: 0.0000
-Routes shape: (1, 12, 14)
+Cost: 1.7012
+ATT: 31.2800
+RTT: 319.7015
+Unserved demand: 77165.7812
+Routes shape: (1, 8, 8)

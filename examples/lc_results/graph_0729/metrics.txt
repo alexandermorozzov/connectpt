@@ -1,15 +1,15 @@
 Graph index: 729
 Group: 2 (graphs 500–749)
-n_routes: 10, min_route_len: 8, max_route_len: 12
-weight_combo_index: 4
-demand_time_weight: 0.2000
-route_time_weight: 0.8000
+n_routes: 6, min_route_len: 2, max_route_len: 7
+weight_combo_index: 0
+demand_time_weight: 1.0000
+route_time_weight: 0.0000
 median_connectivity_weight: 0.0000
 weights_sum: 1.0000
 Run name: lc_lc_graph_0729
 Number of nodes: 50
-Cost: 1.0891
-ATT: 31.9935
-RTT: 720.4563
-Unserved demand: 0.0000
-Routes shape: (1, 10, 12)
+Cost: 4.1891
+ATT: 34.4698
+RTT: 314.7942
+Unserved demand: 513998.6875
+Routes shape: (1, 6, 7)
