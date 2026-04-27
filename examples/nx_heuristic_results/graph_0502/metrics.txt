@@ -1,0 +1,20 @@
+Graph index: 502
+Generation method: nx_shortest_path_heuristic
+Group: 2
+Target n_routes: 13
+Generated n_routes: 13
+min_route_len: 2
+max_route_len: 15
+weight_combo_index: 1
+weight_tag_note: metrics are evaluated under this weight tag; generation itself is weight-agnostic
+demand_time_weight: 0.0000
+route_time_weight: 1.0000
+median_connectivity_weight: 0.0000
+n_nodes: 50
+covered_nodes: 45
+route_lengths: [7, 9, 6, 7, 14, 14, 8, 3, 7, 12, 9, 7, 2]
+cost: 2.401281
+ATT: 32.772438
+RTT: 922.417053
+# stops out of bounds: 0.000000
+median_connectivity: 26.462912
