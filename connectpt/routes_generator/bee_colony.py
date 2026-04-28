@@ -14,7 +14,10 @@ import hydra
 from .models import check_extensions_add_connections
 from . import torch_utils as tu
 from .citygraph_dataset import get_dataset_from_config
-from .transit_time_estimator import ROUTE_ACTION_HALT, RouteGenBatchState
+from .transit_time_estimator import (
+    ROUTE_ACTION_HALT,
+    RouteGenBatchState,
+)
 from .import utils as lrnu
 from .initialization import get_direct_sat_dmd
 
@@ -182,13 +185,13 @@ def _ensure_mutation_stats_bucket(mutation_counts_out, bucket_name):
     if mutation_counts_out is None:
         return None
     bucket = mutation_counts_out.setdefault(bucket_name, {})
-    for type_name in ('type1', 'type2', 'type3', 'type4'):
+    for type_name in ('type1', 'type2', 'type3', 'type4', 'type5'):
         bucket.setdefault(type_name, 0)
     return bucket
 
 
 def _record_attempted_mutations(mutation_counts_out, *, n_type1, n_type2,
-                                n_type3, n_type4):
+                                n_type3, n_type4, n_type5=0):
     if mutation_counts_out is None:
         return
     attempted = _ensure_mutation_stats_bucket(mutation_counts_out, 'attempted')
@@ -197,6 +200,7 @@ def _record_attempted_mutations(mutation_counts_out, *, n_type1, n_type2,
         'type2': int(n_type2),
         'type3': int(n_type3),
         'type4': int(n_type4),
+        'type5': int(n_type5),
     }
     for type_name, inc in increments.items():
         attempted[type_name] += inc
@@ -213,8 +217,8 @@ def _record_accepted_mutations(mutation_counts_out, mutation_types,
     if mutation_types is None:
         return
 
-    for type_idx, type_name in enumerate(('type1', 'type2', 'type3', 'type4'),
-                                         start=1):
+    for type_idx, type_name in enumerate(
+            ('type1', 'type2', 'type3', 'type4', 'type5'), start=1):
         type_mask = mutation_types == type_idx
         if not type_mask.any():
             continue
@@ -276,7 +280,8 @@ def _choose_route_indices(bee_networks, demand, n_routes,
 def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                mod_steps_per_pass=2, shorten_prob=0.2, n_iterations=400,
                n_type1_bees=None, n_type2_bees=None, n_type4_bees=0,
-               silent=False, force_linking_unlinked=False, bee_model=None,
+               n_type5_bees=0, silent=False, force_linking_unlinked=False,
+               bee_model=None, edit_model=None,
                sum_writer=None, mutation_counts_out=None,
                adjustment_degree_weight=0.0,
                adjustment_degree_gap=0.1,
@@ -284,6 +289,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                adjustment_degree_objective='raw',
                adjustment_degree_target=0.2,
                ignore_type4_max_route_len=False,
+               ignore_type5_max_route_len=False,
                use_demand_weighted_route_selection=False):
     """Implementation of the method of  Nikolic and Teodorovic (2013).
     
@@ -322,9 +328,27 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     if n_type1_bees is None:
         n_type1_bees = n_bees // 2
     if n_type2_bees is None:
-        # assume no type-3/4 bees if not specified
-        n_type2_bees = n_bees - n_type1_bees - n_type4_bees
-    n_type3_bees = n_bees - n_type1_bees - n_type2_bees - n_type4_bees
+        # assume no type-3/4/5 bees if not specified
+        n_type2_bees = n_bees - n_type1_bees - n_type4_bees - n_type5_bees
+    n_type3_bees = (n_bees - n_type1_bees - n_type2_bees -
+                    n_type4_bees - n_type5_bees)
+    if n_type3_bees < 0:
+        raise ValueError(
+            "Sum of n_type1/2/4/5 bees exceeds n_bees: "
+            f"{n_type1_bees}+{n_type2_bees}+{n_type4_bees}+{n_type5_bees} "
+            f"> {n_bees}"
+        )
+    if n_type5_bees > 0 and edit_model is None:
+        raise ValueError(
+            "n_type5_bees > 0 requires an edit_model that supports trim "
+            "actions (set edit_model when calling bee_colony)."
+        )
+    if n_type5_bees > 0 and not getattr(
+            edit_model, 'supports_trim_actions', False):
+        raise ValueError(
+            "edit_model must have supports_trim_actions=True to drive "
+            "type-5 mutations (extend + trim + halt)."
+        )
 
     if n_type3_bees > 0:
         # instantiate a random path-combining model
@@ -450,6 +474,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                     n_type2=n_type2_bees,
                     n_type3=n_type3_bees,
                     n_type4=n_type4_bees,
+                    n_type5=n_type5_bees,
                 )
                 new_bee_networks, mutation_types = \
                     get_mutants(bee_networks, chosen_route_idxs, n_type1_bees,
@@ -457,8 +482,12 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                                 street_node_neighbours, shortest_paths,
                                 force_linking_unlinked, bee_model, rpc_model,
                                 bee_states, n_type4=n_type4_bees,
+                                n_type5=n_type5_bees,
+                                edit_model=edit_model,
                                 ignore_type4_max_route_len=
                                 ignore_type4_max_route_len,
+                                ignore_type5_max_route_len=
+                                ignore_type5_max_route_len,
                                 return_mutation_metadata=True)
 
                 new_bee_raw_costs, new_bee_metrics = \
@@ -595,7 +624,9 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
                 direct_sat_dmd, shorten_prob, street_node_neighbours,
                 shortest_paths, force_linking_unlinked, bee_model=None,
                 rpc_model=None, env_state=None, n_type4=0,
+                n_type5=0, edit_model=None,
                 ignore_type4_max_route_len=False,
+                ignore_type5_max_route_len=False,
                 return_mutation_metadata=False):
     bee_networks = bee_networks.clone()
 
@@ -607,18 +638,22 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
     empty_routes = (modified_routes > -1).sum(-1) == 0
 
     n_bees = bee_networks.shape[1]
-    n_type3 = n_bees - n_type1 - n_type2 - n_type4
+    n_type3 = n_bees - n_type1 - n_type2 - n_type4 - n_type5
     scen_idxs = torch.randperm(n_bees, device=bee_networks.device)
     type1_idxs = scen_idxs[:n_type1]
     type2_idxs = scen_idxs[n_type1:n_type1 + n_type2]
     type3_idxs = scen_idxs[n_type1 + n_type2:n_type1 + n_type2 + n_type3]
-    type4_idxs = scen_idxs[n_type1 + n_type2 + n_type3:]
+    type4_idxs = scen_idxs[
+        n_type1 + n_type2 + n_type3:
+        n_type1 + n_type2 + n_type3 + n_type4]
+    type5_idxs = scen_idxs[n_type1 + n_type2 + n_type3 + n_type4:]
     mutation_types = torch.zeros(n_bees, device=bee_networks.device,
                                  dtype=torch.long)
     mutation_types[type1_idxs] = 1
     mutation_types[type2_idxs] = 2
     mutation_types[type3_idxs] = 3
     mutation_types[type4_idxs] = 4
+    mutation_types[type5_idxs] = 5
 
     remaining_state = None
     if bee_model is None or (empty_routes.any() and force_linking_unlinked):
@@ -684,6 +719,22 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
         new_type4_routes = new_type4_all[:, type4_idxs].gather(
             2, type4_gather).squeeze(2)
         new_routes[:, type4_idxs] = new_type4_routes
+
+    if edit_model is not None and n_type5 > 0:
+        # modify type 5 routes: single-step edit (extend / trim_start /
+        # trim_end / halt) using a trim-capable model.
+        new_type5_all = get_neural_edit_variants(
+            edit_model,
+            env_state,
+            bee_networks,
+            chosen_route_idxs,
+            ignore_max_route_len=ignore_type5_max_route_len,
+        )
+        type5_gather = chosen_route_idxs[:, type5_idxs, None, None].expand(
+            -1, -1, -1, max_n_nodes)
+        new_type5_routes = new_type5_all[:, type5_idxs].gather(
+            2, type5_gather).squeeze(2)
+        new_routes[:, type5_idxs] = new_type5_routes
 
     bee_networks.scatter_(2, gather_idx, new_routes[..., None, :])
     if return_mutation_metadata:
@@ -796,6 +847,87 @@ def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs
     else:
         halted = action[:, 0] == -1
         env_state.shortest_path_action(action)
+
+    post_step_routes = env_state.current_routes.clone()
+
+    new_flat_routes = pre_step_routes.clone()
+    new_flat_routes[~halted] = post_step_routes[~halted]
+
+    pad_size = max_n_nodes - new_flat_routes.shape[-1]
+    if pad_size > 0:
+        new_flat_routes = torch.nn.functional.pad(
+            new_flat_routes, (0, pad_size), value=-1)
+
+    new_routes = new_flat_routes.reshape(batch_size, n_bees, max_n_nodes)
+
+    result_networks = bee_networks.clone()
+    result_networks.scatter_(2, gather_idx, new_routes.unsqueeze(2))
+
+    if not bee_dim:
+        result_networks = result_networks.squeeze(1)
+
+    return result_networks
+
+
+def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
+                             greedy=False, ignore_max_route_len=False):
+    """Apply one edit step (extend / trim_start / trim_end / halt) per bee.
+
+    Like ``get_neural_extend_variants`` but the model is allowed to choose
+    any route action — extend, trim_start, trim_end, or halt — in a single
+    step. The bee's chosen route is fed in as the in-progress route, the
+    rest of the bee's network is fed in as context, and one
+    ``step_route_action`` call decides what to do. If the model halts, the
+    chosen route is kept unchanged; otherwise the route after the action is
+    written back into the network.
+    """
+    if not getattr(model, 'supports_trim_actions', False):
+        raise ValueError(
+            "get_neural_edit_variants requires a model with "
+            "supports_trim_actions=True"
+        )
+
+    bee_dim = bee_networks.ndim == 4
+    if not bee_dim:
+        bee_networks = bee_networks.unsqueeze(1)
+        chosen_route_idxs = chosen_route_idxs.unsqueeze(1)
+
+    batch_size = bee_networks.shape[0]
+    n_bees = bee_networks.shape[1]
+    n_routes = bee_networks.shape[2]
+    max_n_nodes = bee_networks.shape[3]
+
+    gather_idx = chosen_route_idxs[..., None, None].expand(
+        -1, -1, -1, max_n_nodes)
+    chosen_routes = bee_networks.gather(2, gather_idx).squeeze(2)
+    flat_chosen = chosen_routes.flatten(0, 1)
+
+    keep_mask = torch.ones(bee_networks.shape[:3], dtype=bool,
+                           device=bee_networks.device)
+    keep_mask.scatter_(2, chosen_route_idxs[..., None], False)
+    flat_kept = bee_networks[keep_mask].reshape(
+        batch_size * n_bees, n_routes - 1, max_n_nodes)
+
+    env_state.replace_routes(flat_kept)
+    env_state.set_current_routes(flat_chosen)
+    env_state = model.setup_planning(env_state)
+
+    pre_step_routes = env_state.current_routes.clone()
+
+    if ignore_max_route_len:
+        original_max_route_len = env_state.extra_data.max_route_len.clone()
+        env_state.extra_data.max_route_len = env_state.n_nodes.clone()
+        try:
+            action_kinds, action, _, _ = model.step_route_action(
+                env_state, greedy=greedy)
+        finally:
+            env_state.extra_data.max_route_len = original_max_route_len
+    else:
+        action_kinds, action, _, _ = model.step_route_action(
+            env_state, greedy=greedy)
+
+    halted = action_kinds == ROUTE_ACTION_HALT
+    env_state.apply_route_actions(action_kinds, action)
 
     post_step_routes = env_state.current_routes.clone()
 
