@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(jupyter nbconvert *)",
+      "Read(//tmp/**)",
+      "Bash(python -c 'import json; nb=json.load\\(open\\(r'\\\\''D:\\\\PythonProjects\\\\connectpt\\\\examples\\\\route_generator\\\\lc_improvement_training.ipynb'\\\\'',encoding='\\\\''utf-8'\\\\''\\)\\); *)",
+      "Bash(mkdir -p /tmp)",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(r'D:\\\\PythonProjects\\\\connectpt\\\\connectpt\\\\routes_generator\\\\improvement_learning.py', encoding='utf-8'\\).read\\(\\)\\); print\\('ok'\\)\")"
+    ]
+  }
+}
