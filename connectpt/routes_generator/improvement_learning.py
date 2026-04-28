@@ -239,6 +239,67 @@ def _get_default_max_route_edit_steps(max_route_len):
     return 2 * int(max_route_len)
 
 
+def _make_sequential_empty_route_context_batch(
+        model, cost_obj, graph_batch, route_batch, current_route_idx,
+        min_route_len, max_route_len, cost_weights,
+        force_nonhalt_first_step=False, max_route_edit_steps=None,
+        invalid_directly_connected_for_empty=True):
+    """Fill previous empty route slots before planning a later empty slot.
+
+    Evaluation already plans empty route slots sequentially so each generated
+    route is visible to later slots.  PPO samples one route slot at a time, so
+    it needs the same context reconstruction to avoid training every empty slot
+    against the identical seed network.
+    """
+    if current_route_idx <= 0:
+        return route_batch
+
+    seed_route_is_empty = (route_batch > -1).sum(dim=-1) == 0
+    if not seed_route_is_empty[:, current_route_idx].all():
+        return route_batch
+
+    context_route_len = int(route_batch.shape[-1])
+    if max_route_len is not None:
+        if torch.is_tensor(max_route_len):
+            context_route_len = max(
+                context_route_len, int(max_route_len.max().item()))
+        else:
+            context_route_len = max(context_route_len, int(max_route_len))
+
+    working_route_batch = torch.full(
+        (route_batch.shape[0], route_batch.shape[1], context_route_len),
+        -1, dtype=route_batch.dtype, device=route_batch.device)
+    working_route_batch[..., :route_batch.shape[-1]] = route_batch
+
+    for route_idx in range(current_route_idx):
+        if not seed_route_is_empty[:, route_idx].all():
+            continue
+
+        route_state = _make_route_context_state(
+            cost_obj, graph_batch, working_route_batch, route_idx,
+            min_route_len, max_route_len, cost_weights,
+            invalid_directly_connected=invalid_directly_connected_for_empty)
+        context_route_counts = route_state.n_finished_routes.detach().clone()
+        if getattr(model, "supports_trim_actions", False):
+            model.plan_new_route(
+                route_state, greedy=True,
+                force_nonhalt_first_step=force_nonhalt_first_step,
+                max_steps=max_route_edit_steps)
+        else:
+            model.plan_new_route(route_state, greedy=True)
+        planned_routes = _get_planned_current_routes(
+            route_state, working_route_batch[:, route_idx],
+            context_route_counts)
+        planned_tensor = get_batch_tensor_from_routes(
+            [[planned_routes[batch_idx]]
+             for batch_idx in range(len(planned_routes))],
+            route_batch.device,
+            max_route_len=working_route_batch.shape[-1])
+        working_route_batch[:, route_idx] = planned_tensor[:, 0]
+
+    return working_route_batch
+
+
 def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
                            min_route_len, max_route_len, greedy=False,
                            cost_weights=None, return_actions=False,
@@ -1607,8 +1668,14 @@ def train_lc_improvement_cfg_ppo(
         route_idx = route_cursor
         route_cursor = (route_cursor + 1) % n_routes
         route_is_empty = (route_batch[:, route_idx] > -1).sum(dim=-1) == 0
+        context_route_batch = _make_sequential_empty_route_context_batch(
+            model, cost_obj, graph_batch, route_batch, route_idx,
+            min_route_len, max_route_len, cost_weights,
+            force_nonhalt_first_step=force_nonhalt_first_step,
+            max_route_edit_steps=max_route_edit_steps,
+            invalid_directly_connected_for_empty=True)
         state = _make_route_context_state(
-            cost_obj, graph_batch, route_batch, route_idx,
+            cost_obj, graph_batch, context_route_batch, route_idx,
             min_route_len, max_route_len, cost_weights,
             invalid_directly_connected=bool(route_is_empty.all().item()))
         state = model.setup_planning(state)
