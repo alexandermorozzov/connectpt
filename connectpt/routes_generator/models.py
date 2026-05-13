@@ -1975,7 +1975,9 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
 
     def step_route_action(self, state: RouteGenBatchState, greedy=False,
                           actions=None, precalc_data=None,
-                          action_kinds=None, allow_halt=True):
+                          action_kinds=None, allow_halt=True,
+                          allow_extend=True, allow_trim_start=True,
+                          allow_trim_end=True):
         """Take one typed route action for the given state."""
         log.debug("stepping with trim actions")
 
@@ -2064,6 +2066,20 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         flat_trim_start_valid = trim_start_valid.reshape(batch_size, -1)
         flat_trim_end_scores = trim_end_scores.reshape(batch_size, -1)
         flat_trim_end_valid = trim_end_valid.reshape(batch_size, -1)
+
+        if not allow_extend:
+            flat_extend_scores = torch.full_like(flat_extend_scores,
+                                                 TORCH_FMIN)
+            flat_extend_valid = torch.zeros_like(flat_extend_valid)
+        if not allow_trim_start:
+            flat_trim_start_scores = torch.full_like(flat_trim_start_scores,
+                                                     TORCH_FMIN)
+            flat_trim_start_valid = torch.zeros_like(flat_trim_start_valid)
+        if not allow_trim_end:
+            flat_trim_end_scores = torch.full_like(flat_trim_end_scores,
+                                                   TORCH_FMIN)
+            flat_trim_end_valid = torch.zeros_like(flat_trim_end_valid)
+
         flat_route_scores = torch.cat((
             flat_extend_scores,
             flat_trim_start_scores,

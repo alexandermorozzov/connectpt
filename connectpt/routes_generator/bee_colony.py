@@ -185,13 +185,14 @@ def _ensure_mutation_stats_bucket(mutation_counts_out, bucket_name):
     if mutation_counts_out is None:
         return None
     bucket = mutation_counts_out.setdefault(bucket_name, {})
-    for type_name in ('type1', 'type2', 'type3', 'type4', 'type5'):
+    for type_name in ('type1', 'type2', 'type3', 'type4', 'type5',
+                      'type6'):
         bucket.setdefault(type_name, 0)
     return bucket
 
 
 def _record_attempted_mutations(mutation_counts_out, *, n_type1, n_type2,
-                                n_type3, n_type4, n_type5=0):
+                                n_type3, n_type4, n_type5=0, n_type6=0):
     if mutation_counts_out is None:
         return
     attempted = _ensure_mutation_stats_bucket(mutation_counts_out, 'attempted')
@@ -201,6 +202,7 @@ def _record_attempted_mutations(mutation_counts_out, *, n_type1, n_type2,
         'type3': int(n_type3),
         'type4': int(n_type4),
         'type5': int(n_type5),
+        'type6': int(n_type6),
     }
     for type_name, inc in increments.items():
         attempted[type_name] += inc
@@ -218,7 +220,8 @@ def _record_accepted_mutations(mutation_counts_out, mutation_types,
         return
 
     for type_idx, type_name in enumerate(
-            ('type1', 'type2', 'type3', 'type4', 'type5'), start=1):
+            ('type1', 'type2', 'type3', 'type4', 'type5', 'type6'),
+            start=1):
         type_mask = mutation_types == type_idx
         if not type_mask.any():
             continue
@@ -280,7 +283,8 @@ def _choose_route_indices(bee_networks, demand, n_routes,
 def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                mod_steps_per_pass=2, shorten_prob=0.2, n_iterations=400,
                n_type1_bees=None, n_type2_bees=None, n_type4_bees=0,
-               n_type5_bees=0, silent=False, force_linking_unlinked=False,
+               n_type5_bees=0, n_type6_bees=0, silent=False,
+               force_linking_unlinked=False,
                bee_model=None, edit_model=None,
                sum_writer=None, mutation_counts_out=None,
                adjustment_degree_weight=0.0,
@@ -290,6 +294,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                adjustment_degree_target=0.2,
                ignore_type4_max_route_len=False,
                ignore_type5_max_route_len=False,
+               ignore_type6_max_route_len=False,
                use_demand_weighted_route_selection=False):
     """Implementation of the method of  Nikolic and Teodorovic (2013).
     
@@ -310,6 +315,10 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         modify the solution in different ways.  This parameter determines the
         balance between them.  The paper isn't clear how many of each they use,
         so by default we make it half-and-half.
+    n_type4_bees -- neural construction bees that apply one extension/halt
+        step to the selected route.
+    n_type5_bees -- neural edit bees that apply one extend/trim/halt step.
+    n_type6_bees -- neural trim-only bees that apply one trim/halt step.
     silent -- if true, no tqdm output or printing
     bee_model -- if a torch model is provided, use it as the only bee type.
     adjustment_degree_weight -- penalty weight for changing routes too much
@@ -328,26 +337,28 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     if n_type1_bees is None:
         n_type1_bees = n_bees // 2
     if n_type2_bees is None:
-        # assume no type-3/4/5 bees if not specified
-        n_type2_bees = n_bees - n_type1_bees - n_type4_bees - n_type5_bees
+        # assume no type-3/4/5/6 bees if not specified
+        n_type2_bees = (n_bees - n_type1_bees - n_type4_bees -
+                        n_type5_bees - n_type6_bees)
     n_type3_bees = (n_bees - n_type1_bees - n_type2_bees -
-                    n_type4_bees - n_type5_bees)
+                    n_type4_bees - n_type5_bees - n_type6_bees)
     if n_type3_bees < 0:
         raise ValueError(
-            "Sum of n_type1/2/4/5 bees exceeds n_bees: "
-            f"{n_type1_bees}+{n_type2_bees}+{n_type4_bees}+{n_type5_bees} "
+            "Sum of n_type1/2/4/5/6 bees exceeds n_bees: "
+            f"{n_type1_bees}+{n_type2_bees}+{n_type4_bees}+"
+            f"{n_type5_bees}+{n_type6_bees} "
             f"> {n_bees}"
         )
-    if n_type5_bees > 0 and edit_model is None:
+    if (n_type5_bees > 0 or n_type6_bees > 0) and edit_model is None:
         raise ValueError(
-            "n_type5_bees > 0 requires an edit_model that supports trim "
-            "actions (set edit_model when calling bee_colony)."
+            "n_type5_bees/n_type6_bees > 0 requires an edit_model that "
+            "supports trim actions (set edit_model when calling bee_colony)."
         )
-    if n_type5_bees > 0 and not getattr(
+    if (n_type5_bees > 0 or n_type6_bees > 0) and not getattr(
             edit_model, 'supports_trim_actions', False):
         raise ValueError(
             "edit_model must have supports_trim_actions=True to drive "
-            "type-5 mutations (extend + trim + halt)."
+            "type-5/type-6 mutations."
         )
 
     if n_type3_bees > 0:
@@ -475,6 +486,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                     n_type3=n_type3_bees,
                     n_type4=n_type4_bees,
                     n_type5=n_type5_bees,
+                    n_type6=n_type6_bees,
                 )
                 new_bee_networks, mutation_types = \
                     get_mutants(bee_networks, chosen_route_idxs, n_type1_bees,
@@ -483,11 +495,14 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                                 force_linking_unlinked, bee_model, rpc_model,
                                 bee_states, n_type4=n_type4_bees,
                                 n_type5=n_type5_bees,
+                                n_type6=n_type6_bees,
                                 edit_model=edit_model,
                                 ignore_type4_max_route_len=
                                 ignore_type4_max_route_len,
                                 ignore_type5_max_route_len=
                                 ignore_type5_max_route_len,
+                                ignore_type6_max_route_len=
+                                ignore_type6_max_route_len,
                                 return_mutation_metadata=True)
 
                 new_bee_raw_costs, new_bee_metrics = \
@@ -624,9 +639,10 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
                 direct_sat_dmd, shorten_prob, street_node_neighbours,
                 shortest_paths, force_linking_unlinked, bee_model=None,
                 rpc_model=None, env_state=None, n_type4=0,
-                n_type5=0, edit_model=None,
+                n_type5=0, n_type6=0, edit_model=None,
                 ignore_type4_max_route_len=False,
                 ignore_type5_max_route_len=False,
+                ignore_type6_max_route_len=False,
                 return_mutation_metadata=False):
     bee_networks = bee_networks.clone()
 
@@ -638,7 +654,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
     empty_routes = (modified_routes > -1).sum(-1) == 0
 
     n_bees = bee_networks.shape[1]
-    n_type3 = n_bees - n_type1 - n_type2 - n_type4 - n_type5
+    n_type3 = n_bees - n_type1 - n_type2 - n_type4 - n_type5 - n_type6
     scen_idxs = torch.randperm(n_bees, device=bee_networks.device)
     type1_idxs = scen_idxs[:n_type1]
     type2_idxs = scen_idxs[n_type1:n_type1 + n_type2]
@@ -646,7 +662,11 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
     type4_idxs = scen_idxs[
         n_type1 + n_type2 + n_type3:
         n_type1 + n_type2 + n_type3 + n_type4]
-    type5_idxs = scen_idxs[n_type1 + n_type2 + n_type3 + n_type4:]
+    type5_idxs = scen_idxs[
+        n_type1 + n_type2 + n_type3 + n_type4:
+        n_type1 + n_type2 + n_type3 + n_type4 + n_type5]
+    type6_idxs = scen_idxs[
+        n_type1 + n_type2 + n_type3 + n_type4 + n_type5:]
     mutation_types = torch.zeros(n_bees, device=bee_networks.device,
                                  dtype=torch.long)
     mutation_types[type1_idxs] = 1
@@ -654,6 +674,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
     mutation_types[type3_idxs] = 3
     mutation_types[type4_idxs] = 4
     mutation_types[type5_idxs] = 5
+    mutation_types[type6_idxs] = 6
 
     remaining_state = None
     if bee_model is None or (empty_routes.any() and force_linking_unlinked):
@@ -672,7 +693,9 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
         modified_routes[empty_routes] = new_routes[empty_routes]
 
     # modify type 1 routes
-    if bee_model is not None:
+    if n_type1 == 0:
+        new_type1_routes = modified_routes[:, type1_idxs]
+    elif bee_model is not None:
         # run it on all bees...
         new_type1_networks = get_neural_variants(bee_model, env_state, 
                                                  bee_networks,
@@ -735,6 +758,22 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
         new_type5_routes = new_type5_all[:, type5_idxs].gather(
             2, type5_gather).squeeze(2)
         new_routes[:, type5_idxs] = new_type5_routes
+
+    if edit_model is not None and n_type6 > 0:
+        # modify type 6 routes: trim-only edit (trim_start / trim_end / halt)
+        # using a trim-capable model. Extending is masked out.
+        new_type6_all = get_neural_trim_variants(
+            edit_model,
+            env_state,
+            bee_networks,
+            chosen_route_idxs,
+            ignore_max_route_len=ignore_type6_max_route_len,
+        )
+        type6_gather = chosen_route_idxs[:, type6_idxs, None, None].expand(
+            -1, -1, -1, max_n_nodes)
+        new_type6_routes = new_type6_all[:, type6_idxs].gather(
+            2, type6_gather).squeeze(2)
+        new_routes[:, type6_idxs] = new_type6_routes
 
     bee_networks.scatter_(2, gather_idx, new_routes[..., None, :])
     if return_mutation_metadata:
@@ -829,7 +868,10 @@ def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs
         try:
             if supports_trim_actions:
                 action_kinds, action, _, _ = model.step_route_action(
-                    env_state, greedy=greedy)
+                    env_state, greedy=greedy,
+                    allow_extend=True,
+                    allow_trim_start=False,
+                    allow_trim_end=False)
             else:
                 action, _, _ = model.step(env_state, greedy=greedy)
         finally:
@@ -837,7 +879,10 @@ def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs
     else:
         if supports_trim_actions:
             action_kinds, action, _, _ = model.step_route_action(
-                env_state, greedy=greedy)
+                env_state, greedy=greedy,
+                allow_extend=True,
+                allow_trim_start=False,
+                allow_trim_end=False)
         else:
             action, _, _ = model.step(env_state, greedy=greedy)
 
@@ -870,7 +915,9 @@ def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs
 
 
 def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
-                             greedy=False, ignore_max_route_len=False):
+                             greedy=False, ignore_max_route_len=False,
+                             allow_extend=True, allow_trim_start=True,
+                             allow_trim_end=True):
     """Apply one edit step (extend / trim_start / trim_end / halt) per bee.
 
     Like ``get_neural_extend_variants`` but the model is allowed to choose
@@ -919,12 +966,18 @@ def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
         env_state.extra_data.max_route_len = env_state.n_nodes.clone()
         try:
             action_kinds, action, _, _ = model.step_route_action(
-                env_state, greedy=greedy)
+                env_state, greedy=greedy,
+                allow_extend=allow_extend,
+                allow_trim_start=allow_trim_start,
+                allow_trim_end=allow_trim_end)
         finally:
             env_state.extra_data.max_route_len = original_max_route_len
     else:
         action_kinds, action, _, _ = model.step_route_action(
-            env_state, greedy=greedy)
+            env_state, greedy=greedy,
+            allow_extend=allow_extend,
+            allow_trim_start=allow_trim_start,
+            allow_trim_end=allow_trim_end)
 
     halted = action_kinds == ROUTE_ACTION_HALT
     env_state.apply_route_actions(action_kinds, action)
@@ -948,6 +1001,28 @@ def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
         result_networks = result_networks.squeeze(1)
 
     return result_networks
+
+
+def get_neural_trim_variants(model, env_state, bee_networks, chosen_route_idxs,
+                             greedy=False, ignore_max_route_len=False):
+    """Apply one trim-only edit step per bee.
+
+    This is the BCO type-6 mutation: the selected route is the current route,
+    all other slots remain context, and the edit model can only choose
+    trim_start, trim_end, or halt. If no trim action is valid, halt keeps the
+    route unchanged.
+    """
+    return get_neural_edit_variants(
+        model,
+        env_state,
+        bee_networks,
+        chosen_route_idxs,
+        greedy=greedy,
+        ignore_max_route_len=ignore_max_route_len,
+        allow_extend=False,
+        allow_trim_start=True,
+        allow_trim_end=True,
+    )
 
 
 def get_neural_variants(model, env_state, bee_networks, drop_route_idxs,
@@ -1183,6 +1258,8 @@ def main(cfg: DictConfig, tensors:dict):
 
     force_linking_unlinked = cfg.get('force_linking_unlinked', False)
     ignore_type4_max_route_len = cfg.get('ignore_type4_max_route_len', False)
+    ignore_type5_max_route_len = cfg.get('ignore_type5_max_route_len', False)
+    ignore_type6_max_route_len = cfg.get('ignore_type6_max_route_len', False)
     use_demand_weighted_route_selection = \
         cfg.get('use_demand_weighted_route_selection', False)
 
@@ -1194,6 +1271,9 @@ def main(cfg: DictConfig, tensors:dict):
 
     nt1b = cfg.get('n_type1_bees', None)
     nt2b = cfg.get('n_type2_bees', None)
+    nt4b = cfg.get('n_type4_bees', 0)
+    nt5b = cfg.get('n_type5_bees', 0)
+    nt6b = cfg.get('n_type6_bees', 0)
     adjustment_degree_weight = cfg.get('adjustment_degree_weight', 0.0)
     adjustment_degree_gap = cfg.get('adjustment_degree_gap', 0.1)
     adjustment_degree_mode = cfg.get('adjustment_degree_mode', 'current')
@@ -1203,6 +1283,7 @@ def main(cfg: DictConfig, tensors:dict):
         lrnu.test_method(bee_colony, test_dl, cfg.eval, cfg.init, cost_obj, 
             sum_writer=sum_writer, silent=True, n_bees=cfg.n_bees,
             n_iterations=cfg.n_iterations, n_type1_bees=nt1b, n_type2_bees=nt2b,  
+            n_type4_bees=nt4b, n_type5_bees=nt5b, n_type6_bees=nt6b,
             device=DEVICE, bee_model=bee_model, return_routes=True,
             force_linking_unlinked=force_linking_unlinked,
             adjustment_degree_weight=adjustment_degree_weight,
@@ -1211,6 +1292,8 @@ def main(cfg: DictConfig, tensors:dict):
             adjustment_degree_objective=adjustment_degree_objective,
             adjustment_degree_target=adjustment_degree_target,
             ignore_type4_max_route_len=ignore_type4_max_route_len,
+            ignore_type5_max_route_len=ignore_type5_max_route_len,
+            ignore_type6_max_route_len=ignore_type6_max_route_len,
             use_demand_weighted_route_selection=
             use_demand_weighted_route_selection)
     routes = test_output[-1]

@@ -1,5 +1,8 @@
 n_bees: 10
 n_type1_bees: 5
+n_type4_bees: 0
+n_type5_bees: 0
+n_type6_bees: 0
 n_iterations: 150
 batch_size: 10
 force_linking_unlinked: false
@@ -9,6 +12,8 @@ adjustment_degree_mode: current
 adjustment_degree_objective: raw
 adjustment_degree_target: 0.2
 ignore_type4_max_route_len: false
+ignore_type5_max_route_len: false
+ignore_type6_max_route_len: false
 use_demand_weighted_route_selection: false
 
 defaults:
