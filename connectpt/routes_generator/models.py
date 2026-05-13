@@ -1150,10 +1150,19 @@ class RouteGeneratorBase(nn.Module):
                                          device=node_descs.device)
         node_pad_mask = torch.zeros((state.batch_size, state.max_n_nodes), 
                                     dtype=bool, device=node_descs.device)
+        node_offset = 0
         for bi, num_nodes in enumerate(state.n_nodes):
+            num_nodes = int(num_nodes.item())
+            next_offset = node_offset + num_nodes
             folded_node_descs[bi, :num_nodes, :node_descs.shape[-1]] = \
-                node_descs[:num_nodes]
+                node_descs[node_offset:next_offset]
             node_pad_mask[bi, num_nodes:] = True
+            node_offset = next_offset
+        if node_offset != node_descs.shape[0]:
+            raise ValueError(
+                "Node embedding count does not match batched graph nodes: "
+                f"{node_offset} vs {node_descs.shape[0]}"
+            )
         
         return folded_node_descs, node_pad_mask
 

@@ -1,8 +1,15 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
+from torch_geometric.data import Batch
 
 from connectpt.routes_generator.citygraph_dataset import CityGraphData, STOP_KEY
 from connectpt.routes_generator.eval_route_generator import sample_from_model
+from connectpt.routes_generator.improvement_learning import (
+    _make_route_context_state,
+    rollout_lc_improvement,
+)
 from connectpt.routes_generator.initialization import (
     prepare_current_routes,
     prepare_init_network,
@@ -33,6 +40,22 @@ class RevisitOnlyModel(NeverCalledModel):
 
     def plan_new_route(self, state, greedy=False):
         self.visited_routes.append(state.current_routes[0].tolist())
+        halt = torch.full((state.batch_size, 2), -1, dtype=torch.long,
+                          device=state.device)
+        state.shortest_path_action(halt)
+        logits = torch.zeros(state.batch_size, device=state.device)
+        entropy = torch.zeros(state.batch_size, device=state.device)
+        return halt, logits, entropy
+
+
+class RecordingHaltModel:
+    def __init__(self):
+        self.current_routes = []
+        self.context_counts = []
+
+    def plan_new_route(self, state, greedy=False):
+        self.current_routes.append(state.current_routes.detach().cpu().clone())
+        self.context_counts.append(state.n_finished_routes.detach().cpu().clone())
         halt = torch.full((state.batch_size, 2), -1, dtype=torch.long,
                           device=state.device)
         state.shortest_path_action(halt)
@@ -81,6 +104,17 @@ class IdentityGraphNet(torch.nn.Module):
 
 def make_line_state(n_nodes=4, n_routes_to_plan=1, min_route_len=2,
                     max_route_len=4):
+    graph = make_line_graph(n_nodes)
+    return RouteGenBatchState(
+        graph,
+        MyCostModule(),
+        n_routes_to_plan=n_routes_to_plan,
+        min_route_len=min_route_len,
+        max_route_len=max_route_len,
+    )
+
+
+def make_line_graph(n_nodes=4):
     node_locs = torch.stack((
         torch.arange(n_nodes, dtype=torch.float32),
         torch.zeros(n_nodes, dtype=torch.float32),
@@ -95,13 +129,7 @@ def make_line_state(n_nodes=4, n_routes_to_plan=1, min_route_len=2,
     demand[n_nodes - 1, 0] = 5.0
     graph = CityGraphData.from_tensors(node_locs, street_adj, demand,
                                        pos_only=False)
-    return RouteGenBatchState(
-        graph,
-        MyCostModule(),
-        n_routes_to_plan=n_routes_to_plan,
-        min_route_len=min_route_len,
-        max_route_len=max_route_len,
-    )
+    return graph
 
 
 def test_prepare_init_network_broadcasts_single_batch():
@@ -147,6 +175,119 @@ def test_prepare_init_network_rejects_batch_mismatch():
             batch_size=3,
             n_routes=2,
             device=torch.device("cpu"),
+        )
+
+
+def test_fold_node_descs_uses_per_graph_offsets_in_batch():
+    state = SimpleNamespace(
+        batch_size=2,
+        max_n_nodes=3,
+        n_nodes=torch.tensor([2, 3]),
+    )
+    node_descs = torch.arange(10, dtype=torch.float32).reshape(5, 2)
+
+    folded, pad_mask = PathCombiningRouteGenerator.fold_node_descs(
+        node_descs, state)
+
+    assert torch.equal(folded[0, :2], node_descs[:2])
+    assert torch.equal(folded[1, :3], node_descs[2:5])
+    assert torch.equal(folded[0, 2], torch.zeros(2))
+    assert pad_mask.tolist() == [
+        [False, False, True],
+        [False, False, False],
+    ]
+
+
+def test_make_route_context_state_sets_active_route_and_context_routes():
+    graph = make_line_graph(n_nodes=5)
+    cost_obj = MyCostModule()
+    seed_routes = torch.tensor(
+        [[[0, 1, 2, -1], [2, 3, 4, -1], [-1, -1, -1, -1]]],
+        dtype=torch.long,
+    )
+
+    state = _make_route_context_state(
+        cost_obj,
+        graph,
+        seed_routes,
+        route_idx=1,
+        min_route_len=2,
+        max_route_len=4,
+        cost_weights=cost_obj.get_weights(torch.device("cpu")),
+    )
+
+    assert [route.tolist() for route in state._finished_routes[0]] == [
+        [0, 1, 2],
+    ]
+    assert state.current_routes[0, :3].tolist() == [2, 3, 4]
+    assert torch.isfinite(state.route_mat[0, 0, 1])
+    assert torch.isfinite(state.route_mat[0, 2, 3])
+
+
+def test_lc_improvement_greedy_rollout_keeps_first_graph_context_in_batch():
+    graph = make_line_graph(n_nodes=5)
+    other_graph = make_line_graph(n_nodes=5)
+    cost_obj = MyCostModule()
+    single_routes = torch.tensor(
+        [[[0, 1, -1, -1], [2, 3, 4, -1]]],
+        dtype=torch.long,
+    )
+    batched_routes = torch.tensor(
+        [
+            [[0, 1, -1, -1], [2, 3, 4, -1]],
+            [[4, 3, -1, -1], [1, 2, 3, -1]],
+        ],
+        dtype=torch.long,
+    )
+    cost_weights = cost_obj.get_weights(torch.device("cpu"))
+    single_model = RecordingHaltModel()
+    batch_model = RecordingHaltModel()
+
+    single_output = rollout_lc_improvement(
+        single_model,
+        cost_obj,
+        Batch.from_data_list([graph]),
+        single_routes,
+        min_route_len=2,
+        max_route_len=4,
+        greedy=True,
+        cost_weights=cost_weights,
+        return_actions=True,
+        max_route_edit_steps=4,
+    )
+    batch_output = rollout_lc_improvement(
+        batch_model,
+        cost_obj,
+        Batch.from_data_list([graph, other_graph]),
+        batched_routes,
+        min_route_len=2,
+        max_route_len=4,
+        greedy=True,
+        cost_weights=cost_weights,
+        return_actions=True,
+        max_route_edit_steps=4,
+    )
+
+    single_state, *_, single_actions, _ = single_output
+    batch_state, *_, batch_actions, _ = batch_output
+
+    assert torch.equal(batch_state.current_routes[0],
+                       single_state.current_routes[0])
+    assert [route.tolist() for route in batch_state.routes[0]] == [
+        route.tolist() for route in single_state.routes[0]
+    ]
+    for route_idx in range(single_routes.shape[1]):
+        assert torch.equal(
+            batch_model.current_routes[route_idx][0],
+            single_model.current_routes[route_idx][0],
+        )
+        assert torch.equal(
+            batch_model.context_counts[route_idx][0:1],
+            single_model.context_counts[route_idx],
+        )
+        assert torch.equal(
+            batch_actions[route_idx][0:1],
+            single_actions[route_idx],
         )
 
 

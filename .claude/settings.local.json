@@ -9,7 +9,8 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\(r'D:\\\\PythonProjects\\\\connectpt\\\\connectpt\\\\routes_generator\\\\improvement_learning.py', encoding='utf-8'\\).read\\(\\)\\); print\\('ok'\\)\")",
       "Bash(python)",
       "Bash(.venv/Scripts/python.exe -c ' *)",
-      "Bash(.venv/Scripts/python.exe _patch_eval_seeded.py)"
+      "Bash(.venv/Scripts/python.exe _patch_eval_seeded.py)",
+      "Bash(xargs grep *)"
     ]
   }
 }
