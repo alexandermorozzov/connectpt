@@ -22,6 +22,10 @@ from .import utils as lrnu
 from .initialization import get_direct_sat_dmd
 
 
+MUTATION_TYPE_NAMES = (
+    'type1', 'type2', 'type3', 'type4', 'type5', 'type6', 'type7')
+
+
 def _reverse_padded_routes(routes):
     """Reverse the valid part of each padded route and keep -1 padding at end."""
     route_lens = (routes > -1).sum(dim=-1)
@@ -185,14 +189,14 @@ def _ensure_mutation_stats_bucket(mutation_counts_out, bucket_name):
     if mutation_counts_out is None:
         return None
     bucket = mutation_counts_out.setdefault(bucket_name, {})
-    for type_name in ('type1', 'type2', 'type3', 'type4', 'type5',
-                      'type6'):
+    for type_name in MUTATION_TYPE_NAMES:
         bucket.setdefault(type_name, 0)
     return bucket
 
 
 def _record_attempted_mutations(mutation_counts_out, *, n_type1, n_type2,
-                                n_type3, n_type4, n_type5=0, n_type6=0):
+                                n_type3, n_type4, n_type5=0, n_type6=0,
+                                n_type7=0):
     if mutation_counts_out is None:
         return
     attempted = _ensure_mutation_stats_bucket(mutation_counts_out, 'attempted')
@@ -203,6 +207,7 @@ def _record_attempted_mutations(mutation_counts_out, *, n_type1, n_type2,
         'type4': int(n_type4),
         'type5': int(n_type5),
         'type6': int(n_type6),
+        'type7': int(n_type7),
     }
     for type_name, inc in increments.items():
         attempted[type_name] += inc
@@ -211,21 +216,76 @@ def _record_attempted_mutations(mutation_counts_out, *, n_type1, n_type2,
         mutation_counts_out[type_name] = attempted[type_name]
 
 
-def _record_accepted_mutations(mutation_counts_out, mutation_types,
-                               accepted_mask):
+def _record_mutation_mask(mutation_counts_out, bucket_name, mutation_types,
+                          mask):
     if mutation_counts_out is None:
         return
-    accepted = _ensure_mutation_stats_bucket(mutation_counts_out, 'accepted')
+    bucket = _ensure_mutation_stats_bucket(mutation_counts_out, bucket_name)
     if mutation_types is None:
         return
 
-    for type_idx, type_name in enumerate(
-            ('type1', 'type2', 'type3', 'type4', 'type5', 'type6'),
-            start=1):
+    for type_idx, type_name in enumerate(MUTATION_TYPE_NAMES, start=1):
         type_mask = mutation_types == type_idx
         if not type_mask.any():
             continue
-        accepted[type_name] += int(accepted_mask[:, type_mask].sum().item())
+        bucket[type_name] += int(mask[:, type_mask].sum().item())
+
+
+def _record_accepted_mutations(mutation_counts_out, mutation_types,
+                               accepted_mask):
+    _record_mutation_mask(
+        mutation_counts_out, 'accepted', mutation_types, accepted_mask)
+
+
+def _record_worse_accepted_mutations(mutation_counts_out, mutation_types,
+                                     accepted_mask):
+    _record_mutation_mask(
+        mutation_counts_out, 'worse_accepted', mutation_types, accepted_mask)
+
+
+def _ensure_selection_stats_bucket(mutation_counts_out):
+    if mutation_counts_out is None:
+        return None
+    bucket = mutation_counts_out.setdefault('selection', {})
+    bucket.setdefault('parent_copies', 0)
+    bucket.setdefault('nonbest_parent_copies', 0)
+    bucket.setdefault('worse_parent_copies', 0)
+    return bucket
+
+
+def _record_selection_stats(mutation_counts_out, parent_idxs,
+                            bee_objective_costs):
+    """Record which population members survive the selection step."""
+    if mutation_counts_out is None:
+        return
+    bucket = _ensure_selection_stats_bucket(mutation_counts_out)
+    parent_costs = bee_objective_costs.gather(1, parent_idxs)
+    best_costs = bee_objective_costs.min(dim=1, keepdim=True).values
+
+    bucket['parent_copies'] += int(parent_idxs.numel())
+    bucket['nonbest_parent_copies'] += int(
+        (parent_costs > best_costs).sum().item())
+    bucket['worse_parent_copies'] += int(
+        (parent_costs > bee_objective_costs).sum().item())
+
+
+def _sample_soft_selection_parents(bee_objective_costs, temperature,
+                                   uniform_mix=0.05, elite_count=1):
+    """Sample parent bee indices with a soft preference for lower cost."""
+    _, n_bees = bee_objective_costs.shape
+    centered = bee_objective_costs - \
+        bee_objective_costs.min(dim=1, keepdim=True).values
+    probs = torch.softmax(-centered / temperature, dim=1)
+    if uniform_mix > 0:
+        probs = (1 - uniform_mix) * probs + uniform_mix / n_bees
+    parents = probs.multinomial(n_bees, replacement=True)
+
+    elite_count = min(max(int(elite_count), 0), n_bees)
+    if elite_count > 0:
+        elite_idxs = bee_objective_costs.topk(
+            elite_count, dim=1, largest=False).indices
+        parents[:, :elite_count] = elite_idxs
+    return parents
 
 
 def _get_route_selection_weights(bee_networks, demand,
@@ -283,7 +343,8 @@ def _choose_route_indices(bee_networks, demand, n_routes,
 def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                mod_steps_per_pass=2, shorten_prob=0.2, n_iterations=400,
                n_type1_bees=None, n_type2_bees=None, n_type4_bees=0,
-               n_type5_bees=0, n_type6_bees=0, silent=False,
+               n_type5_bees=0, n_type6_bees=0, n_type7_bees=0,
+               silent=False,
                force_linking_unlinked=False,
                bee_model=None, edit_model=None,
                sum_writer=None, mutation_counts_out=None,
@@ -295,7 +356,16 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                ignore_type4_max_route_len=False,
                ignore_type5_max_route_len=False,
                ignore_type6_max_route_len=False,
-               use_demand_weighted_route_selection=False):
+               ignore_type7_max_route_len=False,
+               use_demand_weighted_route_selection=False,
+               worse_accept_temperature=0.0,
+               worse_accept_decay=0.995,
+               worse_accept_min_temperature=0.001,
+               worse_selection_temperature=0.0,
+               worse_selection_decay=0.995,
+               worse_selection_min_temperature=0.001,
+               worse_selection_uniform_mix=0.05,
+               worse_selection_elite_count=1):
     """Implementation of the method of  Nikolic and Teodorovic (2013).
     
     state -- A RouteGenBatchState object representing the initial state.
@@ -319,6 +389,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         step to the selected route.
     n_type5_bees -- neural edit bees that apply one extend/trim/halt step.
     n_type6_bees -- neural trim-only bees that apply one trim/halt step.
+    n_type7_bees -- neural compound bees that apply one trim-only step and
+        then one construction/extension step before evaluation.
     silent -- if true, no tqdm output or printing
     bee_model -- if a torch model is provided, use it as the only bee type.
     adjustment_degree_weight -- penalty weight for changing routes too much
@@ -333,33 +405,71 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         "target" objective.
     use_demand_weighted_route_selection -- if True, choose routes for mutation
         by sampling routes that directly satisfy less demand more often.
+    worse_accept_temperature -- if > 0, also accept strictly worse mutations
+        with probability exp(-delta / temperature).  Set to 0 to keep the
+        original greedy acceptance.
+    worse_accept_decay -- multiplicative temperature decay per BCO iteration.
+    worse_accept_min_temperature -- lower temperature bound while worse
+        acceptance is enabled.
+    worse_selection_temperature -- if > 0, use soft population selection
+        instead of the original recruiter/follower copying. Lower objective
+        costs remain more likely, but worse/non-best bees can survive.
+    worse_selection_decay -- multiplicative temperature decay per BCO
+        iteration for soft population selection.
+    worse_selection_min_temperature -- lower selection temperature bound while
+        soft population selection is enabled.
+    worse_selection_uniform_mix -- probability mass mixed into a uniform
+        parent distribution to preserve exploration.
+    worse_selection_elite_count -- number of best current bees copied into
+        the first population slots before the remaining slots are sampled.
     """
+    if edit_model is None and getattr(bee_model, 'supports_trim_actions', False):
+        edit_model = bee_model
+
     if n_type1_bees is None:
         n_type1_bees = n_bees // 2
     if n_type2_bees is None:
-        # assume no type-3/4/5/6 bees if not specified
+        # assume no type-3/4/5/6/7 bees if not specified
         n_type2_bees = (n_bees - n_type1_bees - n_type4_bees -
-                        n_type5_bees - n_type6_bees)
+                        n_type5_bees - n_type6_bees - n_type7_bees)
     n_type3_bees = (n_bees - n_type1_bees - n_type2_bees -
-                    n_type4_bees - n_type5_bees - n_type6_bees)
+                    n_type4_bees - n_type5_bees - n_type6_bees -
+                    n_type7_bees)
     if n_type3_bees < 0:
         raise ValueError(
-            "Sum of n_type1/2/4/5/6 bees exceeds n_bees: "
+            "Sum of n_type1/2/4/5/6/7 bees exceeds n_bees: "
             f"{n_type1_bees}+{n_type2_bees}+{n_type4_bees}+"
-            f"{n_type5_bees}+{n_type6_bees} "
+            f"{n_type5_bees}+{n_type6_bees}+{n_type7_bees} "
             f"> {n_bees}"
         )
-    if (n_type5_bees > 0 or n_type6_bees > 0) and edit_model is None:
+    trim_bees = n_type5_bees + n_type6_bees + n_type7_bees
+    if trim_bees > 0 and edit_model is None:
         raise ValueError(
-            "n_type5_bees/n_type6_bees > 0 requires an edit_model that "
+            "n_type5_bees/n_type6_bees/n_type7_bees > 0 requires an edit_model that "
             "supports trim actions (set edit_model when calling bee_colony)."
         )
-    if (n_type5_bees > 0 or n_type6_bees > 0) and not getattr(
-            edit_model, 'supports_trim_actions', False):
+    if trim_bees > 0 and not getattr(edit_model, 'supports_trim_actions',
+                                     False):
         raise ValueError(
             "edit_model must have supports_trim_actions=True to drive "
-            "type-5/type-6 mutations."
+            "type-5/type-6/type-7 mutations."
         )
+    if worse_accept_temperature < 0:
+        raise ValueError("worse_accept_temperature must be >= 0")
+    if worse_accept_decay <= 0:
+        raise ValueError("worse_accept_decay must be > 0")
+    if worse_accept_min_temperature < 0:
+        raise ValueError("worse_accept_min_temperature must be >= 0")
+    if worse_selection_temperature < 0:
+        raise ValueError("worse_selection_temperature must be >= 0")
+    if worse_selection_decay <= 0:
+        raise ValueError("worse_selection_decay must be > 0")
+    if worse_selection_min_temperature < 0:
+        raise ValueError("worse_selection_min_temperature must be >= 0")
+    if not 0 <= worse_selection_uniform_mix <= 1:
+        raise ValueError("worse_selection_uniform_mix must be in [0, 1]")
+    if worse_selection_elite_count < 0:
+        raise ValueError("worse_selection_elite_count must be >= 0")
 
     if n_type3_bees > 0:
         # instantiate a random path-combining model
@@ -450,8 +560,25 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
 
     cost_history = torch.zeros((batch_size, n_iterations + 1), device=dev)
     cost_history[:, 0] = best_raw_costs
+    use_worse_accept = worse_accept_temperature > 0
+    use_worse_selection = worse_selection_temperature > 0
 
     for iteration in tqdm(range(n_iterations), disable=silent):
+        if use_worse_accept:
+            current_worse_accept_temperature = max(
+                worse_accept_min_temperature,
+                worse_accept_temperature * (worse_accept_decay ** iteration),
+            )
+        else:
+            current_worse_accept_temperature = 0.0
+        if use_worse_selection:
+            current_worse_selection_temperature = max(
+                worse_selection_min_temperature,
+                worse_selection_temperature *
+                (worse_selection_decay ** iteration),
+            )
+        else:
+            current_worse_selection_temperature = 0.0
         for pi in range(passes_per_it):
             for mi in range(mod_steps_per_pass):
 
@@ -487,6 +614,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                     n_type4=n_type4_bees,
                     n_type5=n_type5_bees,
                     n_type6=n_type6_bees,
+                    n_type7=n_type7_bees,
                 )
                 new_bee_networks, mutation_types = \
                     get_mutants(bee_networks, chosen_route_idxs, n_type1_bees,
@@ -496,6 +624,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                                 bee_states, n_type4=n_type4_bees,
                                 n_type5=n_type5_bees,
                                 n_type6=n_type6_bees,
+                                n_type7=n_type7_bees,
                                 edit_model=edit_model,
                                 ignore_type4_max_route_len=
                                 ignore_type4_max_route_len,
@@ -503,6 +632,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                                 ignore_type5_max_route_len,
                                 ignore_type6_max_route_len=
                                 ignore_type6_max_route_len,
+                                ignore_type7_max_route_len=
+                                ignore_type7_max_route_len,
                                 return_mutation_metadata=True)
 
                 new_bee_raw_costs, new_bee_metrics = \
@@ -538,21 +669,39 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                 new_bee_objective_costs = new_bee_raw_costs + \
                     adjustment_degree_weight * new_bee_adjustment_penalties
 
-                better_idxs = new_bee_objective_costs < bee_objective_costs
+                objective_delta = new_bee_objective_costs - bee_objective_costs
+                better_idxs = objective_delta < 0
+                if use_worse_accept and current_worse_accept_temperature > 0:
+                    worse_candidates = objective_delta > 0
+                    worse_probs = torch.zeros_like(objective_delta)
+                    worse_probs[worse_candidates] = torch.exp(
+                        -objective_delta[worse_candidates] /
+                        current_worse_accept_temperature)
+                    worse_accepted = worse_candidates & (
+                        torch.rand_like(worse_probs) < worse_probs)
+                    accepted_idxs = better_idxs | worse_accepted
+                else:
+                    worse_accepted = torch.zeros_like(better_idxs)
+                    accepted_idxs = better_idxs
                 _record_accepted_mutations(
                     mutation_counts_out,
                     mutation_types,
-                    better_idxs,
+                    accepted_idxs,
                 )
-                bee_networks[better_idxs] = new_bee_networks[better_idxs]
-                bee_raw_costs[better_idxs] = new_bee_raw_costs[better_idxs]
-                bee_objective_costs[better_idxs] = \
-                    new_bee_objective_costs[better_idxs]
-                bee_adjustment_degrees[better_idxs] = \
-                    new_bee_adjustment_degrees[better_idxs]
-                bee_adjustment_penalties[better_idxs] = \
-                    new_bee_adjustment_penalties[better_idxs]
-                bee_metrics[better_idxs] = new_bee_metrics[better_idxs]        
+                _record_worse_accepted_mutations(
+                    mutation_counts_out,
+                    mutation_types,
+                    worse_accepted,
+                )
+                bee_networks[accepted_idxs] = new_bee_networks[accepted_idxs]
+                bee_raw_costs[accepted_idxs] = new_bee_raw_costs[accepted_idxs]
+                bee_objective_costs[accepted_idxs] = \
+                    new_bee_objective_costs[accepted_idxs]
+                bee_adjustment_degrees[accepted_idxs] = \
+                    new_bee_adjustment_degrees[accepted_idxs]
+                bee_adjustment_penalties[accepted_idxs] = \
+                    new_bee_adjustment_penalties[accepted_idxs]
+                bee_metrics[accepted_idxs] = new_bee_metrics[accepted_idxs]
 
             # do "backward pass"
 
@@ -574,6 +723,27 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
             cost_history[:, iteration + 1] = best_raw_costs
             new_best = bee_metrics[is_improvement, improvement_idx]
             best_metrics[is_improvement] = new_best     
+
+            if use_worse_selection and current_worse_selection_temperature > 0:
+                parent_idxs = _sample_soft_selection_parents(
+                    bee_objective_costs,
+                    current_worse_selection_temperature,
+                    uniform_mix=worse_selection_uniform_mix,
+                    elite_count=worse_selection_elite_count,
+                )
+                _record_selection_stats(
+                    mutation_counts_out, parent_idxs, bee_objective_costs)
+
+                bee_networks = bee_networks[batch_idxs[:, None], parent_idxs]
+                bee_raw_costs = bee_raw_costs[batch_idxs[:, None], parent_idxs]
+                bee_objective_costs = \
+                    bee_objective_costs[batch_idxs[:, None], parent_idxs]
+                bee_adjustment_degrees = \
+                    bee_adjustment_degrees[batch_idxs[:, None], parent_idxs]
+                bee_adjustment_penalties = \
+                    bee_adjustment_penalties[batch_idxs[:, None], parent_idxs]
+                bee_metrics = bee_metrics[batch_idxs[:, None], parent_idxs]
+                continue
 
             # decide whether each bee is a recruiter or follower
             max_bee_costs, _ = bee_objective_costs.max(dim=1)
@@ -606,6 +776,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
             recruiters[no_valid_recruiters] = bee_idxs
             recruiters[are_recruiters] = \
                 bee_idxs[None].expand(batch_size, -1)[are_recruiters]
+            _record_selection_stats(
+                mutation_counts_out, recruiters, bee_objective_costs)
 
             # update the networks and costs of the followers
             bee_networks = bee_networks[batch_idxs[:, None], recruiters]
@@ -629,6 +801,14 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                 sum_writer.add_scalar('best adjustment penalty',
                                       best_adjustment_penalties.mean(),
                                       iteration + 1)
+            if use_worse_accept:
+                sum_writer.add_scalar('worse accept temperature',
+                                      current_worse_accept_temperature,
+                                      iteration + 1)
+            if use_worse_selection:
+                sum_writer.add_scalar('worse selection temperature',
+                                      current_worse_selection_temperature,
+                                      iteration + 1)
 
     # return the best solution
     state.replace_routes(best_networks)
@@ -639,10 +819,11 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
                 direct_sat_dmd, shorten_prob, street_node_neighbours,
                 shortest_paths, force_linking_unlinked, bee_model=None,
                 rpc_model=None, env_state=None, n_type4=0,
-                n_type5=0, n_type6=0, edit_model=None,
+                n_type5=0, n_type6=0, n_type7=0, edit_model=None,
                 ignore_type4_max_route_len=False,
                 ignore_type5_max_route_len=False,
                 ignore_type6_max_route_len=False,
+                ignore_type7_max_route_len=False,
                 return_mutation_metadata=False):
     bee_networks = bee_networks.clone()
 
@@ -654,7 +835,8 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
     empty_routes = (modified_routes > -1).sum(-1) == 0
 
     n_bees = bee_networks.shape[1]
-    n_type3 = n_bees - n_type1 - n_type2 - n_type4 - n_type5 - n_type6
+    n_type3 = n_bees - n_type1 - n_type2 - n_type4 - n_type5 - n_type6 - \
+        n_type7
     scen_idxs = torch.randperm(n_bees, device=bee_networks.device)
     type1_idxs = scen_idxs[:n_type1]
     type2_idxs = scen_idxs[n_type1:n_type1 + n_type2]
@@ -665,8 +847,11 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
     type5_idxs = scen_idxs[
         n_type1 + n_type2 + n_type3 + n_type4:
         n_type1 + n_type2 + n_type3 + n_type4 + n_type5]
+    type7_idxs = scen_idxs[
+        n_type1 + n_type2 + n_type3 + n_type4 + n_type5 + n_type6:]
     type6_idxs = scen_idxs[
-        n_type1 + n_type2 + n_type3 + n_type4 + n_type5:]
+        n_type1 + n_type2 + n_type3 + n_type4 + n_type5:
+        n_type1 + n_type2 + n_type3 + n_type4 + n_type5 + n_type6]
     mutation_types = torch.zeros(n_bees, device=bee_networks.device,
                                  dtype=torch.long)
     mutation_types[type1_idxs] = 1
@@ -675,6 +860,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
     mutation_types[type4_idxs] = 4
     mutation_types[type5_idxs] = 5
     mutation_types[type6_idxs] = 6
+    mutation_types[type7_idxs] = 7
 
     remaining_state = None
     if bee_model is None or (empty_routes.any() and force_linking_unlinked):
@@ -774,6 +960,24 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
         new_type6_routes = new_type6_all[:, type6_idxs].gather(
             2, type6_gather).squeeze(2)
         new_routes[:, type6_idxs] = new_type6_routes
+
+    if edit_model is not None and n_type7 > 0:
+        # modify type 7 routes: trim-only edit, then one construction-style
+        # extension/halt step, evaluated as a single compound mutation.
+        extend_model = bee_model if bee_model is not None else edit_model
+        new_type7_all = get_neural_trim_then_extend_variants(
+            edit_model,
+            extend_model,
+            env_state,
+            bee_networks,
+            chosen_route_idxs,
+            ignore_max_route_len=ignore_type7_max_route_len,
+        )
+        type7_gather = chosen_route_idxs[:, type7_idxs, None, None].expand(
+            -1, -1, -1, max_n_nodes)
+        new_type7_routes = new_type7_all[:, type7_idxs].gather(
+            2, type7_gather).squeeze(2)
+        new_routes[:, type7_idxs] = new_type7_routes
 
     bee_networks.scatter_(2, gather_idx, new_routes[..., None, :])
     if return_mutation_metadata:
@@ -1025,6 +1229,42 @@ def get_neural_trim_variants(model, env_state, bee_networks, chosen_route_idxs,
     )
 
 
+def get_neural_trim_then_extend_variants(trim_model, extend_model, env_state,
+                                         bee_networks, chosen_route_idxs,
+                                         greedy=False,
+                                         ignore_max_route_len=False):
+    """Apply trim-only edit followed by one construction-style extension.
+
+    This is the BCO type-7 compound mutation.  It lets a bee pass through a
+    temporarily worse-looking trim before the selected route is immediately
+    offered one extension/halt step, and only the combined result is scored.
+    """
+    if not getattr(trim_model, 'supports_trim_actions', False):
+        raise ValueError(
+            "get_neural_trim_then_extend_variants requires a trim_model with "
+            "supports_trim_actions=True"
+        )
+    if extend_model is None:
+        extend_model = trim_model
+
+    trimmed_networks = get_neural_trim_variants(
+        trim_model,
+        env_state,
+        bee_networks,
+        chosen_route_idxs,
+        greedy=greedy,
+        ignore_max_route_len=ignore_max_route_len,
+    )
+    return get_neural_extend_variants(
+        extend_model,
+        env_state,
+        trimmed_networks,
+        chosen_route_idxs,
+        greedy=greedy,
+        ignore_max_route_len=ignore_max_route_len,
+    )
+
+
 def get_neural_variants(model, env_state, bee_networks, drop_route_idxs,
                         greedy=False):
     bee_dim = bee_networks.ndim == 4
@@ -1260,20 +1500,37 @@ def main(cfg: DictConfig, tensors:dict):
     ignore_type4_max_route_len = cfg.get('ignore_type4_max_route_len', False)
     ignore_type5_max_route_len = cfg.get('ignore_type5_max_route_len', False)
     ignore_type6_max_route_len = cfg.get('ignore_type6_max_route_len', False)
+    ignore_type7_max_route_len = cfg.get('ignore_type7_max_route_len', False)
     use_demand_weighted_route_selection = \
         cfg.get('use_demand_weighted_route_selection', False)
+    worse_accept_temperature = cfg.get('worse_accept_temperature', 0.0)
+    worse_accept_decay = cfg.get('worse_accept_decay', 0.995)
+    worse_accept_min_temperature = \
+        cfg.get('worse_accept_min_temperature', 0.001)
+    worse_selection_temperature = cfg.get('worse_selection_temperature', 0.0)
+    worse_selection_decay = cfg.get('worse_selection_decay', 0.995)
+    worse_selection_min_temperature = \
+        cfg.get('worse_selection_min_temperature', 0.001)
+    worse_selection_uniform_mix = cfg.get('worse_selection_uniform_mix', 0.05)
+    worse_selection_elite_count = cfg.get('worse_selection_elite_count', 1)
 
     if not use_neural_bees:
         bee_model = None
+        edit_model = None
     elif bee_model is not None:
         bee_model.force_linking_unlinked = force_linking_unlinked
         bee_model.eval()
+        edit_model = bee_model if getattr(
+            bee_model, 'supports_trim_actions', False) else None
+    else:
+        edit_model = None
 
     nt1b = cfg.get('n_type1_bees', None)
     nt2b = cfg.get('n_type2_bees', None)
     nt4b = cfg.get('n_type4_bees', 0)
     nt5b = cfg.get('n_type5_bees', 0)
     nt6b = cfg.get('n_type6_bees', 0)
+    nt7b = cfg.get('n_type7_bees', 0)
     adjustment_degree_weight = cfg.get('adjustment_degree_weight', 0.0)
     adjustment_degree_gap = cfg.get('adjustment_degree_gap', 0.1)
     adjustment_degree_mode = cfg.get('adjustment_degree_mode', 'current')
@@ -1284,7 +1541,9 @@ def main(cfg: DictConfig, tensors:dict):
             sum_writer=sum_writer, silent=True, n_bees=cfg.n_bees,
             n_iterations=cfg.n_iterations, n_type1_bees=nt1b, n_type2_bees=nt2b,  
             n_type4_bees=nt4b, n_type5_bees=nt5b, n_type6_bees=nt6b,
-            device=DEVICE, bee_model=bee_model, return_routes=True,
+            n_type7_bees=nt7b,
+            device=DEVICE, bee_model=bee_model, edit_model=edit_model,
+            return_routes=True,
             force_linking_unlinked=force_linking_unlinked,
             adjustment_degree_weight=adjustment_degree_weight,
             adjustment_degree_gap=adjustment_degree_gap,
@@ -1294,8 +1553,17 @@ def main(cfg: DictConfig, tensors:dict):
             ignore_type4_max_route_len=ignore_type4_max_route_len,
             ignore_type5_max_route_len=ignore_type5_max_route_len,
             ignore_type6_max_route_len=ignore_type6_max_route_len,
+            ignore_type7_max_route_len=ignore_type7_max_route_len,
             use_demand_weighted_route_selection=
-            use_demand_weighted_route_selection)
+            use_demand_weighted_route_selection,
+            worse_accept_temperature=worse_accept_temperature,
+            worse_accept_decay=worse_accept_decay,
+            worse_accept_min_temperature=worse_accept_min_temperature,
+            worse_selection_temperature=worse_selection_temperature,
+            worse_selection_decay=worse_selection_decay,
+            worse_selection_min_temperature=worse_selection_min_temperature,
+            worse_selection_uniform_mix=worse_selection_uniform_mix,
+            worse_selection_elite_count=worse_selection_elite_count)
     routes = test_output[-1]
     metrics = test_output[-2]
     unserved_demand = test_output[-3]
