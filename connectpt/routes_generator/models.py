@@ -1865,7 +1865,6 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                        actions=None, action_kinds=None,
                        force_nonhalt_first_step=False, max_steps=None):
         state = self.setup_planning(state)
-        encoding = self._encode_graph(state)
 
         actions_given = actions is not None
         kinds_given = action_kinds is not None
@@ -1915,6 +1914,11 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                     force_nonhalt_first_step and not actions_given and
                     step_idx == 0
                 )
+                # Trim actions can materially change current_routes,
+                # route_mat/has_path, and global state features. Recompute the
+                # encoding each step so rollout/eval matches the step-wise
+                # training path.
+                encoding = self._encode_graph(state)
                 step_kinds, action, logits, entropy = self.step_route_action(
                     state, greedy, action, encoding, step_kinds,
                     allow_halt=allow_halt

@@ -575,7 +575,8 @@ def _split_state_indices_by_signature(states, idxs):
 def _collect_lc_improvement_cfg_ppo_rollout(
         model, cost_obj, make_next_state, value_module, horizon,
         reward_scale, diff_reward, supports_route_actions, device,
-        max_route_edit_steps=None, force_nonhalt_first_step=False):
+        max_route_edit_steps=None, force_nonhalt_first_step=False,
+        edit_step_penalty=0.0, forced_halt_penalty=0.0):
     states = []
     rewards = []
     value_estimates = []
@@ -659,6 +660,13 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                 just_done = done_after & active
                 step_rewards[just_done] = -result.cost[just_done] * \
                     reward_scale
+            if edit_step_penalty > 0:
+                edit_action = (step_kinds != ROUTE_ACTION_HALT) & active
+                step_rewards = step_rewards - \
+                    edit_action.to(step_rewards.dtype) * edit_step_penalty
+            if forced_halt_penalty > 0 and force_halt:
+                step_rewards = step_rewards - \
+                    active.to(step_rewards.dtype) * forced_halt_penalty
             step_rewards = step_rewards * active.to(step_rewards.dtype)
 
             prev_cost = torch.where(active, result.cost, prev_cost)
@@ -918,6 +926,9 @@ def train_lc_improvement_cfg_ppo(
     reward_scale = float(_get_cfg_value(cfg, "reward_scale", 1.0))
     diff_reward = bool(_get_cfg_value(cfg, "diff_reward", True))
     gamma = float(_get_cfg_value(cfg, "discount_rate", 1.0))
+    edit_step_penalty = float(_get_cfg_value(cfg, "edit_step_penalty", 0.0))
+    forced_halt_penalty = float(
+        _get_cfg_value(cfg, "forced_halt_penalty", 0.0))
     entropy_weight = float(_get_cfg_value(cfg, "entropy_weight", 0.0))
     clip_epsilon = float(cfg.ppo.epsilon)
     use_gae = bool(cfg.ppo.use_gae)
@@ -1097,7 +1108,9 @@ def train_lc_improvement_cfg_ppo(
             reward_scale, diff_reward,
             getattr(model, "supports_trim_actions", False), device,
             max_route_edit_steps=max_route_edit_steps,
-            force_nonhalt_first_step=force_nonhalt_first_step)
+            force_nonhalt_first_step=force_nonhalt_first_step,
+            edit_step_penalty=edit_step_penalty,
+            forced_halt_penalty=forced_halt_penalty)
         returns, advantages = _compute_ppo_returns_and_advantages(
             rollout["rewards"], rollout["value_estimates"],
             rollout["dones"], rollout["final_value_estimates"], gamma,
@@ -1157,6 +1170,8 @@ def train_lc_improvement_cfg_ppo(
             "diff_reward": diff_reward,
             "reward_scale": reward_scale,
             "discount_rate": gamma,
+            "edit_step_penalty": edit_step_penalty,
+            "forced_halt_penalty": forced_halt_penalty,
             "ppo_horizon": int(horizon),
             "ppo_epochs": int(ppo_epochs),
             "ppo_minibatch_size": int(minibatch_size),

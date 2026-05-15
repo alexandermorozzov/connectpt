@@ -8,12 +8,14 @@ ppo:
   use_gae: true
   gae_lambda: 0.95
 
-discount_rate: 0.95
+discount_rate: 1.0
 diff_reward: true
 baseline_lr: 0.0005
 entropy_weight: 0.0
 batch_size: 512
 reward_scale: 1.0
+edit_step_penalty: 0.005
+forced_halt_penalty: 0.05
 lr: 0.0016134816080499328
 decay: 0.0008404361781997002
 optimizer: Adam

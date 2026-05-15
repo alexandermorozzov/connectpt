@@ -21,6 +21,7 @@ from connectpt.routes_generator.models import (
 from connectpt.routes_generator.transit_time_estimator import (
     MyCostModule,
     ROUTE_ACTION_EXTEND,
+    ROUTE_ACTION_HALT,
     ROUTE_ACTION_TRIM_END,
     ROUTE_ACTION_TRIM_START,
     RouteGenBatchState,
@@ -89,6 +90,58 @@ class FakePlanNewRouteModel:
         logits = torch.zeros(state.batch_size, device=state.device)
         entropy = torch.zeros(state.batch_size, device=state.device)
         return halt, logits, entropy
+
+    def _log_step_counts(self, counts):
+        pass
+
+
+class FakeTrimPlanNewRouteModel:
+    def __init__(self):
+        self.encoded_route_lengths = []
+        self.step_count = 0
+
+    def setup_planning(self, state):
+        return state
+
+    def _encode_graph(self, state):
+        self.encoded_route_lengths.append(
+            int(state.current_route_n_stops[0].item())
+        )
+        return f"encoding-{len(self.encoded_route_lengths)}"
+
+    def step_route_action(
+        self,
+        state,
+        greedy=False,
+        actions=None,
+        precalc_data=None,
+        action_kinds=None,
+        allow_halt=True,
+    ):
+        assert precalc_data == f"encoding-{self.step_count + 1}"
+        self.step_count += 1
+        logits = torch.zeros(state.batch_size, device=state.device)
+        entropy = torch.zeros(state.batch_size, device=state.device)
+
+        if self.step_count == 1:
+            kinds = torch.full(
+                (state.batch_size,),
+                ROUTE_ACTION_TRIM_START,
+                dtype=torch.long,
+                device=state.device,
+            )
+            actions = torch.tensor([[0, 1]], dtype=torch.long,
+                                   device=state.device)
+        else:
+            kinds = torch.full(
+                (state.batch_size,),
+                ROUTE_ACTION_HALT,
+                dtype=torch.long,
+                device=state.device,
+            )
+            actions = torch.full((state.batch_size, 2), -1,
+                                 dtype=torch.long, device=state.device)
+        return kinds, actions, logits, entropy
 
     def _log_step_counts(self, counts):
         pass
@@ -633,3 +686,23 @@ def test_plan_new_route_calls_setup_planning_before_encoding():
     assert actions.shape == (1, 1, 2)
     assert logits.shape == (1,)
     assert entropy.shape == (1,)
+
+
+def test_trim_plan_new_route_reencodes_after_route_edits():
+    state = make_line_state(n_nodes=4, n_routes_to_plan=1,
+                            min_route_len=2, max_route_len=4)
+    state.set_current_routes([0, 1, 2])
+    model = FakeTrimPlanNewRouteModel()
+
+    actions, logits, entropy = TrimPathCombiningRouteGenerator.plan_new_route(
+        model,
+        state,
+        greedy=True,
+        max_steps=4,
+    )
+
+    assert model.encoded_route_lengths == [3, 2]
+    assert actions.shape == (1, 2, 2)
+    assert logits.shape == (1,)
+    assert entropy.shape == (1,)
+    assert state.is_done().item()
