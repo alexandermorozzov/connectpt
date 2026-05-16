@@ -221,6 +221,121 @@ def _get_planned_current_routes(state, fallback_routes,
     return planned_routes
 
 
+def _get_current_routes_from_state(state):
+    current_routes = []
+    for route in state.current_routes:
+        current_routes.append(route[route > -1].clone())
+    return current_routes
+
+
+def _clone_route_list(route_list):
+    return [route.clone() for route in route_list]
+
+
+def _update_route_list_at_mask(route_list, new_routes, mask):
+    mask = mask.detach().cpu().tolist()
+    for batch_idx, should_update in enumerate(mask):
+        if should_update:
+            route_list[batch_idx] = new_routes[batch_idx].clone()
+
+
+def _plan_lc_route_with_best_tracking(
+        model, cost_obj, route_state, fallback_routes, context_route_counts,
+        greedy=False, force_nonhalt_first_step=False,
+        max_route_edit_steps=None):
+    """Plan one route and return the best in-episode current-route version."""
+    route_state = model.setup_planning(route_state)
+    supports_route_actions = getattr(model, "supports_trim_actions", False)
+
+    ended = torch.zeros((route_state.batch_size,), dtype=torch.bool,
+                        device=route_state.device)
+    all_logits = None
+    all_entropy = None
+    actions_log = []
+    action_kinds_log = []
+    step_logits_log = []
+    step_entropies_log = []
+
+    best_cost = cost_obj(route_state).cost.detach()
+    best_routes = _get_planned_current_routes(
+        route_state, fallback_routes, context_route_counts)
+
+    step_idx = 0
+    while not ended.all():
+        was_ended = ended.clone()
+        force_halt = (
+            max_route_edit_steps is not None and
+            step_idx >= max_route_edit_steps
+        )
+        if force_halt:
+            step_kinds = torch.full(
+                (route_state.batch_size,), ROUTE_ACTION_HALT,
+                dtype=torch.long, device=route_state.device)
+            action = torch.full(
+                (route_state.batch_size, 2), -1, dtype=torch.long,
+                device=route_state.device)
+            template = best_cost.to(route_state.device)
+            logits = torch.zeros_like(template)
+            entropy = torch.zeros_like(template)
+        elif supports_route_actions:
+            encoding = model._encode_graph(route_state)
+            step_kinds, action, logits, entropy = model.step_route_action(
+                route_state, greedy, precalc_data=encoding,
+                allow_halt=not (
+                    force_nonhalt_first_step and step_idx == 0
+                ))
+        else:
+            action, logits, entropy = model.step(route_state, greedy)
+            step_kinds = torch.full(
+                (route_state.batch_size,), ROUTE_ACTION_EXTEND,
+                dtype=torch.long, device=route_state.device)
+            step_kinds[action[:, 0] < 0] = ROUTE_ACTION_HALT
+
+        if all_logits is None:
+            all_logits = torch.zeros_like(logits)
+            all_entropy = torch.zeros_like(entropy)
+        all_logits = all_logits + logits * (~was_ended)
+        all_entropy = all_entropy + entropy * (~was_ended)
+
+        just_ended = step_kinds == ROUTE_ACTION_HALT
+        ended = ended | just_ended
+        step_kinds = step_kinds.clone()
+        action = action.clone()
+        step_kinds[ended] = ROUTE_ACTION_HALT
+        action[ended] = -1
+
+        if supports_route_actions:
+            route_state.apply_route_actions(step_kinds, action)
+        else:
+            legacy_actions = action.clone()
+            legacy_actions[step_kinds == ROUTE_ACTION_HALT] = -1
+            route_state.shortest_path_action(legacy_actions)
+
+        result = cost_obj(route_state)
+        improved = (~was_ended) & (result.cost < best_cost)
+        if improved.any():
+            candidate_routes = _get_planned_current_routes(
+                route_state, fallback_routes, context_route_counts)
+            _update_route_list_at_mask(best_routes, candidate_routes, improved)
+            best_cost = torch.where(improved, result.cost.detach(), best_cost)
+
+        actions_log.append(action.detach().clone())
+        action_kinds_log.append(step_kinds.detach().clone())
+        step_logits = logits.detach().clone()
+        step_entropies = entropy.detach().clone()
+        step_logits[was_ended] = 0
+        step_entropies[was_ended] = 0
+        step_logits_log.append(step_logits)
+        step_entropies_log.append(step_entropies)
+        step_idx += 1
+
+    actions = torch.stack(actions_log, dim=1)
+    model.last_route_action_kinds = torch.stack(action_kinds_log, dim=1)
+    model.last_route_step_logits = torch.stack(step_logits_log, dim=1)
+    model.last_route_step_entropies = torch.stack(step_entropies_log, dim=1)
+    return actions, all_logits, all_entropy, best_routes
+
+
 def _assemble_routes_by_original_order(routes_by_route, device):
     batch_size = len(routes_by_route[0])
     batch_routes = []
@@ -244,7 +359,8 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
                            cost_weights=None, return_actions=False,
                            force_nonhalt_first_step=False,
                            max_route_edit_steps=None,
-                           return_step_data=False):
+                           return_step_data=False,
+                           return_best_routes=False):
     if cost_weights is None:
         cost_weights = cost_obj.sample_variable_weights(graph_batch.num_graphs,
                                                         graph_batch[STOP_KEY].x.device)
@@ -292,7 +408,15 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
             min_route_len, max_route_len, cost_weights,
             invalid_directly_connected=invalid_directly_connected)
         context_route_counts = route_state.n_finished_routes.detach().clone()
-        if getattr(model, "supports_trim_actions", False):
+        if return_best_routes:
+            fallback_routes = _get_current_routes_from_state(route_state)
+            actions, logits, entropy, planned_current_routes = \
+                _plan_lc_route_with_best_tracking(
+                    model, cost_obj, route_state, fallback_routes,
+                    context_route_counts, greedy=greedy,
+                    force_nonhalt_first_step=force_nonhalt_first_step,
+                    max_route_edit_steps=max_route_edit_steps)
+        elif getattr(model, "supports_trim_actions", False):
             actions, logits, entropy = model.plan_new_route(
                 route_state, greedy=greedy,
                 force_nonhalt_first_step=force_nonhalt_first_step,
@@ -300,12 +424,13 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
         else:
             actions, logits, entropy = model.plan_new_route(
                 route_state, greedy=greedy)
+        if not return_best_routes:
+            planned_current_routes = \
+                _get_planned_current_routes(
+                    route_state, working_route_batch[:, route_idx],
+                    context_route_counts)
         route_logits.append(logits)
         route_entropies.append(entropy)
-        planned_current_routes = \
-            _get_planned_current_routes(
-                route_state, working_route_batch[:, route_idx],
-                context_route_counts)
         routes_by_route.append(planned_current_routes)
         # Write the planned route back so subsequent slots see it as part of
         # their context, regardless of whether the seed slot was empty or
@@ -576,7 +701,8 @@ def _collect_lc_improvement_cfg_ppo_rollout(
         model, cost_obj, make_next_state, value_module, horizon,
         reward_scale, diff_reward, supports_route_actions, device,
         max_route_edit_steps=None, force_nonhalt_first_step=False,
-        edit_step_penalty=0.0, forced_halt_penalty=0.0):
+        edit_step_penalty=0.0, forced_halt_penalty=0.0,
+        incumbent_reward=False, return_best_routes=False):
     states = []
     rewards = []
     value_estimates = []
@@ -594,6 +720,9 @@ def _collect_lc_improvement_cfg_ppo_rollout(
     prev_cost = None
     current_start_cost = None
     last_cost = None
+    best_cost = None
+    best_current_routes = None
+    context_route_counts = None
     route_step_idx = 0
 
     with torch.no_grad():
@@ -605,6 +734,14 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                 state, current_start_cost = make_next_state(state)
                 prev_cost = current_start_cost.clone()
                 last_cost = current_start_cost.clone()
+                best_cost = current_start_cost.clone()
+                context_route_counts = state.n_finished_routes.detach().clone()
+                best_current_routes = _get_current_routes_from_state(state)
+                if return_best_routes:
+                    state._lc_best_current_routes = \
+                        _clone_route_list(best_current_routes)
+                    state._lc_best_context_counts = \
+                        context_route_counts.detach().clone()
                 route_step_idx = 0
                 action_counts["route_plan_count"] += state.batch_size
 
@@ -653,13 +790,32 @@ def _collect_lc_improvement_cfg_ppo_rollout(
 
             done_after = state.is_done()
             result = cost_obj(state)
-            if diff_reward:
+            if incumbent_reward:
+                new_best_cost = torch.minimum(best_cost, result.cost)
+                step_rewards = (best_cost - new_best_cost) * reward_scale
+                improved = active & (result.cost < best_cost)
+                if improved.any():
+                    candidate_routes = _get_planned_current_routes(
+                        state, best_current_routes, context_route_counts)
+                    _update_route_list_at_mask(
+                        best_current_routes, candidate_routes, improved)
+                best_cost = torch.where(active, new_best_cost, best_cost)
+            elif diff_reward:
                 step_rewards = (prev_cost - result.cost) * reward_scale
             else:
                 step_rewards = torch.zeros_like(result.cost)
                 just_done = done_after & active
                 step_rewards[just_done] = -result.cost[just_done] * \
                     reward_scale
+            if return_best_routes and not incumbent_reward:
+                improved = active & (result.cost < best_cost)
+                if improved.any():
+                    candidate_routes = _get_planned_current_routes(
+                        state, best_current_routes, context_route_counts)
+                    _update_route_list_at_mask(
+                        best_current_routes, candidate_routes, improved)
+                best_cost = torch.where(
+                    improved, result.cost.detach(), best_cost)
             if edit_step_penalty > 0:
                 edit_action = (step_kinds != ROUTE_ACTION_HALT) & active
                 step_rewards = step_rewards - \
@@ -671,13 +827,19 @@ def _collect_lc_improvement_cfg_ppo_rollout(
 
             prev_cost = torch.where(active, result.cost, prev_cost)
             last_cost = torch.where(active, result.cost, last_cost)
+            if return_best_routes:
+                state._lc_best_current_routes = \
+                    _clone_route_list(best_current_routes)
+                state._lc_best_context_counts = \
+                    context_route_counts.detach().clone()
 
             just_finished = done_after & active
             if just_finished.any():
                 episode_start_costs.append(
                     current_start_cost[just_finished].detach().cpu())
+                output_cost = best_cost if return_best_routes else result.cost
                 episode_final_costs.append(
-                    result.cost[just_finished].detach().cpu())
+                    output_cost[just_finished].detach().cpu())
 
             _merge_step_action_stats(
                 action_counts, step_actions, step_kinds, active)
@@ -697,8 +859,9 @@ def _collect_lc_improvement_cfg_ppo_rollout(
             if unfinished.any():
                 episode_start_costs.append(
                     current_start_cost[unfinished].detach().cpu())
+                output_cost = best_cost if return_best_routes else last_cost
                 episode_final_costs.append(
-                    last_cost[unfinished].detach().cpu())
+                    output_cost[unfinished].detach().cpu())
             final_value_estimates = value_module.from_state(state)
             final_value_estimates = final_value_estimates * \
                 unfinished.to(final_value_estimates.dtype)
@@ -827,7 +990,8 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
                             batch_size=8, force_nonhalt_first_step=False,
                             max_route_edit_steps=None,
                             return_action_stats=False,
-                            target_n_routes=None):
+                            target_n_routes=None,
+                            return_best_routes=False):
     model.eval()
     seed_costs = []
     final_costs = []
@@ -846,7 +1010,8 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
             max_route_len, greedy=True, cost_weights=eval_weights,
             return_actions=return_action_stats,
             force_nonhalt_first_step=force_nonhalt_first_step,
-            max_route_edit_steps=max_route_edit_steps)
+            max_route_edit_steps=max_route_edit_steps,
+            return_best_routes=return_best_routes)
         state, seed_result, final_result, _, _ = rollout_output[:5]
         if return_action_stats:
             _, _, _, _, _, route_actions, route_action_kinds = rollout_output
@@ -867,6 +1032,7 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
         "target_n_routes": int(
             target_n_routes if target_n_routes is not None
             else seed_routes.shape[1]),
+        "return_best_routes": bool(return_best_routes),
         "seed_cost": seed_costs.mean().item(),
         "final_cost": final_costs.mean().item(),
         "delta": (seed_costs - final_costs).mean().item(),
@@ -925,6 +1091,8 @@ def train_lc_improvement_cfg_ppo(
 
     reward_scale = float(_get_cfg_value(cfg, "reward_scale", 1.0))
     diff_reward = bool(_get_cfg_value(cfg, "diff_reward", True))
+    incumbent_reward = bool(_get_cfg_value(cfg, "incumbent_reward", False))
+    return_best_routes = bool(_get_cfg_value(cfg, "return_best_routes", False))
     gamma = float(_get_cfg_value(cfg, "discount_rate", 1.0))
     edit_step_penalty = float(_get_cfg_value(cfg, "edit_step_penalty", 0.0))
     forced_halt_penalty = float(
@@ -997,7 +1165,8 @@ def train_lc_improvement_cfg_ppo(
                 model, cost_obj, graph_batch, route_batch,
                 min_route_len, max_route_len, greedy=False,
                 force_nonhalt_first_step=force_nonhalt_first_step,
-                max_route_edit_steps=max_route_edit_steps)
+                max_route_edit_steps=max_route_edit_steps,
+                return_best_routes=return_best_routes)
     model.update_and_freeze_feature_norms()
 
     if best_model_path is None:
@@ -1028,10 +1197,15 @@ def train_lc_improvement_cfg_ppo(
         prev_context_counts = prev_context_counts_holder[0]
         if prev_state is not None and prev_route_idx is not None and \
                 cur_working_routes is not None:
-            finalized = _get_planned_current_routes(
-                prev_state,
-                cur_working_routes[:, prev_route_idx],
-                prev_context_counts)
+            if return_best_routes and \
+                    hasattr(prev_state, "_lc_best_current_routes"):
+                finalized = _clone_route_list(
+                    prev_state._lc_best_current_routes)
+            else:
+                finalized = _get_planned_current_routes(
+                    prev_state,
+                    cur_working_routes[:, prev_route_idx],
+                    prev_context_counts)
             planned_tensor = get_batch_tensor_from_routes(
                 [[finalized[batch_idx]]
                  for batch_idx in range(len(finalized))],
@@ -1110,7 +1284,9 @@ def train_lc_improvement_cfg_ppo(
             max_route_edit_steps=max_route_edit_steps,
             force_nonhalt_first_step=force_nonhalt_first_step,
             edit_step_penalty=edit_step_penalty,
-            forced_halt_penalty=forced_halt_penalty)
+            forced_halt_penalty=forced_halt_penalty,
+            incumbent_reward=incumbent_reward,
+            return_best_routes=return_best_routes)
         returns, advantages = _compute_ppo_returns_and_advantages(
             rollout["rewards"], rollout["value_estimates"],
             rollout["dones"], rollout["final_value_estimates"], gamma,
@@ -1146,7 +1322,8 @@ def train_lc_improvement_cfg_ppo(
                 batch_size=effective_batch_size,
                 force_nonhalt_first_step=force_nonhalt_first_step,
                 max_route_edit_steps=max_route_edit_steps,
-                target_n_routes=target_n_routes)
+                target_n_routes=target_n_routes,
+                return_best_routes=return_best_routes)
             if last_val["final_cost"] < best_val_cost:
                 best_val_cost = last_val["final_cost"]
                 torch.save(model.state_dict(), best_model_path)
@@ -1168,6 +1345,8 @@ def train_lc_improvement_cfg_ppo(
             "algorithm": "cfg_ppo_improvement",
             "target_n_routes": n_routes,
             "diff_reward": diff_reward,
+            "incumbent_reward": incumbent_reward,
+            "return_best_routes": return_best_routes,
             "reward_scale": reward_scale,
             "discount_rate": gamma,
             "edit_step_penalty": edit_step_penalty,
