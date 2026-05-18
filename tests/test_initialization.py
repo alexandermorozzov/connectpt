@@ -8,6 +8,7 @@ from connectpt.routes_generator.citygraph_dataset import CityGraphData, STOP_KEY
 from connectpt.routes_generator.eval_route_generator import sample_from_model
 from connectpt.routes_generator.improvement_learning import (
     _make_route_context_state,
+    _update_reward_baseline_cost,
     rollout_lc_improvement,
 )
 from connectpt.routes_generator.initialization import (
@@ -117,6 +118,8 @@ class FakeTrimPlanNewRouteModel:
         precalc_data=None,
         action_kinds=None,
         allow_halt=True,
+        allow_trim_start=True,
+        allow_trim_end=True,
     ):
         assert precalc_data == f"encoding-{self.step_count + 1}"
         self.step_count += 1
@@ -124,6 +127,8 @@ class FakeTrimPlanNewRouteModel:
         entropy = torch.zeros(state.batch_size, device=state.device)
 
         if self.step_count == 1:
+            assert bool(torch.as_tensor(allow_trim_start).all())
+            assert bool(torch.as_tensor(allow_trim_end).all())
             kinds = torch.full(
                 (state.batch_size,),
                 ROUTE_ACTION_TRIM_START,
@@ -133,6 +138,8 @@ class FakeTrimPlanNewRouteModel:
             actions = torch.tensor([[0, 1]], dtype=torch.long,
                                    device=state.device)
         else:
+            assert not bool(torch.as_tensor(allow_trim_start).any())
+            assert not bool(torch.as_tensor(allow_trim_end).any())
             kinds = torch.full(
                 (state.batch_size,),
                 ROUTE_ACTION_HALT,
@@ -534,6 +541,55 @@ def test_trim_model_action_mask_can_disable_extend_actions():
     assert actions.shape == (1, 2)
     assert logits.shape == (1,)
     assert entropy.shape == (1,)
+
+
+def test_trim_model_action_mask_can_disable_trim_actions():
+    state = make_line_state(n_nodes=4, max_route_len=4)
+    state.set_current_routes([0, 1, 2, 3])
+    model = TrimPathCombiningRouteGenerator(
+        backbone_net=IdentityGraphNet(),
+        mean_stop_time_s=0,
+        embed_dim=2,
+        n_nodepair_layers=1,
+        n_pathscorer_layers=1,
+        pathscorer_hidden_dim=8,
+        n_trim_scorer_layers=1,
+        trim_scorer_hidden_dim=8,
+        n_halt_layers=1,
+        symmetric_routes=True,
+        serial_halting=True,
+    )
+    state = model.setup_planning(state)
+
+    action_kinds, actions, logits, entropy = model.step_route_action(
+        state,
+        greedy=True,
+        allow_extend=False,
+        allow_trim_start=False,
+        allow_trim_end=False,
+    )
+
+    assert action_kinds.tolist() == [ROUTE_ACTION_HALT]
+    assert actions.tolist() == [[-1, -1]]
+    assert logits.shape == (1,)
+    assert entropy.shape == (1,)
+
+
+def test_zero_trim_reward_keeps_pretrim_reward_baseline():
+    prev_cost = torch.tensor([10.0, 20.0, 30.0])
+    new_cost = torch.tensor([15.0, 18.0, 25.0])
+    action_kinds = torch.tensor([
+        ROUTE_ACTION_TRIM_START,
+        ROUTE_ACTION_EXTEND,
+        ROUTE_ACTION_HALT,
+    ])
+    active = torch.tensor([True, True, False])
+
+    updated = _update_reward_baseline_cost(
+        prev_cost, new_cost, action_kinds, active,
+        zero_trim_reward=True)
+
+    assert updated.tolist() == [10.0, 18.0, 30.0]
 
 
 def test_sample_from_model_skips_rollout_for_fully_seeded_network():

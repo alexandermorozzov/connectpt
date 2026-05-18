@@ -242,7 +242,7 @@ def _update_route_list_at_mask(route_list, new_routes, mask):
 def _plan_lc_route_with_best_tracking(
         model, cost_obj, route_state, fallback_routes, context_route_counts,
         greedy=False, force_nonhalt_first_step=False,
-        max_route_edit_steps=None):
+        max_route_edit_steps=None, max_trim_actions_per_route=1):
     """Plan one route and return the best in-episode current-route version."""
     route_state = model.setup_planning(route_state)
     supports_route_actions = getattr(model, "supports_trim_actions", False)
@@ -261,6 +261,11 @@ def _plan_lc_route_with_best_tracking(
         route_state, fallback_routes, context_route_counts)
 
     step_idx = 0
+    max_trim_actions_per_route = _normalize_max_trim_actions_per_route(
+        max_trim_actions_per_route)
+    trim_action_counts = torch.zeros(
+        (route_state.batch_size,), dtype=torch.long,
+        device=route_state.device)
     while not ended.all():
         was_ended = ended.clone()
         force_halt = (
@@ -279,11 +284,15 @@ def _plan_lc_route_with_best_tracking(
             entropy = torch.zeros_like(template)
         elif supports_route_actions:
             encoding = model._encode_graph(route_state)
+            allow_trim = _trim_actions_allowed(
+                trim_action_counts, max_trim_actions_per_route)
             step_kinds, action, logits, entropy = model.step_route_action(
                 route_state, greedy, precalc_data=encoding,
                 allow_halt=not (
                     force_nonhalt_first_step and step_idx == 0
-                ))
+                ),
+                allow_trim_start=allow_trim,
+                allow_trim_end=allow_trim)
         else:
             action, logits, entropy = model.step(route_state, greedy)
             step_kinds = torch.full(
@@ -298,6 +307,8 @@ def _plan_lc_route_with_best_tracking(
         all_entropy = all_entropy + entropy * (~was_ended)
 
         just_ended = step_kinds == ROUTE_ACTION_HALT
+        selected_trim = _is_trim_action(step_kinds) & ~was_ended
+        trim_action_counts = trim_action_counts + selected_trim.long()
         ended = ended | just_ended
         step_kinds = step_kinds.clone()
         action = action.clone()
@@ -354,11 +365,29 @@ def _get_default_max_route_edit_steps(max_route_len):
     return 2 * int(max_route_len)
 
 
+def _normalize_max_trim_actions_per_route(value):
+    if value is None:
+        return None
+    value = int(value)
+    if value < 0:
+        raise ValueError(
+            "max_trim_actions_per_route must be non-negative or None"
+        )
+    return value
+
+
+def _trim_actions_allowed(trim_action_counts, max_trim_actions_per_route):
+    if max_trim_actions_per_route is None:
+        return torch.ones_like(trim_action_counts, dtype=torch.bool)
+    return trim_action_counts < int(max_trim_actions_per_route)
+
+
 def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
                            min_route_len, max_route_len, greedy=False,
                            cost_weights=None, return_actions=False,
                            force_nonhalt_first_step=False,
                            max_route_edit_steps=None,
+                           max_trim_actions_per_route=1,
                            return_step_data=False,
                            return_best_routes=False):
     if cost_weights is None:
@@ -366,6 +395,8 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
                                                         graph_batch[STOP_KEY].x.device)
     if max_route_edit_steps is None:
         max_route_edit_steps = _get_default_max_route_edit_steps(max_route_len)
+    max_trim_actions_per_route = _normalize_max_trim_actions_per_route(
+        max_trim_actions_per_route)
     route_batch = _trim_route_batch_to_graph_capacity(route_batch,
                                                       graph_batch)
 
@@ -415,12 +446,14 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
                     model, cost_obj, route_state, fallback_routes,
                     context_route_counts, greedy=greedy,
                     force_nonhalt_first_step=force_nonhalt_first_step,
-                    max_route_edit_steps=max_route_edit_steps)
+                    max_route_edit_steps=max_route_edit_steps,
+                    max_trim_actions_per_route=max_trim_actions_per_route)
         elif getattr(model, "supports_trim_actions", False):
             actions, logits, entropy = model.plan_new_route(
                 route_state, greedy=greedy,
                 force_nonhalt_first_step=force_nonhalt_first_step,
-                max_steps=max_route_edit_steps)
+                max_steps=max_route_edit_steps,
+                max_trim_actions=max_trim_actions_per_route)
         else:
             actions, logits, entropy = model.plan_new_route(
                 route_state, greedy=greedy)
@@ -615,6 +648,27 @@ def _merge_step_action_stats(counts, actions, action_kinds, active):
     counts["total_count"] += int(active.sum().item())
 
 
+def _is_trim_action(action_kinds):
+    return (
+        (action_kinds == ROUTE_ACTION_TRIM_START) |
+        (action_kinds == ROUTE_ACTION_TRIM_END)
+    )
+
+
+def _zero_trim_action_rewards(step_rewards, action_kinds, active):
+    trim_action = _is_trim_action(action_kinds) & active
+    return torch.where(trim_action, torch.zeros_like(step_rewards),
+                       step_rewards)
+
+
+def _update_reward_baseline_cost(prev_cost, new_cost, action_kinds, active,
+                                 zero_trim_reward=False):
+    update_mask = active
+    if zero_trim_reward:
+        update_mask = update_mask & ~_is_trim_action(action_kinds)
+    return torch.where(update_mask, new_cost, prev_cost)
+
+
 def _compute_ppo_returns_and_advantages(rewards, value_estimates, dones,
                                         final_value_estimates, gamma,
                                         use_gae, gae_lambda):
@@ -702,7 +756,8 @@ def _collect_lc_improvement_cfg_ppo_rollout(
         reward_scale, diff_reward, supports_route_actions, device,
         max_route_edit_steps=None, force_nonhalt_first_step=False,
         edit_step_penalty=0.0, forced_halt_penalty=0.0,
-        incumbent_reward=False, return_best_routes=False):
+        incumbent_reward=False, return_best_routes=False,
+        zero_trim_reward=False, max_trim_actions_per_route=1):
     states = []
     rewards = []
     value_estimates = []
@@ -712,6 +767,7 @@ def _collect_lc_improvement_cfg_ppo_rollout(
     dones = []
     active_masks = []
     score_masks = []
+    trim_allowed_masks = []
     action_counts = _new_action_count_totals()
     episode_start_costs = []
     episode_final_costs = []
@@ -724,6 +780,9 @@ def _collect_lc_improvement_cfg_ppo_rollout(
     best_current_routes = None
     context_route_counts = None
     route_step_idx = 0
+    max_trim_actions_per_route = _normalize_max_trim_actions_per_route(
+        max_trim_actions_per_route)
+    trim_action_counts = None
 
     with torch.no_grad():
         for _ in range(horizon):
@@ -743,10 +802,15 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                     state._lc_best_context_counts = \
                         context_route_counts.detach().clone()
                 route_step_idx = 0
+                trim_action_counts = torch.zeros(
+                    (state.batch_size,), dtype=torch.long,
+                    device=state.device)
                 action_counts["route_plan_count"] += state.batch_size
 
             done_before = state.is_done()
             active = ~done_before
+            allow_trim = _trim_actions_allowed(
+                trim_action_counts, max_trim_actions_per_route)
             state_for_buffer = state.clone()
             _clear_state_lazy_tensors(state_for_buffer)
             states.append(state_for_buffer.to_device("cpu"))
@@ -775,7 +839,9 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                         state,
                         allow_halt=not (
                             force_nonhalt_first_step and route_step_idx == 0
-                        ))
+                        ),
+                        allow_trim_start=allow_trim,
+                        allow_trim_end=allow_trim)
                 state.apply_route_actions(step_kinds, step_actions)
                 score_mask = active
             else:
@@ -787,6 +853,8 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                 state.shortest_path_action(step_actions)
                 score_mask = active
             route_step_idx += 1
+            selected_trim = _is_trim_action(step_kinds) & active
+            trim_action_counts = trim_action_counts + selected_trim.long()
 
             done_after = state.is_done()
             result = cost_obj(state)
@@ -816,6 +884,9 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                         best_current_routes, candidate_routes, improved)
                 best_cost = torch.where(
                     improved, result.cost.detach(), best_cost)
+            if zero_trim_reward:
+                step_rewards = _zero_trim_action_rewards(
+                    step_rewards, step_kinds, active)
             if edit_step_penalty > 0:
                 edit_action = (step_kinds != ROUTE_ACTION_HALT) & active
                 step_rewards = step_rewards - \
@@ -825,7 +896,9 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                     active.to(step_rewards.dtype) * forced_halt_penalty
             step_rewards = step_rewards * active.to(step_rewards.dtype)
 
-            prev_cost = torch.where(active, result.cost, prev_cost)
+            prev_cost = _update_reward_baseline_cost(
+                prev_cost, result.cost, step_kinds, active,
+                zero_trim_reward=zero_trim_reward)
             last_cost = torch.where(active, result.cost, last_cost)
             if return_best_routes:
                 state._lc_best_current_routes = \
@@ -851,6 +924,7 @@ def _collect_lc_improvement_cfg_ppo_rollout(
             dones.append(done_after.detach().clone())
             active_masks.append(active.detach().clone())
             score_masks.append(score_mask.detach().clone())
+            trim_allowed_masks.append(allow_trim.detach().clone())
 
         if state is None:
             final_value_estimates = torch.zeros_like(rewards[-1])
@@ -876,8 +950,11 @@ def _collect_lc_improvement_cfg_ppo_rollout(
         "dones": torch.stack(dones),
         "active_masks": torch.stack(active_masks),
         "score_masks": torch.stack(score_masks),
+        "trim_allowed_masks": torch.stack(trim_allowed_masks),
         "final_value_estimates": final_value_estimates.detach(),
         "action_counts": action_counts,
+        "zero_trim_reward": bool(zero_trim_reward),
+        "max_trim_actions_per_route": max_trim_actions_per_route,
     }
     if len(episode_start_costs) > 0:
         rollout["episode_start_costs"] = torch.cat(episode_start_costs)
@@ -897,6 +974,7 @@ def _update_lc_improvement_cfg_ppo_from_rollout(
     actions = rollout["actions"]
     action_kinds = rollout["action_kinds"]
     score_masks = rollout.get("score_masks", rollout["active_masks"])
+    trim_allowed_masks = rollout.get("trim_allowed_masks")
     batch_size = rewards.shape[1]
     n_states_per_minibatch = max(1, int(minibatch_size) // int(batch_size))
     supports_route_actions = getattr(model, "supports_trim_actions", False)
@@ -928,6 +1006,9 @@ def _update_lc_improvement_cfg_ppo_from_rollout(
             mb_returns = returns[idxs].flatten(0, 1)
             mb_advantages = advantages[idxs].flatten(0, 1)
             mb_score = score_masks[idxs].flatten(0, 1)
+            mb_trim_allowed = None
+            if trim_allowed_masks is not None:
+                mb_trim_allowed = trim_allowed_masks[idxs].flatten(0, 1)
             if not mb_score.any():
                 continue
 
@@ -938,6 +1019,8 @@ def _update_lc_improvement_cfg_ppo_from_rollout(
             mb_old_logits = mb_old_logits[mb_score]
             mb_returns = mb_returns[mb_score]
             mb_advantages = mb_advantages[mb_score]
+            if mb_trim_allowed is not None:
+                mb_trim_allowed = mb_trim_allowed[mb_score]
 
             value_module.from_state(mb_states)
             value_module.update(mb_returns)
@@ -945,7 +1028,15 @@ def _update_lc_improvement_cfg_ppo_from_rollout(
             if supports_route_actions:
                 _, _, new_logits, entropy = model.step_route_action(
                     mb_states, actions=mb_actions,
-                    action_kinds=mb_action_kinds)
+                    action_kinds=mb_action_kinds,
+                    allow_trim_start=(
+                        mb_trim_allowed if mb_trim_allowed is not None
+                        else True
+                    ),
+                    allow_trim_end=(
+                        mb_trim_allowed if mb_trim_allowed is not None
+                        else True
+                    ))
             else:
                 _, new_logits, entropy = model.step(
                     mb_states, actions=mb_actions)
@@ -989,6 +1080,7 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
                             device, min_route_len, max_route_len,
                             batch_size=8, force_nonhalt_first_step=False,
                             max_route_edit_steps=None,
+                            max_trim_actions_per_route=1,
                             return_action_stats=False,
                             target_n_routes=None,
                             return_best_routes=False):
@@ -1011,6 +1103,7 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
             return_actions=return_action_stats,
             force_nonhalt_first_step=force_nonhalt_first_step,
             max_route_edit_steps=max_route_edit_steps,
+            max_trim_actions_per_route=max_trim_actions_per_route,
             return_best_routes=return_best_routes)
         state, seed_result, final_result, _, _ = rollout_output[:5]
         if return_action_stats:
@@ -1053,7 +1146,8 @@ def train_lc_improvement_cfg_ppo(
         val_period=None, horizon=None, ppo_epochs=None, minibatch_size=None,
         min_route_len=None, max_route_len=None, warmup_batches=4, seed=0,
         force_nonhalt_first_step=False, max_route_edit_steps=None,
-        train_indices=None, val_indices=None, best_model_path=None,
+        max_trim_actions_per_route=None, train_indices=None, val_indices=None,
+        best_model_path=None,
         max_rollout_samples=8192, target_n_routes=None):
     """Train LC improvement with the construction PPO machinery adapted to edits.
 
@@ -1088,11 +1182,17 @@ def train_lc_improvement_cfg_ppo(
         minibatch_size = int(cfg.ppo.minibatch_size)
     if max_route_edit_steps is None:
         max_route_edit_steps = _get_default_max_route_edit_steps(max_route_len)
+    if max_trim_actions_per_route is None:
+        max_trim_actions_per_route = _get_cfg_value(
+            cfg, "max_trim_actions_per_route", 1)
+    max_trim_actions_per_route = _normalize_max_trim_actions_per_route(
+        max_trim_actions_per_route)
 
     reward_scale = float(_get_cfg_value(cfg, "reward_scale", 1.0))
     diff_reward = bool(_get_cfg_value(cfg, "diff_reward", True))
     incumbent_reward = bool(_get_cfg_value(cfg, "incumbent_reward", False))
     return_best_routes = bool(_get_cfg_value(cfg, "return_best_routes", False))
+    zero_trim_reward = bool(_get_cfg_value(cfg, "zero_trim_reward", False))
     gamma = float(_get_cfg_value(cfg, "discount_rate", 1.0))
     edit_step_penalty = float(_get_cfg_value(cfg, "edit_step_penalty", 0.0))
     forced_halt_penalty = float(
@@ -1166,6 +1266,7 @@ def train_lc_improvement_cfg_ppo(
                 min_route_len, max_route_len, greedy=False,
                 force_nonhalt_first_step=force_nonhalt_first_step,
                 max_route_edit_steps=max_route_edit_steps,
+                max_trim_actions_per_route=max_trim_actions_per_route,
                 return_best_routes=return_best_routes)
     model.update_and_freeze_feature_norms()
 
@@ -1286,7 +1387,9 @@ def train_lc_improvement_cfg_ppo(
             edit_step_penalty=edit_step_penalty,
             forced_halt_penalty=forced_halt_penalty,
             incumbent_reward=incumbent_reward,
-            return_best_routes=return_best_routes)
+            return_best_routes=return_best_routes,
+            zero_trim_reward=zero_trim_reward,
+            max_trim_actions_per_route=max_trim_actions_per_route)
         returns, advantages = _compute_ppo_returns_and_advantages(
             rollout["rewards"], rollout["value_estimates"],
             rollout["dones"], rollout["final_value_estimates"], gamma,
@@ -1322,6 +1425,7 @@ def train_lc_improvement_cfg_ppo(
                 batch_size=effective_batch_size,
                 force_nonhalt_first_step=force_nonhalt_first_step,
                 max_route_edit_steps=max_route_edit_steps,
+                max_trim_actions_per_route=max_trim_actions_per_route,
                 target_n_routes=target_n_routes,
                 return_best_routes=return_best_routes)
             if last_val["final_cost"] < best_val_cost:
@@ -1347,10 +1451,12 @@ def train_lc_improvement_cfg_ppo(
             "diff_reward": diff_reward,
             "incumbent_reward": incumbent_reward,
             "return_best_routes": return_best_routes,
+            "zero_trim_reward": zero_trim_reward,
             "reward_scale": reward_scale,
             "discount_rate": gamma,
             "edit_step_penalty": edit_step_penalty,
             "forced_halt_penalty": forced_halt_penalty,
+            "max_trim_actions_per_route": max_trim_actions_per_route,
             "ppo_horizon": int(horizon),
             "ppo_epochs": int(ppo_epochs),
             "ppo_minibatch_size": int(minibatch_size),

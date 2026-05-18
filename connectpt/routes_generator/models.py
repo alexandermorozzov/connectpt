@@ -70,6 +70,35 @@ FreqChoiceResults = namedtuple(
     )
 
 
+def _mask_flat_action_scores_by_batch_allowed(scores, valid, allowed):
+    """Mask whole batch rows when an action family is disabled."""
+    if isinstance(allowed, bool):
+        if allowed:
+            return scores, valid
+        return torch.full_like(scores, TORCH_FMIN), torch.zeros_like(valid)
+
+    allowed = torch.as_tensor(
+        allowed, dtype=torch.bool, device=scores.device)
+    if allowed.ndim == 0:
+        if bool(allowed.item()):
+            return scores, valid
+        return torch.full_like(scores, TORCH_FMIN), torch.zeros_like(valid)
+    if allowed.ndim != 1 or allowed.shape[0] != scores.shape[0]:
+        raise ValueError(
+            "Per-batch action allow mask must have shape (batch_size,), "
+            f"got {tuple(allowed.shape)} for batch size {scores.shape[0]}"
+        )
+    disallowed = ~allowed
+    if not disallowed.any():
+        return scores, valid
+
+    scores = scores.clone()
+    valid = valid.clone()
+    scores[disallowed] = TORCH_FMIN
+    valid[disallowed] = False
+    return scores, valid
+
+
 class SymmetricLogUnit(nn.Module):
     """For positive X, it's the positive component of log(X + 1).  For 
     negative X, it's the negative of the positive component of log(-X + 1)."""
@@ -1863,7 +1892,8 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
 
     def plan_new_route(self, state: RouteGenBatchState, greedy=False,
                        actions=None, action_kinds=None,
-                       force_nonhalt_first_step=False, max_steps=None):
+                       force_nonhalt_first_step=False, max_steps=None,
+                       max_trim_actions=1):
         state = self.setup_planning(state)
 
         actions_given = actions is not None
@@ -1881,6 +1911,8 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         _plan_steps_0 = 0
         _elem0_done = False
         step_idx = 0
+        trim_action_counts = torch.zeros(
+            (state.batch_size,), dtype=torch.long, device=state.device)
         while not ended.all():
             was_ended = ended.clone()
             force_halt = (
@@ -1914,6 +1946,9 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                     force_nonhalt_first_step and not actions_given and
                     step_idx == 0
                 )
+                allow_trim = True
+                if max_trim_actions is not None:
+                    allow_trim = trim_action_counts < int(max_trim_actions)
                 # Trim actions can materially change current_routes,
                 # route_mat/has_path, and global state features. Recompute the
                 # encoding each step so rollout/eval matches the step-wise
@@ -1921,12 +1956,19 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                 encoding = self._encode_graph(state)
                 step_kinds, action, logits, entropy = self.step_route_action(
                     state, greedy, action, encoding, step_kinds,
-                    allow_halt=allow_halt
+                    allow_halt=allow_halt,
+                    allow_trim_start=allow_trim,
+                    allow_trim_end=allow_trim,
                 )
 
             all_logits += logits * (~ended)
             all_entropy += entropy * (~ended)
             just_ended = step_kinds == ROUTE_ACTION_HALT
+            selected_trim = (
+                (step_kinds == ROUTE_ACTION_TRIM_START) |
+                (step_kinds == ROUTE_ACTION_TRIM_END)
+            ) & ~was_ended
+            trim_action_counts = trim_action_counts + selected_trim.long()
             ended = ended | just_ended
             step_kinds[ended] = ROUTE_ACTION_HALT
             action[ended] = -1
@@ -2071,18 +2113,16 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         flat_trim_end_scores = trim_end_scores.reshape(batch_size, -1)
         flat_trim_end_valid = trim_end_valid.reshape(batch_size, -1)
 
-        if not allow_extend:
-            flat_extend_scores = torch.full_like(flat_extend_scores,
-                                                 TORCH_FMIN)
-            flat_extend_valid = torch.zeros_like(flat_extend_valid)
-        if not allow_trim_start:
-            flat_trim_start_scores = torch.full_like(flat_trim_start_scores,
-                                                     TORCH_FMIN)
-            flat_trim_start_valid = torch.zeros_like(flat_trim_start_valid)
-        if not allow_trim_end:
-            flat_trim_end_scores = torch.full_like(flat_trim_end_scores,
-                                                   TORCH_FMIN)
-            flat_trim_end_valid = torch.zeros_like(flat_trim_end_valid)
+        flat_extend_scores, flat_extend_valid = \
+            _mask_flat_action_scores_by_batch_allowed(
+                flat_extend_scores, flat_extend_valid, allow_extend)
+        flat_trim_start_scores, flat_trim_start_valid = \
+            _mask_flat_action_scores_by_batch_allowed(
+                flat_trim_start_scores, flat_trim_start_valid,
+                allow_trim_start)
+        flat_trim_end_scores, flat_trim_end_valid = \
+            _mask_flat_action_scores_by_batch_allowed(
+                flat_trim_end_scores, flat_trim_end_valid, allow_trim_end)
 
         flat_route_scores = torch.cat((
             flat_extend_scores,
