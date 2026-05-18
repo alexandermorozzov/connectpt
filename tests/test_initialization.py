@@ -575,6 +575,50 @@ def test_trim_model_action_mask_can_disable_trim_actions():
     assert entropy.shape == (1,)
 
 
+def test_trim_model_overlap_features_compare_to_other_routes():
+    state = make_line_state(n_nodes=5, n_routes_to_plan=2, max_route_len=5)
+    state.add_new_routes(torch.tensor([[[0, 1, 2, -1, -1]]],
+                                      dtype=torch.long))
+    state.set_current_routes([0, 1, 2, 3, 4])
+    model = TrimPathCombiningRouteGenerator(
+        backbone_net=IdentityGraphNet(),
+        mean_stop_time_s=0,
+        embed_dim=2,
+        n_nodepair_layers=1,
+        n_pathscorer_layers=1,
+        pathscorer_hidden_dim=8,
+        n_trim_scorer_layers=1,
+        trim_scorer_hidden_dim=8,
+        n_halt_layers=1,
+        symmetric_routes=True,
+        serial_halting=True,
+    )
+
+    node_masks, edge_masks = model._get_other_route_overlap_masks(state)
+    route = state.current_routes[0]
+    route = route[route > -1]
+    overlap_features = model._get_trim_overlap_features(
+        removed_nodes=route[:2],
+        removed_edge_nodes=route[:3],
+        kept_nodes=route[2:],
+        kept_edge_nodes=route[2:],
+        other_node_mask=node_masks[0],
+        other_edge_mask=edge_masks[0],
+        dtype=torch.float32,
+    )
+
+    assert model.trim_action_feat_dim == 26
+    assert torch.allclose(
+        overlap_features,
+        torch.tensor([
+            1.0, 0.0,        # removed nodes overlap/unique
+            1.0, 0.0,        # removed edges overlap/unique
+            1.0 / 3.0, 2.0 / 3.0,  # kept nodes overlap/unique
+            0.0, 1.0,        # kept edges overlap/unique
+        ]),
+    )
+
+
 def test_zero_trim_reward_keeps_pretrim_reward_baseline():
     prev_cost = torch.tensor([10.0, 20.0, 30.0])
     new_cost = torch.tensor([15.0, 18.0, 25.0])

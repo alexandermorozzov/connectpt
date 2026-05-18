@@ -1837,7 +1837,16 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                  trim_scorer_hidden_dim=16,
                  forbid_halt_when_overlong=False, **kwargs):
         super().__init__(*args, **kwargs)
-        self.trim_action_feat_dim = 6
+        self.trim_base_feat_dim = 6
+        self.trim_overlap_feat_dim = 8
+        # Matches RouteGenBatchState.get_global_state_features() for the
+        # current 3-weight cost objective.
+        self.trim_global_feat_dim = 12
+        self.trim_action_feat_dim = (
+            self.trim_base_feat_dim +
+            self.trim_overlap_feat_dim +
+            self.trim_global_feat_dim
+        )
         self.forbid_halt_when_overlong = forbid_halt_when_overlong
         trim_scorer_indim = self.full_nodepair_dim + self.trim_action_feat_dim
         self.trim_scorer = nn.Sequential(
@@ -2277,6 +2286,19 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
              self.trim_action_feat_dim),
             device=state.device,
         )
+        global_features = state.get_global_state_features()
+        global_features = global_features.to(
+            device=state.device,
+            dtype=features.dtype,
+        )
+        if global_features.shape[-1] != self.trim_global_feat_dim:
+            raise ValueError(
+                "Trim scorer expects "
+                f"{self.trim_global_feat_dim} global features, got "
+                f"{global_features.shape[-1]}"
+            )
+        other_node_masks, other_edge_masks = \
+            self._get_other_route_overlap_masks(state)
 
         for bi in range(batch_size):
             route = state.current_routes[bi]
@@ -2303,11 +2325,17 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                     scores_to = new_start
                     direction_flag = 0.0
                     removed_len = route_pos
+                    removed_nodes = route[:route_pos]
+                    removed_edge_nodes = route[:route_pos + 1]
+                    kept_nodes = route[route_pos:]
+                    kept_edge_nodes = route[route_pos:]
                     self._write_trim_features(
                         features, valid, bi, scores_from, scores_to,
                         removed_len, remaining_len, route_len, max_len,
                         removed_time, remaining_time, route_time,
-                        direction_flag
+                        direction_flag, removed_nodes, removed_edge_nodes,
+                        kept_nodes, kept_edge_nodes, other_node_masks[bi],
+                        other_edge_masks[bi], global_features[bi]
                     )
             else:
                 old_end = route[-1]
@@ -2322,11 +2350,17 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                     scores_to = old_end
                     direction_flag = 1.0
                     removed_len = route_len - remaining_len
+                    removed_nodes = route[route_pos + 1:]
+                    removed_edge_nodes = route[route_pos:]
+                    kept_nodes = route[:route_pos + 1]
+                    kept_edge_nodes = route[:route_pos + 1]
                     self._write_trim_features(
                         features, valid, bi, scores_from, scores_to,
                         removed_len, remaining_len, route_len, max_len,
                         removed_time, remaining_time, route_time,
-                        direction_flag
+                        direction_flag, removed_nodes, removed_edge_nodes,
+                        kept_nodes, kept_edge_nodes, other_node_masks[bi],
+                        other_edge_masks[bi], global_features[bi]
                     )
 
         if valid.any():
@@ -2338,8 +2372,11 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
     def _write_trim_features(self, features, valid, batch_idx, from_node,
                              to_node, removed_len, remaining_len, route_len,
                              max_len, removed_time, remaining_time,
-                             route_time, direction_flag):
-        features[batch_idx, from_node, to_node] = torch.stack((
+                             route_time, direction_flag, removed_nodes,
+                             removed_edge_nodes, kept_nodes, kept_edge_nodes,
+                             other_node_mask, other_edge_mask,
+                             global_features):
+        base_features = torch.stack((
             torch.as_tensor(removed_len / route_len,
                             device=features.device, dtype=features.dtype),
             torch.as_tensor(remaining_len / max_len,
@@ -2351,7 +2388,78 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             torch.as_tensor(direction_flag, device=features.device,
                             dtype=features.dtype),
         ))
+        overlap_features = self._get_trim_overlap_features(
+            removed_nodes, removed_edge_nodes, kept_nodes, kept_edge_nodes,
+            other_node_mask, other_edge_mask, features.dtype
+        )
+        features[batch_idx, from_node, to_node] = torch.cat((
+            base_features, overlap_features, global_features
+        ))
         valid[batch_idx, from_node, to_node] = True
+
+    def _get_other_route_overlap_masks(self, state):
+        node_masks = torch.zeros(
+            (state.batch_size, state.max_n_nodes),
+            dtype=torch.bool,
+            device=state.device,
+        )
+        edge_masks = torch.zeros(
+            (state.batch_size, state.max_n_nodes, state.max_n_nodes),
+            dtype=torch.bool,
+            device=state.device,
+        )
+
+        for bi, batch_routes in enumerate(state._finished_routes):
+            for route in batch_routes:
+                route = route.to(device=state.device, dtype=torch.long)
+                route = route[route > -1]
+                if route.numel() == 0:
+                    continue
+                node_masks[bi, route] = True
+                if route.numel() < 2:
+                    continue
+                from_nodes = route[:-1]
+                to_nodes = route[1:]
+                edge_masks[bi, from_nodes, to_nodes] = True
+                if state.symmetric_routes:
+                    edge_masks[bi, to_nodes, from_nodes] = True
+
+        return node_masks, edge_masks
+
+    def _get_trim_overlap_features(self, removed_nodes, removed_edge_nodes,
+                                   kept_nodes, kept_edge_nodes,
+                                   other_node_mask, other_edge_mask, dtype):
+        removed_node_overlap = self._get_node_overlap_fraction(
+            removed_nodes, other_node_mask, dtype)
+        removed_edge_overlap = self._get_edge_overlap_fraction(
+            removed_edge_nodes, other_edge_mask, dtype)
+        kept_node_overlap = self._get_node_overlap_fraction(
+            kept_nodes, other_node_mask, dtype)
+        kept_edge_overlap = self._get_edge_overlap_fraction(
+            kept_edge_nodes, other_edge_mask, dtype)
+
+        one = torch.ones((), device=other_node_mask.device, dtype=dtype)
+        return torch.stack((
+            removed_node_overlap,
+            one - removed_node_overlap,
+            removed_edge_overlap,
+            one - removed_edge_overlap,
+            kept_node_overlap,
+            one - kept_node_overlap,
+            kept_edge_overlap,
+            one - kept_edge_overlap,
+        ))
+
+    def _get_node_overlap_fraction(self, nodes, node_mask, dtype):
+        if nodes.numel() == 0:
+            return torch.zeros((), device=node_mask.device, dtype=dtype)
+        return node_mask[nodes].to(dtype=dtype).mean()
+
+    def _get_edge_overlap_fraction(self, route_nodes, edge_mask, dtype):
+        if route_nodes.numel() < 2:
+            return torch.zeros((), device=edge_mask.device, dtype=dtype)
+        return edge_mask[route_nodes[:-1], route_nodes[1:]].to(
+            dtype=dtype).mean()
 
 
 class RandomPathCombiningRouteGenerator(PathCombiningRouteGenerator):
