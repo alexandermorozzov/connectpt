@@ -2032,18 +2032,6 @@ def train_lc_improvement_cfg_ppo(
     }
 
 
-def _get_algo_cfg(cfg, section_name, fallback_section="ppo"):
-    if hasattr(cfg, "get"):
-        section = cfg.get(section_name, None)
-        if section is None:
-            section = cfg.get(fallback_section)
-        return section
-    section = getattr(cfg, section_name, None)
-    if section is None:
-        section = getattr(cfg, fallback_section)
-    return section
-
-
 def train_lc_improvement_cfg_d3po(
         model, cost_obj, graphs, seed_routes, device, cfg, output_dir, run_name,
         train_fraction=0.9, batch_size=None, n_iterations=None,
@@ -2053,7 +2041,14 @@ def train_lc_improvement_cfg_d3po(
         max_trim_actions_per_route=None, train_indices=None, val_indices=None,
         best_model_path=None,
         max_rollout_samples=8192, target_n_routes=None):
-    """Train LC improvement with D3PO as a PPO alternative."""
+    """Train LC improvement with D3PO as a PPO alternative.
+
+    Reads shared PPO-style hyperparameters from ``cfg.ppo`` (n_iterations,
+    val_period, n_epochs, minibatch_size, horizon, epsilon, use_gae,
+    gae_lambda). D3PO-only knobs (n_objectives, diversity_*,
+    preference_noise_sigma, normalize_advantages_per_objective) live in
+    ``cfg.d3po``.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -2061,7 +2056,8 @@ def train_lc_improvement_cfg_d3po(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    d3po_cfg = _get_algo_cfg(cfg, "d3po", "ppo")
+    ppo_cfg = cfg.ppo
+    d3po_cfg = cfg.d3po
     n_objectives = int(_get_cfg_value(d3po_cfg, "n_objectives", 3))
     if n_objectives != 3:
         raise ValueError(
@@ -2076,17 +2072,17 @@ def train_lc_improvement_cfg_d3po(
     if batch_size is None:
         batch_size = int(_get_cfg_value(cfg, "batch_size", 8))
     if n_iterations is None:
-        n_iterations = int(_get_cfg_value(d3po_cfg, "n_iterations"))
+        n_iterations = int(_get_cfg_value(ppo_cfg, "n_iterations"))
     if val_period is None:
-        val_period = int(_get_cfg_value(d3po_cfg, "val_period"))
+        val_period = int(_get_cfg_value(ppo_cfg, "val_period"))
     if horizon is None:
-        horizon = int(_get_cfg_value(d3po_cfg, "horizon"))
+        horizon = int(_get_cfg_value(ppo_cfg, "horizon"))
     if ppo_epochs is None:
-        d3po_epochs = int(_get_cfg_value(d3po_cfg, "n_epochs"))
+        d3po_epochs = int(_get_cfg_value(ppo_cfg, "n_epochs"))
     else:
         d3po_epochs = int(ppo_epochs)
     if minibatch_size is None:
-        minibatch_size = int(_get_cfg_value(d3po_cfg, "minibatch_size"))
+        minibatch_size = int(_get_cfg_value(ppo_cfg, "minibatch_size"))
     if max_route_edit_steps is None:
         max_route_edit_steps = _get_default_max_route_edit_steps(max_route_len)
     if max_trim_actions_per_route is None:
@@ -2117,9 +2113,9 @@ def train_lc_improvement_cfg_d3po(
     forced_halt_penalty = float(
         _get_cfg_value(cfg, "forced_halt_penalty", 0.0))
     entropy_weight = float(_get_cfg_value(cfg, "entropy_weight", 0.0))
-    clip_epsilon = float(_get_cfg_value(d3po_cfg, "epsilon"))
-    use_gae = bool(_get_cfg_value(d3po_cfg, "use_gae", True))
-    gae_lambda = float(_get_cfg_value(d3po_cfg, "gae_lambda", 1.0))
+    clip_epsilon = float(_get_cfg_value(ppo_cfg, "epsilon"))
+    use_gae = bool(_get_cfg_value(ppo_cfg, "use_gae", True))
+    gae_lambda = float(_get_cfg_value(ppo_cfg, "gae_lambda", 1.0))
     diversity_weight = float(
         _get_cfg_value(d3po_cfg, "diversity_weight", 0.0))
     diversity_alpha = float(

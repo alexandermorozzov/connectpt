@@ -871,8 +871,10 @@ def test_train_lc_improvement_cfg_dispatches_by_trainer(monkeypatch):
 def test_train_lc_improvement_cfg_d3po_rejects_incumbent_reward():
     cfg = SimpleNamespace(
         eval=SimpleNamespace(min_route_len=2, max_route_len=3),
-        d3po=SimpleNamespace(
-            n_objectives=3,
+        # Shared PPO-style hyperparameters live in cfg.ppo (both ppo and
+        # d3po trainers read them from there). cfg.d3po holds only
+        # D3PO-specific knobs.
+        ppo=SimpleNamespace(
             n_iterations=1,
             val_period=1,
             horizon=1,
@@ -881,6 +883,9 @@ def test_train_lc_improvement_cfg_d3po_rejects_incumbent_reward():
             epsilon=0.2,
             use_gae=False,
             gae_lambda=1.0,
+        ),
+        d3po=SimpleNamespace(
+            n_objectives=3,
             diversity_weight=0.0,
             diversity_alpha=1.0,
             preference_noise_sigma=0.0,
