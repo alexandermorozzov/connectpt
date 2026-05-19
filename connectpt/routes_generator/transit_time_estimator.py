@@ -30,6 +30,12 @@ ROUTE_ACTION_TRIM_START = 1
 ROUTE_ACTION_TRIM_END = 2
 ROUTE_ACTION_HALT = 3
 
+COST_WEIGHT_KEY_ORDER = (
+    'demand_time_weight',
+    'route_time_weight',
+    'median_connectivity_weight',
+)
+
 
 def enforce_correct_batch(matrix, batch_size):
     if matrix.ndim == 2:
@@ -916,6 +922,14 @@ class RouteGenBatchState:
     def set_cost_weights(self, new_cost_weights):
         for key, val in new_cost_weights.items():
             # expand the cost weights to match the batch
+            if type(val) is not Tensor:
+                val = torch.tensor(val, device=self.device)
+            else:
+                val = val.to(self.device)
+            if val.ndim == 0:
+                val = val[None]
+            if val.numel() == 1 and self.batch_size > 1:
+                val = val.expand(self.batch_size)
             self.extra_data.cost_weights[key][...] = val
 
     @property
@@ -963,6 +977,30 @@ class RouteGenBatchState:
             cost_weights = cost_weights.expand(self.batch_size, -1)
         if cost_weights.shape[0] > self.batch_size:
             cost_weights = cost_weights[:self.batch_size]
+        return cost_weights
+
+    def get_cost_weights_tensor(self, key_order=COST_WEIGHT_KEY_ORDER,
+                                normalize=False):
+        cost_weights_list = []
+        for key in key_order:
+            if key not in self.cost_weights:
+                raise KeyError(f"State does not contain cost weight {key!r}")
+            if type(self.cost_weights[key]) is Tensor:
+                cw = self.cost_weights[key].to(self.device)
+                if cw.ndim == 0:
+                    cw = cw[None]
+            else:
+                cw = torch.tensor(self.cost_weights[key],
+                                  device=self.device)[None]
+            cost_weights_list.append(cw)
+        cost_weights = torch.stack(cost_weights_list, dim=1)
+        if cost_weights.shape[0] == 1:
+            cost_weights = cost_weights.expand(self.batch_size, -1)
+        if cost_weights.shape[0] > self.batch_size:
+            cost_weights = cost_weights[:self.batch_size]
+        if normalize:
+            denom = cost_weights.sum(dim=-1, keepdim=True).clamp_min(EPSILON)
+            cost_weights = cost_weights / denom
         return cost_weights
     
     @property
@@ -1388,6 +1426,10 @@ class MyCostModule(CostModule):
                 "fractions of extreme samples must sum to <= 1"
         self.ignore_stops_oob = ignore_stops_oob
 
+    @property
+    def cost_component_names(self):
+        return COST_WEIGHT_KEY_ORDER
+
     def sample_variable_weights(self, batch_size, device=None):
         if not self.variable_weights:
             dtw = torch.full((batch_size,), self.demand_time_weight, 
@@ -1457,9 +1499,35 @@ class MyCostModule(CostModule):
         if constraint_violation_weight is not None:
             self.constraint_violation_weight = constraint_violation_weight
 
-    def forward(self, state, constraint_weight=None, no_norm=False, 
-                return_per_route_riders=False):
-        cho = self._cost_helper(state, return_per_route_riders)
+    def get_preference_weights(self, state, normalize=False):
+        if hasattr(state, "get_cost_weights_tensor"):
+            return state.get_cost_weights_tensor(
+                COST_WEIGHT_KEY_ORDER, normalize=normalize)
+
+        weights = []
+        for key in COST_WEIGHT_KEY_ORDER:
+            weights.append(state.cost_weights[key])
+        weights = torch.stack(weights, dim=-1)
+        if normalize:
+            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(
+                EPSILON)
+        return weights
+
+    def _expand_batch_value(self, value, batch_size, device):
+        if type(value) is not Tensor:
+            value = torch.tensor([value], device=device)
+        else:
+            value = value.to(device)
+            if value.ndim == 0:
+                value = value[None]
+        if value.shape[0] == 1 and batch_size > 1:
+            value = value.expand(batch_size)
+        if value.shape[0] > batch_size:
+            value = value[:batch_size]
+        return value
+
+    def _compute_cost_components_from_result(
+            self, state, cho, constraint_weight=None, no_norm=False):
         cost_weights = state.cost_weights
         if 'demand_time_weight' in cost_weights:
             demand_time_weight = cost_weights['demand_time_weight']
@@ -1478,18 +1546,14 @@ class MyCostModule(CostModule):
             constraint_weight = self.constraint_violation_weight
 
         # if we have more weights than routes, truncate the weights
-        if type(demand_time_weight) is Tensor and \
-           demand_time_weight.shape[0] > state.batch_size:
-            demand_time_weight = demand_time_weight[:state.batch_size]
-        if type(route_time_weight) is Tensor and \
-           route_time_weight.shape[0] > state.batch_size:
-            route_time_weight = route_time_weight[:state.batch_size]
-        if type(median_connectivity_weight) is Tensor and \
-           median_connectivity_weight.shape[0] > state.batch_size:
-            median_connectivity_weight = median_connectivity_weight[:state.batch_size]
-        if type(constraint_weight) is Tensor and \
-           constraint_weight.shape[0] > state.batch_size:
-            constraint_weight = constraint_weight[:state.batch_size]
+        demand_time_weight = self._expand_batch_value(
+            demand_time_weight, state.batch_size, state.device)
+        route_time_weight = self._expand_batch_value(
+            route_time_weight, state.batch_size, state.device)
+        median_connectivity_weight = self._expand_batch_value(
+            median_connectivity_weight, state.batch_size, state.device)
+        constraint_weight = self._expand_batch_value(
+            constraint_weight, state.batch_size, state.device)
 
         # normalize all time values by the maximum drive time in the graph
         time_normalizer = state.drive_times.flatten(1,2).max(1).values
@@ -1525,9 +1589,11 @@ class MyCostModule(CostModule):
             route_cost = route_cost / (time_normalizer * n_routes + 1e-6)
             median_connectivity =  median_connectivity/ (time_normalizer)
             # cho.median_connectivity = median_connectivity
-        # new reward function
-        cost = demand_cost * demand_time_weight + \
-            route_cost * route_time_weight + median_connectivity_weight*median_connectivity
+        cost_components = torch.stack(
+            (demand_cost, route_cost, median_connectivity), dim=-1)
+        weights = torch.stack(
+            (demand_time_weight, route_time_weight,
+             median_connectivity_weight), dim=-1)
 
         # compute the weight for the violated-constraint penalty, as an
          # upper bound on how bad the demand and route cost components may be
@@ -1545,7 +1611,28 @@ class MyCostModule(CostModule):
             frac_stops_oob = cho.n_stops_oob / denom
             const_viol_cost += frac_stops_oob + 0.1 * (frac_stops_oob > 0)
 
-        cost += const_viol_cost * constraint_weight
+        constraint_cost = const_viol_cost * constraint_weight
+        return cost_components, weights, constraint_cost
+
+    def get_cost_components(self, state, result=None, include_constraint=True,
+                            no_norm=False):
+        if result is None:
+            result = self._cost_helper(state)
+        components, _, constraint_cost = \
+            self._compute_cost_components_from_result(
+                state, result, no_norm=no_norm)
+        if include_constraint:
+            components = components + constraint_cost[:, None]
+        return components
+
+    def forward(self, state, constraint_weight=None, no_norm=False, 
+                return_per_route_riders=False):
+        cho = self._cost_helper(state, return_per_route_riders)
+        components, weights, constraint_cost = \
+            self._compute_cost_components_from_result(
+                state, cho, constraint_weight=constraint_weight,
+                no_norm=no_norm)
+        cost = (components * weights).sum(dim=-1) + constraint_cost
         cho.cost = cost
 
         assert cost.isfinite().all(), "invalid cost was computed!"

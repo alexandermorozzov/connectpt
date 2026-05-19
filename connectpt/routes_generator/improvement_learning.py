@@ -8,6 +8,7 @@ from torch_geometric.data import Batch
 from tqdm import tqdm
 
 from .citygraph_dataset import (
+    DEMAND_KEY,
     STOP_KEY,
     DemandScaleTransform,
     InsertPosFeatures,
@@ -20,6 +21,7 @@ from .transit_time_estimator import (
     ROUTE_ACTION_TRIM_START,
     RouteGenBatchState,
 )
+from .models import FeatureNorm, get_mlp
 from .torch_utils import get_batch_tensor_from_routes
 
 ROUTE_ACTION_NAMES = {
@@ -631,6 +633,81 @@ def _make_optimizer_from_cfg(model, cfg):
     )
 
 
+class D3POValueModule:
+    def __init__(self, learning_rate=0.0005, n_objectives=3, decay=0.01,
+                 device=None):
+        self.learning_rate = learning_rate
+        self.decay = decay
+        self.n_objectives = int(n_objectives)
+        self._curr_estimate = None
+        self.loss_fn = torch.nn.MSELoss()
+        if device is None:
+            device = torch.device("cpu")
+        self.model = torch.nn.Sequential(
+            FeatureNorm(self.input_dim, 0.001),
+            get_mlp(3, self.input_dim * 2, in_dim=self.input_dim,
+                    out_dim=self.n_objectives, dropout=0.0)
+        ).to(device)
+        self.optim = torch.optim.Adam(
+            self.model.parameters(), lr=self.learning_rate,
+            weight_decay=self.decay)
+
+    @property
+    def input_dim(self):
+        return 1 + 1 + 2 + 2 + 4 + 11
+
+    def inputs_from_data(self, graph_data, cost_weights):
+        dev = graph_data[STOP_KEY].x.device
+        input_data = torch.zeros(graph_data.num_graphs, self.input_dim,
+                                 dtype=torch.float, device=dev)
+        input_data[:, 0] = graph_data.demand.sum(dim=(1, 2))
+
+        for bi, dl in enumerate(graph_data.to_data_list()):
+            dmd_graph = dl[DEMAND_KEY]
+            input_data[bi, 1] = dmd_graph.num_edges
+            input_data[bi, 2] = dmd_graph.edge_attr[:, 0].mean()
+            if dmd_graph.num_edges > 1:
+                input_data[bi, 3] = dmd_graph.edge_attr[:, 0].std()
+            else:
+                input_data[bi, 3] = 0
+
+            dmd_weighted_times = dmd_graph.edge_attr[:, 0] * \
+                dmd_graph.edge_attr[:, 1]
+            input_data[bi, 4] = dmd_weighted_times.mean()
+            input_data[bi, 5] = dmd_weighted_times.mean()
+            x_dim = dl[STOP_KEY].x.shape[1]
+            input_data[bi, 6:6 + x_dim] = dl[STOP_KEY].x.mean(dim=0)
+
+        for ii, cw in enumerate(cost_weights.values()):
+            data_idx = -(1 + ii)
+            if torch.is_tensor(cw):
+                input_data[:, data_idx] = cw.to(dev)
+            else:
+                input_data[:, data_idx] = cw
+
+        return input_data
+
+    def from_state(self, state):
+        input_data = self.inputs_from_data(
+            state.graph_data, state.cost_weights)
+        glob_feats = state.get_global_state_features()
+        input_data[..., -glob_feats.shape[-1]:] = glob_feats
+
+        baseline = self.model(input_data)
+        self._curr_estimate = baseline
+        assert baseline.isfinite().all()
+        return baseline.detach()
+
+    def update(self, returns):
+        self.optim.zero_grad()
+        returns = returns.to(self._curr_estimate.dtype)
+        loss = self.loss_fn(self._curr_estimate, returns)
+        loss.backward()
+        self.optim.step()
+        self._curr_estimate = None
+        self.model[0].update()
+
+
 def _merge_step_action_stats(counts, actions, action_kinds, active):
     if not active.any():
         return
@@ -655,8 +732,15 @@ def _is_trim_action(action_kinds):
     )
 
 
+def _expand_mask_like(mask, value):
+    while mask.ndim < value.ndim:
+        mask = mask.unsqueeze(-1)
+    return mask
+
+
 def _zero_trim_action_rewards(step_rewards, action_kinds, active):
     trim_action = _is_trim_action(action_kinds) & active
+    trim_action = _expand_mask_like(trim_action, step_rewards)
     return torch.where(trim_action, torch.zeros_like(step_rewards),
                        step_rewards)
 
@@ -666,6 +750,7 @@ def _update_reward_baseline_cost(prev_cost, new_cost, action_kinds, active,
     update_mask = active
     if zero_trim_reward:
         update_mask = update_mask & ~_is_trim_action(action_kinds)
+    update_mask = _expand_mask_like(update_mask, new_cost)
     return torch.where(update_mask, new_cost, prev_cost)
 
 
@@ -683,6 +768,8 @@ def _compute_ppo_returns_and_advantages(rewards, value_estimates, dones,
             else:
                 next_values = value_estimates[step_idx + 1]
             next_nonterminal = (~dones[step_idx]).to(torch.float32)
+            next_nonterminal = _expand_mask_like(
+                next_nonterminal, next_values)
             delta = rewards[step_idx] + gamma * next_values * \
                 next_nonterminal - value_estimates[step_idx]
             lastgaelam = delta + gamma * gae_lambda * \
@@ -693,6 +780,8 @@ def _compute_ppo_returns_and_advantages(rewards, value_estimates, dones,
         next_return = final_value_estimates
         for step_idx in reversed(range(rewards.shape[0])):
             next_nonterminal = (~dones[step_idx]).to(torch.float32)
+            next_nonterminal = _expand_mask_like(
+                next_nonterminal, next_return)
             next_return = rewards[step_idx] + gamma * \
                 next_nonterminal * next_return
             returns[step_idx] = next_return
@@ -1085,6 +1174,402 @@ def _update_lc_improvement_cfg_ppo_from_rollout(
 
     stats = {
         "objective": float(np.mean(objectives)) if objectives else 0.0,
+        "ratio_sum": ratio_sum,
+        "ratio_count": ratio_count,
+        "clipped_count": clipped_count,
+    }
+    return stats
+
+
+def _normalize_preference_weights(weights):
+    return weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+
+
+def _preference_dict_from_tensor(weights):
+    return {
+        "demand_time_weight": weights[:, 0],
+        "route_time_weight": weights[:, 1],
+        "median_connectivity_weight": weights[:, 2],
+    }
+
+
+def _get_state_preferences(cost_obj, state):
+    if hasattr(cost_obj, "get_preference_weights"):
+        return cost_obj.get_preference_weights(state, normalize=True)
+    return _normalize_preference_weights(state.get_cost_weights_tensor())
+
+
+def _collect_lc_improvement_cfg_d3po_rollout(
+        model, cost_obj, make_next_state, value_module, horizon,
+        reward_scale, diff_reward, supports_route_actions, device,
+        max_route_edit_steps=None, force_nonhalt_first_step=False,
+        edit_step_penalty=0.0, forced_halt_penalty=0.0,
+        zero_trim_reward=False, max_trim_actions_per_route=1,
+        keep_rollout_on_device=False):
+    states = []
+    rewards = []
+    value_estimates = []
+    logits = []
+    actions = []
+    action_kinds = []
+    dones = []
+    active_masks = []
+    score_masks = []
+    trim_allowed_masks = []
+    preferences = []
+    action_counts = _new_action_count_totals()
+    episode_start_costs = []
+    episode_final_costs = []
+    episode_start_components = []
+    episode_final_components = []
+
+    state = None
+    prev_components = None
+    current_start_cost = None
+    current_start_components = None
+    last_cost = None
+    last_components = None
+    route_step_idx = 0
+    max_trim_actions_per_route = _normalize_max_trim_actions_per_route(
+        max_trim_actions_per_route)
+    trim_action_counts = None
+
+    with torch.no_grad():
+        for _ in range(horizon):
+            if state is None or state.is_done().all():
+                state, start_result = make_next_state(state)
+                current_start_cost = start_result.cost.detach().clone()
+                current_start_components = cost_obj.get_cost_components(
+                    state, result=start_result).detach()
+                prev_components = current_start_components.clone()
+                last_cost = current_start_cost.clone()
+                last_components = current_start_components.clone()
+                route_step_idx = 0
+                trim_action_counts = torch.zeros(
+                    (state.batch_size,), dtype=torch.long,
+                    device=state.device)
+                action_counts["route_plan_count"] += state.batch_size
+
+            done_before = state.is_done()
+            active = ~done_before
+            allow_trim = _trim_actions_allowed(
+                trim_action_counts, max_trim_actions_per_route)
+            state_for_buffer = state.clone()
+            _clear_state_lazy_tensors(state_for_buffer)
+            if keep_rollout_on_device:
+                states.append(state_for_buffer)
+            else:
+                states.append(state_for_buffer.to_device("cpu"))
+            value_estimates.append(value_module.from_state(state))
+            preferences.append(_get_state_preferences(cost_obj, state).detach())
+
+            force_halt = max_route_edit_steps is not None and \
+                route_step_idx >= max_route_edit_steps
+            if force_halt:
+                step_actions = torch.full(
+                    (state.batch_size, 2), -1, dtype=torch.long,
+                    device=state.device)
+                step_kinds = torch.full(
+                    (state.batch_size,), ROUTE_ACTION_HALT,
+                    dtype=torch.long, device=state.device)
+                step_logits = torch.zeros(
+                    (state.batch_size,), dtype=torch.float32,
+                    device=state.device)
+                if supports_route_actions:
+                    state.apply_route_actions(step_kinds, step_actions)
+                else:
+                    state.shortest_path_action(step_actions)
+                score_mask = torch.zeros_like(active)
+            elif supports_route_actions:
+                step_kinds, step_actions, step_logits, _ = \
+                    model.step_route_action(
+                        state,
+                        allow_halt=not (
+                            force_nonhalt_first_step and route_step_idx == 0
+                        ),
+                        allow_trim_start=allow_trim,
+                        allow_trim_end=allow_trim)
+                state.apply_route_actions(step_kinds, step_actions)
+                score_mask = active
+            else:
+                step_actions, step_logits, _ = model.step(state)
+                step_kinds = torch.full(
+                    (state.batch_size,), ROUTE_ACTION_EXTEND,
+                    dtype=torch.long, device=state.device)
+                step_kinds[step_actions[:, 0] < 0] = ROUTE_ACTION_HALT
+                state.shortest_path_action(step_actions)
+                score_mask = active
+            route_step_idx += 1
+            selected_trim = _is_trim_action(step_kinds) & active
+            trim_action_counts = trim_action_counts + selected_trim.long()
+
+            done_after = state.is_done()
+            result = cost_obj(state)
+            result_components = cost_obj.get_cost_components(
+                state, result=result).detach()
+            if diff_reward:
+                step_rewards = \
+                    (prev_components - result_components) * reward_scale
+            else:
+                step_rewards = torch.zeros_like(result_components)
+                just_done = done_after & active
+                step_rewards[just_done] = \
+                    -result_components[just_done] * reward_scale
+            if zero_trim_reward:
+                step_rewards = _zero_trim_action_rewards(
+                    step_rewards, step_kinds, active)
+            if edit_step_penalty > 0:
+                edit_action = (step_kinds != ROUTE_ACTION_HALT) & active
+                step_rewards = step_rewards - \
+                    edit_action.to(step_rewards.dtype)[:, None] * \
+                    edit_step_penalty
+            if forced_halt_penalty > 0 and force_halt:
+                step_rewards = step_rewards - \
+                    active.to(step_rewards.dtype)[:, None] * \
+                    forced_halt_penalty
+            step_rewards = step_rewards * active.to(step_rewards.dtype)[:, None]
+
+            prev_components = _update_reward_baseline_cost(
+                prev_components, result_components, step_kinds, active,
+                zero_trim_reward=zero_trim_reward)
+            last_cost = torch.where(active, result.cost, last_cost)
+            last_components = torch.where(
+                active[:, None], result_components, last_components)
+
+            just_finished = done_after & active
+            if just_finished.any():
+                episode_start_costs.append(
+                    current_start_cost[just_finished].detach().cpu())
+                episode_final_costs.append(
+                    result.cost[just_finished].detach().cpu())
+                episode_start_components.append(
+                    current_start_components[just_finished].detach().cpu())
+                episode_final_components.append(
+                    result_components[just_finished].detach().cpu())
+
+            _merge_step_action_stats(
+                action_counts, step_actions, step_kinds, active)
+
+            rewards.append(step_rewards.detach())
+            logits.append(step_logits.detach())
+            actions.append(step_actions.detach().clone())
+            action_kinds.append(step_kinds.detach().clone())
+            dones.append(done_after.detach().clone())
+            active_masks.append(active.detach().clone())
+            score_masks.append(score_mask.detach().clone())
+            trim_allowed_masks.append(allow_trim.detach().clone())
+
+        if state is None:
+            final_value_estimates = torch.zeros_like(rewards[-1])
+        else:
+            unfinished = ~state.is_done()
+            if unfinished.any():
+                episode_start_costs.append(
+                    current_start_cost[unfinished].detach().cpu())
+                episode_final_costs.append(
+                    last_cost[unfinished].detach().cpu())
+                episode_start_components.append(
+                    current_start_components[unfinished].detach().cpu())
+                episode_final_components.append(
+                    last_components[unfinished].detach().cpu())
+            final_value_estimates = value_module.from_state(state)
+            final_value_estimates = final_value_estimates * \
+                unfinished.to(final_value_estimates.dtype)[:, None]
+
+    rollout = {
+        "states": states,
+        "rewards": torch.stack(rewards),
+        "value_estimates": torch.stack(value_estimates),
+        "logits": torch.stack(logits),
+        "actions": torch.stack(actions),
+        "action_kinds": torch.stack(action_kinds),
+        "dones": torch.stack(dones),
+        "active_masks": torch.stack(active_masks),
+        "score_masks": torch.stack(score_masks),
+        "trim_allowed_masks": torch.stack(trim_allowed_masks),
+        "preferences": torch.stack(preferences),
+        "final_value_estimates": final_value_estimates.detach(),
+        "action_counts": action_counts,
+        "zero_trim_reward": bool(zero_trim_reward),
+        "max_trim_actions_per_route": max_trim_actions_per_route,
+        "keep_rollout_on_device": bool(keep_rollout_on_device),
+    }
+    if len(episode_start_costs) > 0:
+        rollout["episode_start_costs"] = torch.cat(episode_start_costs)
+        rollout["episode_final_costs"] = torch.cat(episode_final_costs)
+        rollout["episode_start_components"] = torch.cat(
+            episode_start_components)
+        rollout["episode_final_components"] = torch.cat(
+            episode_final_components)
+    else:
+        rollout["episode_start_costs"] = torch.empty(0)
+        rollout["episode_final_costs"] = torch.empty(0)
+        rollout["episode_start_components"] = torch.empty(0, 3)
+        rollout["episode_final_components"] = torch.empty(0, 3)
+    return rollout
+
+
+def _sample_neighbor_preferences(preferences, sigma):
+    if sigma > 0:
+        neighbor = preferences + torch.randn_like(preferences) * sigma
+    else:
+        neighbor = preferences.roll(shifts=1, dims=-1)
+    neighbor = neighbor.clamp_min(1e-6)
+    return _normalize_preference_weights(neighbor)
+
+
+def _estimate_d3po_diversity_loss(
+        model, states, actions, action_kinds, trim_allowed, new_logits,
+        preferences, supports_route_actions, sigma, alpha):
+    neighbor_preferences = _sample_neighbor_preferences(preferences, sigma)
+    target = alpha * (preferences - neighbor_preferences).abs().sum(dim=-1)
+
+    neighbor_states = states.clone()
+    neighbor_states.set_cost_weights(
+        _preference_dict_from_tensor(neighbor_preferences))
+    if supports_route_actions:
+        _, _, neighbor_logits, _ = model.step_route_action(
+            neighbor_states, actions=actions, action_kinds=action_kinds,
+            allow_trim_start=(
+                trim_allowed if trim_allowed is not None else True),
+            allow_trim_end=(
+                trim_allowed if trim_allowed is not None else True))
+    else:
+        _, neighbor_logits, _ = model.step(neighbor_states, actions=actions)
+
+    sampled_kl = (new_logits - neighbor_logits).abs()
+    return (sampled_kl - target).pow(2).mean()
+
+
+def _update_lc_improvement_cfg_d3po_from_rollout(
+        model, optimizer, value_module, rollout, returns, advantages,
+        d3po_epochs, minibatch_size, clip_epsilon, entropy_weight, device,
+        diversity_weight=0.0, diversity_alpha=1.0,
+        preference_noise_sigma=0.15,
+        normalize_advantages_per_objective=True):
+    states = rollout["states"]
+    rewards = rollout["rewards"]
+    old_logits = rollout["logits"]
+    actions = rollout["actions"]
+    action_kinds = rollout["action_kinds"]
+    preferences = rollout["preferences"]
+    score_masks = rollout.get("score_masks", rollout["active_masks"])
+    trim_allowed_masks = rollout.get("trim_allowed_masks")
+    batch_size = rewards.shape[1]
+    n_states_per_minibatch = max(1, int(minibatch_size) // int(batch_size))
+    supports_route_actions = getattr(model, "supports_trim_actions", False)
+
+    ratio_sum = 0.0
+    ratio_count = 0
+    clipped_count = 0
+    objectives = []
+    diversity_losses = []
+
+    train_orders = [
+        torch.randperm(len(states), device=device)
+        for _ in range(int(d3po_epochs))
+    ]
+    train_order = torch.cat(train_orders)
+
+    for raw_idxs in torch.split(train_order, n_states_per_minibatch):
+        for idxs in _split_state_indices_by_signature(states, raw_idxs):
+            idx_list = idxs.detach().cpu().tolist()
+            mb_states = [states[idx] for idx in idx_list]
+            if len(mb_states) == 1:
+                mb_states = mb_states[0]
+            else:
+                mb_states = RouteGenBatchState.batch_from_list(mb_states)
+            if not _state_is_on_device(mb_states, device):
+                mb_states = mb_states.to_device(device)
+
+            mb_actions = actions[idxs].flatten(0, 1)
+            mb_action_kinds = action_kinds[idxs].flatten(0, 1)
+            mb_old_logits = old_logits[idxs].flatten(0, 1)
+            mb_returns = returns[idxs].flatten(0, 1)
+            mb_advantages = advantages[idxs].flatten(0, 1)
+            mb_preferences = preferences[idxs].flatten(0, 1)
+            mb_score = score_masks[idxs].flatten(0, 1)
+            mb_trim_allowed = None
+            if trim_allowed_masks is not None:
+                mb_trim_allowed = trim_allowed_masks[idxs].flatten(0, 1)
+            if not mb_score.any():
+                continue
+
+            active_idxs = torch.where(mb_score)[0]
+            mb_states = mb_states.index_select(active_idxs)
+            mb_actions = mb_actions[mb_score]
+            mb_action_kinds = mb_action_kinds[mb_score]
+            mb_old_logits = mb_old_logits[mb_score]
+            mb_returns = mb_returns[mb_score]
+            mb_advantages = mb_advantages[mb_score]
+            mb_preferences = mb_preferences[mb_score]
+            if mb_trim_allowed is not None:
+                mb_trim_allowed = mb_trim_allowed[mb_score]
+
+            value_module.from_state(mb_states)
+            value_module.update(mb_returns)
+
+            if supports_route_actions:
+                _, _, new_logits, entropy = model.step_route_action(
+                    mb_states, actions=mb_actions,
+                    action_kinds=mb_action_kinds,
+                    allow_trim_start=(
+                        mb_trim_allowed if mb_trim_allowed is not None
+                        else True
+                    ),
+                    allow_trim_end=(
+                        mb_trim_allowed if mb_trim_allowed is not None
+                        else True
+                    ))
+            else:
+                _, new_logits, entropy = model.step(
+                    mb_states, actions=mb_actions)
+
+            if normalize_advantages_per_objective:
+                if mb_advantages.shape[0] > 1:
+                    mb_advantages = \
+                        (mb_advantages - mb_advantages.mean(dim=0)) / \
+                        (mb_advantages.std(dim=0) + 1e-8)
+                else:
+                    mb_advantages = mb_advantages - \
+                        mb_advantages.mean(dim=0)
+
+            ratios = (new_logits - mb_old_logits).exp()
+            clipped_ratios = ratios.clamp(1 - clip_epsilon,
+                                          1 + clip_epsilon)
+            clip_obj = torch.minimum(
+                ratios[:, None] * mb_advantages,
+                clipped_ratios[:, None] * mb_advantages)
+            weighted_clip_obj = (mb_preferences * clip_obj).sum(dim=-1)
+            diversity_loss = torch.zeros((), device=device)
+            if diversity_weight > 0:
+                diversity_loss = _estimate_d3po_diversity_loss(
+                    model, mb_states, mb_actions, mb_action_kinds,
+                    mb_trim_allowed, new_logits, mb_preferences,
+                    supports_route_actions, preference_noise_sigma,
+                    diversity_alpha)
+            objective = weighted_clip_obj.mean() + \
+                entropy.mean() * entropy_weight - \
+                diversity_weight * diversity_loss
+
+            optimizer.zero_grad()
+            objective.backward()
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), 0.5, error_if_nonfinite=True)
+            optimizer.step()
+
+            objectives.append(float(objective.detach().item()))
+            diversity_losses.append(float(diversity_loss.detach().item()))
+            ratio_sum += float(ratios.detach().sum().item())
+            ratio_count += int(ratios.numel())
+            clipped = (ratios.detach() < 1 - clip_epsilon) | \
+                (ratios.detach() > 1 + clip_epsilon)
+            clipped_count += int(clipped.sum().item())
+
+    stats = {
+        "objective": float(np.mean(objectives)) if objectives else 0.0,
+        "diversity_loss": float(np.mean(diversity_losses))
+        if diversity_losses else 0.0,
         "ratio_sum": ratio_sum,
         "ratio_count": ratio_count,
         "clipped_count": clipped_count,
@@ -1539,3 +2024,441 @@ def train_lc_improvement_cfg_ppo(
         "train_indices": train_indices,
         "val_indices": val_indices,
     }
+
+
+def _get_algo_cfg(cfg, section_name, fallback_section="ppo"):
+    if hasattr(cfg, "get"):
+        section = cfg.get(section_name, None)
+        if section is None:
+            section = cfg.get(fallback_section)
+        return section
+    section = getattr(cfg, section_name, None)
+    if section is None:
+        section = getattr(cfg, fallback_section)
+    return section
+
+
+def train_lc_improvement_cfg_d3po(
+        model, cost_obj, graphs, seed_routes, device, cfg, output_dir, run_name,
+        train_fraction=0.9, batch_size=None, n_iterations=None,
+        val_period=None, horizon=None, ppo_epochs=None, minibatch_size=None,
+        min_route_len=None, max_route_len=None, warmup_batches=4, seed=0,
+        force_nonhalt_first_step=False, max_route_edit_steps=None,
+        max_trim_actions_per_route=None, train_indices=None, val_indices=None,
+        best_model_path=None,
+        max_rollout_samples=8192, target_n_routes=None):
+    """Train LC improvement with D3PO as a PPO alternative."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    d3po_cfg = _get_algo_cfg(cfg, "d3po", "ppo")
+    n_objectives = int(_get_cfg_value(d3po_cfg, "n_objectives", 3))
+    if n_objectives != 3:
+        raise ValueError(
+            "LC D3PO currently expects exactly three cost objectives: "
+            "demand, route time, and connectivity."
+        )
+
+    if min_route_len is None:
+        min_route_len = int(cfg.eval.min_route_len)
+    if max_route_len is None:
+        max_route_len = int(cfg.eval.max_route_len)
+    if batch_size is None:
+        batch_size = int(_get_cfg_value(cfg, "batch_size", 8))
+    if n_iterations is None:
+        n_iterations = int(_get_cfg_value(d3po_cfg, "n_iterations"))
+    if val_period is None:
+        val_period = int(_get_cfg_value(d3po_cfg, "val_period"))
+    if horizon is None:
+        horizon = int(_get_cfg_value(d3po_cfg, "horizon"))
+    if ppo_epochs is None:
+        d3po_epochs = int(_get_cfg_value(d3po_cfg, "n_epochs"))
+    else:
+        d3po_epochs = int(ppo_epochs)
+    if minibatch_size is None:
+        minibatch_size = int(_get_cfg_value(d3po_cfg, "minibatch_size"))
+    if max_route_edit_steps is None:
+        max_route_edit_steps = _get_default_max_route_edit_steps(max_route_len)
+    if max_trim_actions_per_route is None:
+        max_trim_actions_per_route = _get_cfg_value(
+            cfg, "max_trim_actions_per_route", 1)
+    max_trim_actions_per_route = _normalize_max_trim_actions_per_route(
+        max_trim_actions_per_route)
+
+    reward_scale = float(_get_cfg_value(cfg, "reward_scale", 1.0))
+    diff_reward = bool(_get_cfg_value(cfg, "diff_reward", True))
+    incumbent_reward = bool(_get_cfg_value(cfg, "incumbent_reward", False))
+    return_best_routes = bool(_get_cfg_value(cfg, "return_best_routes", False))
+    if incumbent_reward:
+        raise ValueError(
+            "D3PO v1 for LC improvement requires incumbent_reward=false. "
+            "Use trainer=ppo for incumbent rewards."
+        )
+    if return_best_routes:
+        raise ValueError(
+            "D3PO v1 for LC improvement requires return_best_routes=false. "
+            "Use trainer=ppo for best-route output rewards."
+        )
+    zero_trim_reward = bool(_get_cfg_value(cfg, "zero_trim_reward", False))
+    keep_rollout_on_device = bool(
+        _get_cfg_value(cfg, "keep_rollout_on_device", False))
+    gamma = float(_get_cfg_value(cfg, "discount_rate", 1.0))
+    edit_step_penalty = float(_get_cfg_value(cfg, "edit_step_penalty", 0.0))
+    forced_halt_penalty = float(
+        _get_cfg_value(cfg, "forced_halt_penalty", 0.0))
+    entropy_weight = float(_get_cfg_value(cfg, "entropy_weight", 0.0))
+    clip_epsilon = float(_get_cfg_value(d3po_cfg, "epsilon"))
+    use_gae = bool(_get_cfg_value(d3po_cfg, "use_gae", True))
+    gae_lambda = float(_get_cfg_value(d3po_cfg, "gae_lambda", 1.0))
+    diversity_weight = float(
+        _get_cfg_value(d3po_cfg, "diversity_weight", 0.0))
+    diversity_alpha = float(
+        _get_cfg_value(d3po_cfg, "diversity_alpha", 1.0))
+    preference_noise_sigma = float(
+        _get_cfg_value(d3po_cfg, "preference_noise_sigma", 0.15))
+    normalize_advantages_per_objective = bool(_get_cfg_value(
+        d3po_cfg, "normalize_advantages_per_objective", True))
+
+    optimizer = _make_optimizer_from_cfg(model, cfg)
+    value_module = D3POValueModule(
+        learning_rate=float(_get_cfg_value(cfg, "baseline_lr", 0.0005)),
+        n_objectives=n_objectives,
+        device=device,
+    )
+
+    if (train_indices is None) != (val_indices is None):
+        raise ValueError(
+            "train_indices and val_indices must be provided together"
+        )
+    if train_indices is None:
+        all_indices = torch.randperm(len(graphs))
+        train_size = int(train_fraction * len(all_indices))
+        train_indices = all_indices[:train_size]
+        val_indices = all_indices[train_size:]
+    else:
+        train_indices = torch.as_tensor(train_indices, dtype=torch.long)
+        val_indices = torch.as_tensor(val_indices, dtype=torch.long)
+
+    if len(train_indices) == 0:
+        raise ValueError("No training graphs were selected")
+    effective_batch_size = min(int(batch_size), len(train_indices))
+    rollout_samples = effective_batch_size * int(horizon)
+    if effective_batch_size > int(minibatch_size):
+        raise ValueError(
+            "LC improvement D3PO keeps full RouteGenBatchState snapshots. "
+            "Set BATCH_SIZE <= cfg.d3po.minibatch_size. "
+            f"Got BATCH_SIZE={effective_batch_size}, "
+            f"cfg.d3po.minibatch_size={minibatch_size}."
+        )
+    if rollout_samples > int(max_rollout_samples):
+        raise ValueError(
+            "LC improvement D3PO rollout is too large for the notebook "
+            "default memory budget. Lower BATCH_SIZE or D3PO_HORIZON. "
+            f"Got BATCH_SIZE * D3PO_HORIZON = {effective_batch_size} * "
+            f"{int(horizon)} = {rollout_samples}, limit is "
+            f"{int(max_rollout_samples)}."
+        )
+    n_routes = int(
+        target_n_routes if target_n_routes is not None
+        else seed_routes.shape[1])
+    if n_routes < int(seed_routes.shape[1]):
+        raise ValueError(
+            "target_n_routes must be at least the number of seed routes: "
+            f"{n_routes} < {int(seed_routes.shape[1])}"
+        )
+
+    model.train()
+    with torch.no_grad():
+        warmup = list(train_indices.split(effective_batch_size))[
+            :warmup_batches]
+        for batch_indices in tqdm(warmup, desc="feature norm"):
+            graph_batch, route_batch = make_improvement_batch(
+                graphs, seed_routes, batch_indices, device, training=True,
+                target_n_routes=target_n_routes)
+            rollout_lc_improvement(
+                model, cost_obj, graph_batch, route_batch,
+                min_route_len, max_route_len, greedy=False,
+                force_nonhalt_first_step=force_nonhalt_first_step,
+                max_route_edit_steps=max_route_edit_steps,
+                max_trim_actions_per_route=max_trim_actions_per_route,
+                return_best_routes=return_best_routes)
+    model.update_and_freeze_feature_norms()
+
+    if best_model_path is None:
+        best_model_path = output_dir / f"{run_name}.pt"
+    else:
+        best_model_path = Path(best_model_path)
+
+    best_val_cost = float("inf")
+    last_val = None
+    history = []
+    epoch_indices = train_indices[torch.randperm(len(train_indices))]
+    index_cursor = 0
+    route_cursor = 0
+    cur_graph_batch = None
+    cur_working_routes = None
+    cur_cost_weights = None
+    prev_route_idx_holder = [None]
+    prev_context_counts_holder = [None]
+
+    def make_next_state(prev_state=None):
+        nonlocal epoch_indices, index_cursor, route_cursor
+        nonlocal cur_graph_batch, cur_working_routes, cur_cost_weights
+
+        prev_route_idx = prev_route_idx_holder[0]
+        prev_context_counts = prev_context_counts_holder[0]
+        if prev_state is not None and prev_route_idx is not None and \
+                cur_working_routes is not None:
+            finalized = _get_planned_current_routes(
+                prev_state,
+                cur_working_routes[:, prev_route_idx],
+                prev_context_counts)
+            planned_tensor = get_batch_tensor_from_routes(
+                [[finalized[batch_idx]]
+                 for batch_idx in range(len(finalized))],
+                cur_working_routes.device,
+                max_route_len=cur_working_routes.shape[-1])
+            cur_working_routes[:, prev_route_idx] = planned_tensor[:, 0]
+
+        starting_fresh = prev_state is None or cur_working_routes is None
+        cycled_through = route_cursor == 0
+        if starting_fresh or cycled_through:
+            if index_cursor + effective_batch_size > len(epoch_indices):
+                epoch_indices = train_indices[
+                    torch.randperm(len(train_indices))]
+                index_cursor = 0
+
+            batch_indices = epoch_indices[
+                index_cursor:index_cursor + effective_batch_size]
+            index_cursor += effective_batch_size
+
+            cur_graph_batch, route_batch = make_improvement_batch(
+                graphs, seed_routes, batch_indices, device, training=True,
+                target_n_routes=target_n_routes)
+            cur_cost_weights = cost_obj.sample_variable_weights(
+                cur_graph_batch.num_graphs, device)
+
+            context_route_len = int(route_batch.shape[-1])
+            if max_route_len is not None:
+                if torch.is_tensor(max_route_len):
+                    context_route_len = max(
+                        context_route_len,
+                        int(max_route_len.max().item()))
+                else:
+                    context_route_len = max(
+                        context_route_len, int(max_route_len))
+            cur_working_routes = torch.full(
+                (route_batch.shape[0], route_batch.shape[1],
+                 context_route_len),
+                -1, dtype=route_batch.dtype, device=route_batch.device)
+            cur_working_routes[..., :route_batch.shape[-1]] = route_batch
+
+            route_cursor = 0
+
+        route_idx = route_cursor
+        route_cursor = (route_cursor + 1) % n_routes
+
+        context_routes = cur_working_routes.clone()
+        context_routes[:, route_idx] = -1
+        invalid_directly_connected = not bool(
+            (context_routes >= 0).any().item())
+
+        state = _make_route_context_state(
+            cost_obj, cur_graph_batch, cur_working_routes, route_idx,
+            min_route_len, max_route_len, cur_cost_weights,
+            invalid_directly_connected=invalid_directly_connected)
+        state = model.setup_planning(state)
+
+        prev_route_idx_holder[0] = route_idx
+        prev_context_counts_holder[0] = state.n_finished_routes.detach().clone()
+
+        start_result = cost_obj(state)
+        return state, start_result
+
+    pbar = tqdm(range(int(n_iterations)), desc="cfg d3po improvement")
+    for iteration in pbar:
+        model.train()
+        rollout = _collect_lc_improvement_cfg_d3po_rollout(
+            model, cost_obj, make_next_state, value_module, int(horizon),
+            reward_scale, diff_reward,
+            getattr(model, "supports_trim_actions", False), device,
+            max_route_edit_steps=max_route_edit_steps,
+            force_nonhalt_first_step=force_nonhalt_first_step,
+            edit_step_penalty=edit_step_penalty,
+            forced_halt_penalty=forced_halt_penalty,
+            zero_trim_reward=zero_trim_reward,
+            max_trim_actions_per_route=max_trim_actions_per_route,
+            keep_rollout_on_device=keep_rollout_on_device)
+        returns, advantages = _compute_ppo_returns_and_advantages(
+            rollout["rewards"], rollout["value_estimates"],
+            rollout["dones"], rollout["final_value_estimates"], gamma,
+            use_gae, gae_lambda)
+        d3po_stats = _update_lc_improvement_cfg_d3po_from_rollout(
+            model, optimizer, value_module, rollout, returns, advantages,
+            d3po_epochs, minibatch_size, clip_epsilon, entropy_weight, device,
+            diversity_weight=diversity_weight,
+            diversity_alpha=diversity_alpha,
+            preference_noise_sigma=preference_noise_sigma,
+            normalize_advantages_per_objective=(
+                normalize_advantages_per_objective))
+
+        train_action_stats = _finalize_action_stats(
+            rollout["action_counts"])
+        active_rewards = rollout["rewards"][rollout["active_masks"]]
+        active_preferences = rollout["preferences"][rollout["active_masks"]]
+        active_returns = returns[rollout["active_masks"]]
+        active_advantages = advantages[rollout["active_masks"]]
+        scalar_rewards = (active_rewards * active_preferences).sum(dim=-1) \
+            if active_rewards.numel() > 0 else torch.empty(0)
+        scalar_returns = (active_returns * active_preferences).sum(dim=-1) \
+            if active_returns.numel() > 0 else torch.empty(0)
+        scalar_advantages = \
+            (active_advantages * active_preferences).sum(dim=-1) \
+            if active_advantages.numel() > 0 else torch.empty(0)
+        start_costs = rollout["episode_start_costs"]
+        final_costs = rollout["episode_final_costs"]
+        start_components = rollout["episode_start_components"]
+        final_components = rollout["episode_final_components"]
+        if len(start_costs) > 0:
+            train_seed = start_costs.mean().item()
+            train_final = final_costs.mean().item()
+            train_delta = (start_costs - final_costs).mean().item()
+            component_delta = (start_components - final_components).mean(
+                dim=0)
+        else:
+            train_seed = float("nan")
+            train_final = float("nan")
+            train_delta = float("nan")
+            component_delta = torch.full((n_objectives,), float("nan"))
+
+        eval_due = (
+            (iteration > 0 and (iteration + 1) % max(int(val_period), 1) == 0)
+            or iteration == int(n_iterations) - 1
+        )
+        if eval_due:
+            last_val = evaluate_lc_improvement(
+                model, cost_obj, graphs, seed_routes, val_indices, device,
+                min_route_len, max_route_len,
+                batch_size=effective_batch_size,
+                force_nonhalt_first_step=force_nonhalt_first_step,
+                max_route_edit_steps=max_route_edit_steps,
+                max_trim_actions_per_route=max_trim_actions_per_route,
+                target_n_routes=target_n_routes,
+                return_best_routes=return_best_routes)
+            if last_val["final_cost"] < best_val_cost:
+                best_val_cost = last_val["final_cost"]
+                torch.save(model.state_dict(), best_model_path)
+
+        ratio_mean = d3po_stats["ratio_sum"] / \
+            max(d3po_stats["ratio_count"], 1)
+        clip_fraction = d3po_stats["clipped_count"] / \
+            max(d3po_stats["ratio_count"], 1)
+        val = last_val or {
+            "seed_cost": float("nan"),
+            "final_cost": float("nan"),
+            "delta": float("nan"),
+            "win_rate": float("nan"),
+            "changed_route_rate": float("nan"),
+            "changed_graph_rate": float("nan"),
+        }
+        row = {
+            "iteration": iteration + 1,
+            "epoch": iteration + 1,
+            "algorithm": "cfg_d3po_improvement",
+            "target_n_routes": n_routes,
+            "diff_reward": diff_reward,
+            "incumbent_reward": incumbent_reward,
+            "return_best_routes": return_best_routes,
+            "zero_trim_reward": zero_trim_reward,
+            "keep_rollout_on_device": keep_rollout_on_device,
+            "reward_scale": reward_scale,
+            "discount_rate": gamma,
+            "edit_step_penalty": edit_step_penalty,
+            "forced_halt_penalty": forced_halt_penalty,
+            "max_trim_actions_per_route": max_trim_actions_per_route,
+            "d3po_horizon": int(horizon),
+            "d3po_epochs": int(d3po_epochs),
+            "d3po_minibatch_size": int(minibatch_size),
+            "d3po_diversity_weight": diversity_weight,
+            "d3po_diversity_alpha": diversity_alpha,
+            "d3po_preference_noise_sigma": preference_noise_sigma,
+            "train_seed_cost": train_seed,
+            "train_final_cost": train_final,
+            "train_delta": train_delta,
+            "train_component_demand_delta": float(component_delta[0]),
+            "train_component_route_delta": float(component_delta[1]),
+            "train_component_connectivity_delta": float(component_delta[2]),
+            "train_reward_mean": scalar_rewards.mean().item()
+                if scalar_rewards.numel() > 0 else 0.0,
+            "train_return_mean": scalar_returns.mean().item()
+                if scalar_returns.numel() > 0 else 0.0,
+            "train_advantage_mean": scalar_advantages.mean().item()
+                if scalar_advantages.numel() > 0 else 0.0,
+            "train_active_sample_count": int(
+                rollout["active_masks"].sum().item()),
+            "train_d3po_ratio_mean": ratio_mean,
+            "train_d3po_clip_fraction": clip_fraction,
+            "train_d3po_objective": d3po_stats["objective"],
+            "train_d3po_diversity_loss": d3po_stats["diversity_loss"],
+            "is_eval_iteration": eval_due,
+            "val_seed_cost": val["seed_cost"],
+            "val_final_cost": val["final_cost"],
+            "val_delta": val["delta"],
+            "val_win_rate": val["win_rate"],
+            "val_changed_route_rate": val["changed_route_rate"],
+            "val_changed_graph_rate": val["changed_graph_rate"],
+        }
+        row.update({
+            f"train_action_{key}": value
+            for key, value in train_action_stats.items()
+        })
+        row["train_changed_route_rate"] = float("nan")
+        history.append(row)
+
+        pbar.set_postfix({
+            "reward": f"{row['train_reward_mean']:.3f}",
+            "delta": f"{row['train_delta']:.3f}",
+            "ratio": f"{row['train_d3po_ratio_mean']:.3f}",
+            "clip": f"{row['train_d3po_clip_fraction']:.2%}",
+        })
+        print(
+            f"cfg_d3po_iter={row['iteration']:03d} "
+            f"reward={row['train_reward_mean']:.4f} "
+            f"train_delta={row['train_delta']:.4f} "
+            f"val_delta={row['val_delta']:.4f} "
+            f"ratio={row['train_d3po_ratio_mean']:.3f} "
+            f"clip={row['train_d3po_clip_fraction']:.2%} "
+            f"div={row['train_d3po_diversity_loss']:.4f} "
+            f"actions="
+            f"ext:{row['train_action_extend_count']} "
+            f"trim_s:{row['train_action_trim_start_count']} "
+            f"trim_e:{row['train_action_trim_end_count']} "
+            f"halt:{row['train_action_halt_count']} "
+            f"avg_steps={row['train_action_avg_actions_per_route']:.2f} "
+            f"eval={row['is_eval_iteration']}"
+        )
+
+    return {
+        "best_model_path": best_model_path,
+        "history": history,
+        "train_indices": train_indices,
+        "val_indices": val_indices,
+    }
+
+
+def train_lc_improvement_cfg(*args, **kwargs):
+    cfg = kwargs.get("cfg")
+    if cfg is None and len(args) >= 6:
+        cfg = args[5]
+    trainer = _get_cfg_value(cfg, "trainer", "ppo")
+    if trainer == "ppo":
+        return train_lc_improvement_cfg_ppo(*args, **kwargs)
+    if trainer == "d3po":
+        return train_lc_improvement_cfg_d3po(*args, **kwargs)
+    raise ValueError(
+        f"Unknown LC improvement trainer {trainer!r}; expected 'ppo' or 'd3po'."
+    )

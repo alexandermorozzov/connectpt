@@ -7,13 +7,17 @@ from torch_geometric.data import Batch
 from connectpt.routes_generator.citygraph_dataset import CityGraphData, STOP_KEY
 from connectpt.routes_generator.eval_route_generator import sample_from_model
 from connectpt.routes_generator.improvement_learning import (
+    _collect_lc_improvement_cfg_d3po_rollout,
     _collect_lc_improvement_cfg_ppo_rollout,
     _compute_ppo_returns_and_advantages,
     _make_route_context_state,
+    _update_lc_improvement_cfg_d3po_from_rollout,
     _update_lc_improvement_cfg_ppo_from_rollout,
     _update_reward_baseline_cost,
     rollout_lc_improvement,
+    train_lc_improvement_cfg_d3po,
 )
+from connectpt.routes_generator import improvement_learning as il
 from connectpt.routes_generator.initialization import (
     prepare_current_routes,
     prepare_init_network,
@@ -160,6 +164,15 @@ class FakeTrimPlanNewRouteModel:
 class FakeValueModule:
     def from_state(self, state):
         return torch.zeros(state.batch_size, dtype=torch.float32,
+                           device=state.device)
+
+    def update(self, returns):
+        self.last_returns = returns.detach().clone()
+
+
+class FakeVectorValueModule:
+    def from_state(self, state):
+        return torch.zeros(state.batch_size, 3, dtype=torch.float32,
                            device=state.device)
 
     def update(self, returns):
@@ -784,6 +797,115 @@ def test_zero_trim_reward_keeps_pretrim_reward_baseline():
     assert updated.tolist() == [10.0, 18.0, 30.0]
 
 
+def test_my_cost_components_reconstruct_scalar_cost_for_simplex_weights():
+    cost_obj = MyCostModule(
+        demand_time_weight=0.2,
+        route_time_weight=0.3,
+        median_connectivity_weight=0.5,
+        use_weighted_connectivity=True,
+    )
+    weights = {
+        "demand_time_weight": torch.tensor([0.2]),
+        "route_time_weight": torch.tensor([0.3]),
+        "median_connectivity_weight": torch.tensor([0.5]),
+    }
+    state = RouteGenBatchState(
+        make_line_graph(n_nodes=3),
+        cost_obj,
+        n_routes_to_plan=1,
+        min_route_len=2,
+        max_route_len=3,
+        cost_weights=weights,
+    )
+    state.set_current_routes([0, 1])
+
+    result = cost_obj(state)
+    components = cost_obj.get_cost_components(state, result=result)
+    preferences = cost_obj.get_preference_weights(state, normalize=True)
+
+    assert torch.allclose(
+        (components * preferences).sum(dim=-1),
+        result.cost,
+        atol=1e-6,
+    )
+
+
+def test_vector_ppo_returns_and_advantages_keep_objective_dim():
+    rewards = torch.ones((2, 3, 3), dtype=torch.float32)
+    value_estimates = torch.zeros_like(rewards)
+    dones = torch.zeros((2, 3), dtype=torch.bool)
+    final_value_estimates = torch.zeros((3, 3), dtype=torch.float32)
+
+    returns, advantages = _compute_ppo_returns_and_advantages(
+        rewards, value_estimates, dones, final_value_estimates,
+        gamma=1.0, use_gae=False, gae_lambda=1.0)
+
+    assert returns.shape == (2, 3, 3)
+    assert advantages.shape == (2, 3, 3)
+    assert torch.equal(returns[0], torch.full((3, 3), 2.0))
+
+
+def test_train_lc_improvement_cfg_dispatches_by_trainer(monkeypatch):
+    calls = []
+
+    def fake_ppo(*args, **kwargs):
+        calls.append("ppo")
+        return "ppo-result"
+
+    def fake_d3po(*args, **kwargs):
+        calls.append("d3po")
+        return "d3po-result"
+
+    monkeypatch.setattr(il, "train_lc_improvement_cfg_ppo", fake_ppo)
+    monkeypatch.setattr(il, "train_lc_improvement_cfg_d3po", fake_d3po)
+
+    assert il.train_lc_improvement_cfg(
+        None, None, None, None, None, SimpleNamespace(trainer="ppo")
+    ) == "ppo-result"
+    assert il.train_lc_improvement_cfg(
+        None, None, None, None, None, SimpleNamespace(trainer="d3po")
+    ) == "d3po-result"
+    assert calls == ["ppo", "d3po"]
+
+
+def test_train_lc_improvement_cfg_d3po_rejects_incumbent_reward():
+    cfg = SimpleNamespace(
+        eval=SimpleNamespace(min_route_len=2, max_route_len=3),
+        d3po=SimpleNamespace(
+            n_objectives=3,
+            n_iterations=1,
+            val_period=1,
+            horizon=1,
+            n_epochs=1,
+            minibatch_size=1,
+            epsilon=0.2,
+            use_gae=False,
+            gae_lambda=1.0,
+            diversity_weight=0.0,
+            diversity_alpha=1.0,
+            preference_noise_sigma=0.0,
+            normalize_advantages_per_objective=True,
+        ),
+        batch_size=1,
+        reward_scale=1.0,
+        diff_reward=True,
+        incumbent_reward=True,
+        return_best_routes=False,
+        zero_trim_reward=True,
+        keep_rollout_on_device=False,
+        discount_rate=1.0,
+        edit_step_penalty=0.0,
+        forced_halt_penalty=0.0,
+        entropy_weight=0.0,
+        max_trim_actions_per_route=1,
+    )
+
+    with pytest.raises(ValueError, match="incumbent_reward=false"):
+        train_lc_improvement_cfg_d3po(
+            None, None, [], torch.empty(0), torch.device("cpu"), cfg,
+            ".", "d3po_rejects_incumbent")
+
+
 def test_cfg_ppo_rollout_can_keep_states_on_device_and_update():
     device = torch.device("cpu")
     cost_obj = MyCostModule()
@@ -814,6 +936,41 @@ def test_cfg_ppo_rollout_can_keep_states_on_device_and_update():
         model, optimizer, value_module, rollout, returns, advantages,
         ppo_epochs=1, minibatch_size=1, clip_epsilon=0.2,
         entropy_weight=0.0, device=device)
+
+    assert stats["ratio_count"] == 1
+
+
+def test_cfg_d3po_rollout_can_keep_states_on_device_and_update():
+    device = torch.device("cpu")
+    cost_obj = MyCostModule()
+    model = HaltPolicy()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    value_module = FakeVectorValueModule()
+
+    def make_next_state(prev_state=None):
+        state = make_line_state(n_nodes=3, n_routes_to_plan=1,
+                                min_route_len=2, max_route_len=3)
+        state.set_current_routes([0, 1])
+        start_result = cost_obj(state)
+        return state, start_result
+
+    rollout = _collect_lc_improvement_cfg_d3po_rollout(
+        model, cost_obj, make_next_state, value_module, horizon=1,
+        reward_scale=1.0, diff_reward=True, supports_route_actions=False,
+        device=device, keep_rollout_on_device=True)
+
+    assert rollout["keep_rollout_on_device"]
+    assert rollout["states"][0].device == device
+    assert rollout["rewards"].shape == (1, 1, 3)
+
+    returns, advantages = _compute_ppo_returns_and_advantages(
+        rollout["rewards"], rollout["value_estimates"], rollout["dones"],
+        rollout["final_value_estimates"], gamma=1.0, use_gae=False,
+        gae_lambda=1.0)
+    stats = _update_lc_improvement_cfg_d3po_from_rollout(
+        model, optimizer, value_module, rollout, returns, advantages,
+        d3po_epochs=1, minibatch_size=1, clip_epsilon=0.2,
+        entropy_weight=0.0, device=device, diversity_weight=0.0)
 
     assert stats["ratio_count"] == 1
 

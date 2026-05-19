@@ -8,7 +8,22 @@ ppo:
   use_gae: true
   gae_lambda: 1.0
 
-trainer: ppo
+d3po:
+  n_iterations: 60
+  val_period: 10
+  n_epochs: 1
+  minibatch_size: 32
+  horizon: 200
+  epsilon: 0.2
+  use_gae: true
+  gae_lambda: 1.0
+  n_objectives: 3
+  diversity_weight: 0.01
+  diversity_alpha: 1.0
+  preference_noise_sigma: 0.15
+  normalize_advantages_per_objective: true
+
+trainer: d3po
 discount_rate: 1.0
 diff_reward: true
 incumbent_reward: false

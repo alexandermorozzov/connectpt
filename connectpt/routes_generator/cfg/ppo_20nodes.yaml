@@ -8,6 +8,7 @@ ppo:
   use_gae: true
   gae_lambda: 0.95
 
+trainer: ppo
 discount_rate: 0.95
 diff_reward: true
 incumbent_reward: false
