@@ -911,12 +911,11 @@ def _collect_lc_improvement_cfg_ppo_rollout(
             active = ~done_before
             allow_trim = _trim_actions_allowed(
                 trim_action_counts, max_trim_actions_per_route)
-            state_for_buffer = state.clone()
+            target_device = state.device if keep_rollout_on_device \
+                else torch.device("cpu")
+            state_for_buffer = state.snapshot_for_buffer(device=target_device)
             _clear_state_lazy_tensors(state_for_buffer)
-            if keep_rollout_on_device:
-                states.append(state_for_buffer)
-            else:
-                states.append(state_for_buffer.to_device("cpu"))
+            states.append(state_for_buffer)
             value_estimates.append(value_module.from_state(state))
 
             force_halt = max_route_edit_steps is not None and \
@@ -1254,12 +1253,11 @@ def _collect_lc_improvement_cfg_d3po_rollout(
             active = ~done_before
             allow_trim = _trim_actions_allowed(
                 trim_action_counts, max_trim_actions_per_route)
-            state_for_buffer = state.clone()
+            target_device = state.device if keep_rollout_on_device \
+                else torch.device("cpu")
+            state_for_buffer = state.snapshot_for_buffer(device=target_device)
             _clear_state_lazy_tensors(state_for_buffer)
-            if keep_rollout_on_device:
-                states.append(state_for_buffer)
-            else:
-                states.append(state_for_buffer.to_device("cpu"))
+            states.append(state_for_buffer)
             value_estimates.append(value_module.from_state(state))
             preferences.append(_get_state_preferences(cost_obj, state).detach())
 
@@ -1424,18 +1422,26 @@ def _estimate_d3po_diversity_loss(
     neighbor_preferences = _sample_neighbor_preferences(preferences, sigma)
     target = alpha * (preferences - neighbor_preferences).abs().sum(dim=-1)
 
-    neighbor_states = states.clone()
-    neighbor_states.set_cost_weights(
+    # In-place cost_weights swap instead of states.clone() to avoid
+    # a full RouteGenBatchState deepcopy on GPU. cost_weights tensors
+    # do not require grad, so the prior new_logits autograd graph is
+    # unaffected by rebinding their values here.
+    saved_weights = {key: value.clone()
+                     for key, value in states.cost_weights.items()}
+    states.set_cost_weights(
         _preference_dict_from_tensor(neighbor_preferences))
-    if supports_route_actions:
-        _, _, neighbor_logits, _ = model.step_route_action(
-            neighbor_states, actions=actions, action_kinds=action_kinds,
-            allow_trim_start=(
-                trim_allowed if trim_allowed is not None else True),
-            allow_trim_end=(
-                trim_allowed if trim_allowed is not None else True))
-    else:
-        _, neighbor_logits, _ = model.step(neighbor_states, actions=actions)
+    try:
+        if supports_route_actions:
+            _, _, neighbor_logits, _ = model.step_route_action(
+                states, actions=actions, action_kinds=action_kinds,
+                allow_trim_start=(
+                    trim_allowed if trim_allowed is not None else True),
+                allow_trim_end=(
+                    trim_allowed if trim_allowed is not None else True))
+        else:
+            _, neighbor_logits, _ = model.step(states, actions=actions)
+    finally:
+        states.set_cost_weights(saved_weights)
 
     sampled_kl = (new_logits - neighbor_logits).abs()
     return (sampled_kl - target).pow(2).mean()

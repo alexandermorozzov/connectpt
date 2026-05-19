@@ -773,7 +773,7 @@ class RouteGenBatchState:
     def clone(self):
         """return a deep copy of this state."""
         return copy.deepcopy(self)
-    
+
     def to_device(self, device):
         dev_state = self.clone()
         dev_state.graph_data = dev_state.graph_data.to(device)
@@ -781,8 +781,37 @@ class RouteGenBatchState:
         for ii in range(self.batch_size):
             for jj, route in enumerate(dev_state._finished_routes[ii]):
                 dev_state._finished_routes[ii][jj] = route.to(device)
-         
+
         return dev_state
+
+    def snapshot_for_buffer(self, device=None):
+        """Lean snapshot suitable for storing in a rollout buffer.
+
+        Same-device path shares ``graph_data`` (which is read-only during
+        rollouts) and deep-copies only ``extra_data`` plus the per-element
+        finished-route lists, avoiding the GPU peak of a full deepcopy.
+
+        Cross-device path deep-copies once on the source device and then
+        moves the copy in place to the target device, replacing the
+        previous ``clone() + to_device()`` pattern that did two deepcopies.
+        """
+        target = self.device if device is None else torch.device(device)
+        if target == self.device:
+            new = copy.copy(self)
+            new.graph_data = self.graph_data
+            new.extra_data = copy.deepcopy(self.extra_data)
+            new._finished_routes = [list(routes)
+                                    for routes in self._finished_routes]
+            return new
+
+        new = copy.deepcopy(self)
+        new.graph_data = new.graph_data.to(target)
+        new.extra_data = new.extra_data.to(target)
+        new._finished_routes = [
+            [route.to(target) for route in routes]
+            for routes in new._finished_routes
+        ]
+        return new
     
     @staticmethod
     def batch_from_list(state_list):
