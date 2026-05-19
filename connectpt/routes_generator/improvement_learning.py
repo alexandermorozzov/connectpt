@@ -711,6 +711,14 @@ def _clear_state_lazy_tensors(state):
     return state
 
 
+def _state_is_on_device(state, device):
+    target_device = torch.device(device)
+    state_device = state.device
+    if state_device == target_device:
+        return True
+    return state_device.type == target_device.type and target_device.index is None
+
+
 def _state_batch_signature(state):
     """Return shape signature for tensors that PyG must collate exactly."""
     extra_data = state.extra_data
@@ -726,6 +734,8 @@ def _state_batch_signature(state):
         "shortest_path_sequences",
         "route_nexts",
         "n_transfers",
+        "context_node_covered_mask",
+        "context_edge_covered_mask",
     )
     signature = []
     for key in signature_keys:
@@ -757,7 +767,8 @@ def _collect_lc_improvement_cfg_ppo_rollout(
         max_route_edit_steps=None, force_nonhalt_first_step=False,
         edit_step_penalty=0.0, forced_halt_penalty=0.0,
         incumbent_reward=False, return_best_routes=False,
-        zero_trim_reward=False, max_trim_actions_per_route=1):
+        zero_trim_reward=False, max_trim_actions_per_route=1,
+        keep_rollout_on_device=False):
     states = []
     rewards = []
     value_estimates = []
@@ -813,7 +824,10 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                 trim_action_counts, max_trim_actions_per_route)
             state_for_buffer = state.clone()
             _clear_state_lazy_tensors(state_for_buffer)
-            states.append(state_for_buffer.to_device("cpu"))
+            if keep_rollout_on_device:
+                states.append(state_for_buffer)
+            else:
+                states.append(state_for_buffer.to_device("cpu"))
             value_estimates.append(value_module.from_state(state))
 
             force_halt = max_route_edit_steps is not None and \
@@ -955,6 +969,7 @@ def _collect_lc_improvement_cfg_ppo_rollout(
         "action_counts": action_counts,
         "zero_trim_reward": bool(zero_trim_reward),
         "max_trim_actions_per_route": max_trim_actions_per_route,
+        "keep_rollout_on_device": bool(keep_rollout_on_device),
     }
     if len(episode_start_costs) > 0:
         rollout["episode_start_costs"] = torch.cat(episode_start_costs)
@@ -998,7 +1013,8 @@ def _update_lc_improvement_cfg_ppo_from_rollout(
                 mb_states = mb_states[0]
             else:
                 mb_states = RouteGenBatchState.batch_from_list(mb_states)
-            mb_states = mb_states.to_device(device)
+            if not _state_is_on_device(mb_states, device):
+                mb_states = mb_states.to_device(device)
 
             mb_actions = actions[idxs].flatten(0, 1)
             mb_action_kinds = action_kinds[idxs].flatten(0, 1)
@@ -1193,6 +1209,8 @@ def train_lc_improvement_cfg_ppo(
     incumbent_reward = bool(_get_cfg_value(cfg, "incumbent_reward", False))
     return_best_routes = bool(_get_cfg_value(cfg, "return_best_routes", False))
     zero_trim_reward = bool(_get_cfg_value(cfg, "zero_trim_reward", False))
+    keep_rollout_on_device = bool(
+        _get_cfg_value(cfg, "keep_rollout_on_device", False))
     gamma = float(_get_cfg_value(cfg, "discount_rate", 1.0))
     edit_step_penalty = float(_get_cfg_value(cfg, "edit_step_penalty", 0.0))
     forced_halt_penalty = float(
@@ -1389,7 +1407,8 @@ def train_lc_improvement_cfg_ppo(
             incumbent_reward=incumbent_reward,
             return_best_routes=return_best_routes,
             zero_trim_reward=zero_trim_reward,
-            max_trim_actions_per_route=max_trim_actions_per_route)
+            max_trim_actions_per_route=max_trim_actions_per_route,
+            keep_rollout_on_device=keep_rollout_on_device)
         returns, advantages = _compute_ppo_returns_and_advantages(
             rollout["rewards"], rollout["value_estimates"],
             rollout["dones"], rollout["final_value_estimates"], gamma,
@@ -1452,6 +1471,7 @@ def train_lc_improvement_cfg_ppo(
             "incumbent_reward": incumbent_reward,
             "return_best_routes": return_best_routes,
             "zero_trim_reward": zero_trim_reward,
+            "keep_rollout_on_device": keep_rollout_on_device,
             "reward_scale": reward_scale,
             "discount_rate": gamma,
             "edit_step_penalty": edit_step_penalty,

@@ -7,7 +7,10 @@ from torch_geometric.data import Batch
 from connectpt.routes_generator.citygraph_dataset import CityGraphData, STOP_KEY
 from connectpt.routes_generator.eval_route_generator import sample_from_model
 from connectpt.routes_generator.improvement_learning import (
+    _collect_lc_improvement_cfg_ppo_rollout,
+    _compute_ppo_returns_and_advantages,
     _make_route_context_state,
+    _update_lc_improvement_cfg_ppo_from_rollout,
     _update_reward_baseline_cost,
     rollout_lc_improvement,
 )
@@ -152,6 +155,33 @@ class FakeTrimPlanNewRouteModel:
 
     def _log_step_counts(self, counts):
         pass
+
+
+class FakeValueModule:
+    def from_state(self, state):
+        return torch.zeros(state.batch_size, dtype=torch.float32,
+                           device=state.device)
+
+    def update(self, returns):
+        self.last_returns = returns.detach().clone()
+
+
+class HaltPolicy(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.logit_bias = torch.nn.Parameter(torch.zeros(()))
+
+    def step(self, state, greedy=False, actions=None, precalc_data=None):
+        if actions is None:
+            actions = torch.full(
+                (state.batch_size, 2), -1, dtype=torch.long,
+                device=state.device)
+        else:
+            actions = actions.to(device=state.device, dtype=torch.long)
+        logits = self.logit_bias.expand(state.batch_size)
+        entropy = torch.zeros(state.batch_size, dtype=torch.float32,
+                              device=state.device)
+        return actions, logits, entropy
 
 
 class IdentityGraphNet(torch.nn.Module):
@@ -468,6 +498,69 @@ def test_route_state_trim_actions_rebuild_current_route_graph():
     assert torch.isfinite(state.route_mat[0, 0, 1])
 
 
+def test_route_state_context_masks_track_finished_not_current_routes():
+    state = make_line_state(n_nodes=4, n_routes_to_plan=2, max_route_len=4)
+
+    assert not state.context_node_covered_mask.any()
+    assert not state.context_edge_covered_mask.any()
+
+    state.add_new_routes(torch.tensor([[[0, 1, 2, -1]]], dtype=torch.long))
+
+    assert state.context_node_covered_mask[0].tolist() == [
+        True, True, True, False]
+    assert state.context_edge_covered_mask[0, 0, 1]
+    assert state.context_edge_covered_mask[0, 1, 0]
+    assert state.context_edge_covered_mask[0, 1, 2]
+    assert state.context_edge_covered_mask[0, 2, 1]
+    assert not state.context_edge_covered_mask[0, 2, 3]
+
+    node_mask_before = state.context_node_covered_mask.clone()
+    edge_mask_before = state.context_edge_covered_mask.clone()
+    state.set_current_routes([2, 3])
+
+    assert torch.equal(state.context_node_covered_mask, node_mask_before)
+    assert torch.equal(state.context_edge_covered_mask, edge_mask_before)
+    assert torch.isfinite(state.route_mat[0, 2, 3])
+
+    state.replace_routes(torch.tensor([[[1, 2, 3, -1]]], dtype=torch.long))
+
+    assert state.context_node_covered_mask[0].tolist() == [
+        False, True, True, True]
+    assert not state.context_edge_covered_mask[0, 0, 1]
+    assert state.context_edge_covered_mask[0, 1, 2]
+    assert state.context_edge_covered_mask[0, 2, 3]
+
+    state.clear_routes()
+
+    assert not state.context_node_covered_mask.any()
+    assert not state.context_edge_covered_mask.any()
+
+
+def test_route_state_context_masks_include_fixed_routes():
+    graph = make_line_graph(n_nodes=4)
+    graph.fixed_routes = torch.tensor([[0, 3, -1, -1]], dtype=torch.long)
+    state = RouteGenBatchState(
+        graph,
+        MyCostModule(),
+        n_routes_to_plan=1,
+        min_route_len=2,
+        max_route_len=4,
+    )
+
+    assert state.n_finished_routes.item() == 0
+    assert state.context_node_covered_mask[0].tolist() == [
+        True, False, False, True]
+    assert state.context_edge_covered_mask[0, 0, 3]
+    assert state.context_edge_covered_mask[0, 3, 0]
+
+    node_mask_before = state.context_node_covered_mask.clone()
+    edge_mask_before = state.context_edge_covered_mask.clone()
+    state.set_current_routes([1, 2])
+
+    assert torch.equal(state.context_node_covered_mask, node_mask_before)
+    assert torch.equal(state.context_edge_covered_mask, edge_mask_before)
+
+
 def test_untrained_trim_model_can_emit_and_apply_forced_trim_action():
     state = make_line_state(n_nodes=4, max_route_len=4)
     state.set_current_routes([0, 1, 2, 3])
@@ -619,6 +712,61 @@ def test_trim_model_overlap_features_compare_to_other_routes():
     )
 
 
+def test_vectorized_trim_features_match_removed_and_kept_context_overlap():
+    state = make_line_state(n_nodes=5, n_routes_to_plan=2, max_route_len=5)
+    state.add_new_routes(torch.tensor([[[0, 1, 2, -1, -1]]],
+                                      dtype=torch.long))
+    state.set_current_routes([0, 1, 2, 3, 4])
+    model = TrimPathCombiningRouteGenerator(
+        backbone_net=IdentityGraphNet(),
+        mean_stop_time_s=0,
+        embed_dim=2,
+        n_nodepair_layers=1,
+        n_pathscorer_layers=1,
+        pathscorer_hidden_dim=8,
+        n_trim_scorer_layers=1,
+        trim_scorer_hidden_dim=8,
+        n_halt_layers=1,
+        symmetric_routes=True,
+        serial_halting=True,
+    )
+    global_features = state.get_global_state_features().to(dtype=torch.float32)
+
+    features, valid, from_nodes, to_nodes = model._get_trim_candidate_features(
+        state, global_features, torch.float32, trim_start=True)
+    overlap_start = features[0, 2, 6:14]
+
+    assert valid[0, 2]
+    assert from_nodes[0, 2].item() == 0
+    assert to_nodes[0, 2].item() == 2
+    assert torch.allclose(
+        overlap_start,
+        torch.tensor([
+            1.0, 0.0,
+            1.0, 0.0,
+            1.0 / 3.0, 2.0 / 3.0,
+            0.0, 1.0,
+        ]),
+    )
+
+    features, valid, from_nodes, to_nodes = model._get_trim_candidate_features(
+        state, global_features, torch.float32, trim_start=False)
+    overlap_end = features[0, 2, 6:14]
+
+    assert valid[0, 2]
+    assert from_nodes[0, 2].item() == 2
+    assert to_nodes[0, 2].item() == 4
+    assert torch.allclose(
+        overlap_end,
+        torch.tensor([
+            0.0, 1.0,
+            0.0, 1.0,
+            1.0, 0.0,
+            1.0, 0.0,
+        ]),
+    )
+
+
 def test_zero_trim_reward_keeps_pretrim_reward_baseline():
     prev_cost = torch.tensor([10.0, 20.0, 30.0])
     new_cost = torch.tensor([15.0, 18.0, 25.0])
@@ -634,6 +782,40 @@ def test_zero_trim_reward_keeps_pretrim_reward_baseline():
         zero_trim_reward=True)
 
     assert updated.tolist() == [10.0, 18.0, 30.0]
+
+
+def test_cfg_ppo_rollout_can_keep_states_on_device_and_update():
+    device = torch.device("cpu")
+    cost_obj = MyCostModule()
+    model = HaltPolicy()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    value_module = FakeValueModule()
+
+    def make_next_state(prev_state=None):
+        state = make_line_state(n_nodes=3, n_routes_to_plan=1,
+                                min_route_len=2, max_route_len=3)
+        state.set_current_routes([0, 1])
+        start_cost = cost_obj(state).cost.detach()
+        return state, start_cost
+
+    rollout = _collect_lc_improvement_cfg_ppo_rollout(
+        model, cost_obj, make_next_state, value_module, horizon=1,
+        reward_scale=1.0, diff_reward=True, supports_route_actions=False,
+        device=device, keep_rollout_on_device=True)
+
+    assert rollout["keep_rollout_on_device"]
+    assert rollout["states"][0].device == device
+
+    returns, advantages = _compute_ppo_returns_and_advantages(
+        rollout["rewards"], rollout["value_estimates"], rollout["dones"],
+        rollout["final_value_estimates"], gamma=1.0, use_gae=False,
+        gae_lambda=1.0)
+    stats = _update_lc_improvement_cfg_ppo_from_rollout(
+        model, optimizer, value_module, rollout, returns, advantages,
+        ppo_epochs=1, minibatch_size=1, clip_epsilon=0.2,
+        entropy_weight=0.0, device=device)
+
+    assert stats["ratio_count"] == 1
 
 
 def test_sample_from_model_skips_rollout_for_fully_seeded_network():

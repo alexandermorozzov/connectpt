@@ -13,6 +13,7 @@ diff_reward: true
 incumbent_reward: false
 return_best_routes: false
 zero_trim_reward: false
+keep_rollout_on_device: true
 max_trim_actions_per_route: 1
 baseline_lr: 0.0005
 entropy_weight: 0.0

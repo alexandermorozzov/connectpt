@@ -66,6 +66,8 @@ class ExtraStateData(HeteroData):
                    'shortest_path_sequences',
                    'route_nexts',
                    'n_transfers',
+                   'context_node_covered_mask',
+                   'context_edge_covered_mask',
                    'fixed_routes',
                    'node_coords']:
             return None
@@ -171,6 +173,10 @@ class RouteGenBatchState:
                 torch.zeros((max_n_nodes, max_n_nodes), device=dev, 
                             dtype=torch.long)            
             extra_data.n_transfers = extra_data.route_nexts.clone()
+            extra_data.context_node_covered_mask = \
+                torch.zeros((max_n_nodes,), device=dev, dtype=torch.bool)
+            extra_data.context_edge_covered_mask = torch.zeros(
+                (max_n_nodes, max_n_nodes), device=dev, dtype=torch.bool)
 
             extra_data.norm_node_features = torch.zeros(
                 (dd.num_nodes, 0,), device=dev)
@@ -181,10 +187,13 @@ class RouteGenBatchState:
                 extra_data.cost_weights[key] = val[ii]
 
             extra_datas.append(extra_data)
-            if hasattr(graph_data, 'fixed_routes') and \
-               graph_data.fixed_routes.shape[0] > 0:
-                # fixed_routes must be the same for all instances in the batch
-                extra_data.fixed_routes = graph_data.fixed_routes[0]
+            if hasattr(dd, 'fixed_routes') and dd.fixed_routes.numel() > 0:
+                fixed_routes = dd.fixed_routes
+                if fixed_routes.ndim == 3 and fixed_routes.shape[0] == 1:
+                    fixed_routes = fixed_routes.squeeze(0)
+                elif fixed_routes.ndim == 1:
+                    fixed_routes = fixed_routes[None]
+                extra_data.fixed_routes = fixed_routes
             else:
                 extra_data.fixed_routes = torch.zeros(0)
 
@@ -243,6 +252,10 @@ class RouteGenBatchState:
 
         # then, update the lists of routes that are still being planned
         planning_already_done = self.is_done()
+        new_finished_context_routes = torch.full(
+            (self.batch_size, 1, self.max_n_nodes), -1,
+            dtype=torch.long, device=self.device)
+        has_new_finished_route = False
         for bi in range(self.batch_size):
             if not planning_already_done[bi] and routes_are_done[bi]:
                 route = updated_routes[bi]
@@ -251,10 +264,15 @@ class RouteGenBatchState:
                     # the route is valid, so add it to the finished set
                      # otherwise, corresponds to a "no-op" route
                     self._finished_routes[bi].append(route)
+                    new_finished_context_routes[bi, 0, :len(route)] = route
+                    has_new_finished_route = True
                     self.extra_data.total_route_time[bi] += \
                         self.current_route_time[bi]
             if planning_already_done[bi] or routes_are_done[bi]:
                 updated_routes[bi] = -1
+
+        if has_new_finished_route:
+            self._add_routes_to_context_masks(new_finished_context_routes)
 
         self.extra_data.current_routes = updated_routes
 
@@ -434,6 +452,7 @@ class RouteGenBatchState:
         self._clear_routes_helper()
         if self.extra_data.fixed_routes.numel() > 0:
             self._add_routes_to_tensors(self.extra_data.fixed_routes)
+            self._add_routes_to_context_masks(self.extra_data.fixed_routes)
 
         has_finished_routes = any(len(routes) > 0 for routes in finished_routes)
         if has_finished_routes:
@@ -477,6 +496,8 @@ class RouteGenBatchState:
         self.extra_data.current_route_times_from_start[batch_index] = 0
         self.extra_data.route_nexts[batch_index] = 0
         self.extra_data.n_transfers[batch_index] = 0
+        self.extra_data.context_node_covered_mask[batch_index] = False
+        self.extra_data.context_edge_covered_mask[batch_index] = False
 
     def _add_routes_to_tensors(self, batch_new_routes,
                                only_routes_with_demand_are_valid=False, 
@@ -488,6 +509,8 @@ class RouteGenBatchState:
                                                                self.device)
         if batch_new_routes.device != self.device:
             batch_new_routes = batch_new_routes.to(self.device)
+        if batch_new_routes.ndim == 2:
+            batch_new_routes = batch_new_routes[:, None]
         # add new routes to the route matrix.
         new_route_mat = tu.get_route_edge_matrix(batch_new_routes, 
             self.drive_times, self.mean_stop_time, self.symmetric_routes)
@@ -515,6 +538,63 @@ class RouteGenBatchState:
                 self.valid_terms_mat.transpose(1, 2)
 
         self._update_route_data()
+
+    def _add_routes_to_context_masks(self, batch_routes):
+        """Track nodes/edges covered by finished or fixed context routes."""
+        if type(batch_routes) is list:
+            batch_routes = tu.get_batch_tensor_from_routes(batch_routes,
+                                                           self.device)
+        if batch_routes.device != self.device:
+            batch_routes = batch_routes.to(self.device)
+        batch_routes = batch_routes.to(dtype=torch.long)
+        if batch_routes.ndim == 2:
+            batch_routes = batch_routes[:, None]
+        if batch_routes.numel() == 0:
+            return
+        if batch_routes.shape[0] == 1 and self.batch_size > 1:
+            batch_routes = batch_routes.expand(self.batch_size, -1, -1)
+        elif batch_routes.shape[0] != self.batch_size:
+            raise ValueError(
+                "Context route batch size does not match state batch size: "
+                f"{batch_routes.shape[0]} vs {self.batch_size}"
+            )
+
+        valid_nodes = batch_routes >= 0
+        if valid_nodes.any():
+            batch_idxs = torch.arange(
+                self.batch_size, device=self.device)[:, None, None]
+            batch_idxs = batch_idxs.expand_as(batch_routes)
+            safe_nodes = batch_routes.clamp(min=0)
+            self.extra_data.context_node_covered_mask[
+                batch_idxs[valid_nodes],
+                safe_nodes[valid_nodes],
+            ] = True
+
+        if batch_routes.shape[-1] < 2:
+            return
+
+        from_nodes = batch_routes[..., :-1]
+        to_nodes = batch_routes[..., 1:]
+        valid_edges = (from_nodes >= 0) & (to_nodes >= 0)
+        if not valid_edges.any():
+            return
+
+        edge_batch_idxs = torch.arange(
+            self.batch_size, device=self.device)[:, None, None]
+        edge_batch_idxs = edge_batch_idxs.expand_as(from_nodes)
+        safe_from = from_nodes.clamp(min=0)
+        safe_to = to_nodes.clamp(min=0)
+        self.extra_data.context_edge_covered_mask[
+            edge_batch_idxs[valid_edges],
+            safe_from[valid_edges],
+            safe_to[valid_edges],
+        ] = True
+        if self.symmetric_routes:
+            self.extra_data.context_edge_covered_mask[
+                edge_batch_idxs[valid_edges],
+                safe_to[valid_edges],
+                safe_from[valid_edges],
+            ] = True
     
     def replace_routes(self, batch_new_routes, 
                 only_routes_with_demand_are_valid=False, 
@@ -522,6 +602,7 @@ class RouteGenBatchState:
         self._clear_routes_helper()
         if self.extra_data.fixed_routes.numel() > 0:
             self._add_routes_to_tensors(self.extra_data.fixed_routes)
+            self._add_routes_to_context_masks(self.extra_data.fixed_routes)
         self.add_new_routes(batch_new_routes, 
                             only_routes_with_demand_are_valid,
                             invalid_directly_connected)
@@ -530,6 +611,7 @@ class RouteGenBatchState:
         self._clear_routes_helper()
         if self.extra_data.fixed_routes.numel() > 0:
             self._add_routes_to_tensors(self.extra_data.fixed_routes)
+            self._add_routes_to_context_masks(self.extra_data.fixed_routes)
         self._update_route_data()
 
     def reset_dones(self):
@@ -619,10 +701,15 @@ class RouteGenBatchState:
         if type(batch_new_routes) is list:
             batch_new_routes = tu.get_batch_tensor_from_routes(batch_new_routes,
                                                                self.device)
+        if batch_new_routes.device != self.device:
+            batch_new_routes = batch_new_routes.to(self.device)
+        if batch_new_routes.ndim == 2:
+            batch_new_routes = batch_new_routes[:, None]
 
         self._add_routes_to_tensors(batch_new_routes, 
                                     only_routes_with_demand_are_valid, 
                                     invalid_directly_connected)
+        self._add_routes_to_context_masks(batch_new_routes)
         self._add_routes_to_list(batch_new_routes)
 
         # finally, update the total route times with the new routes
@@ -990,6 +1077,14 @@ class RouteGenBatchState:
     @property
     def n_transfers(self):
         return self.extra_data.n_transfers
+
+    @property
+    def context_node_covered_mask(self):
+        return self.extra_data.context_node_covered_mask
+
+    @property
+    def context_edge_covered_mask(self):
+        return self.extra_data.context_edge_covered_mask
 
     @property
     def street_adj(self):

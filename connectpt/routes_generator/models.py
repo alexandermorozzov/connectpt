@@ -2285,6 +2285,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             (batch_size, state.max_n_nodes, state.max_n_nodes,
              self.trim_action_feat_dim),
             device=state.device,
+            dtype=nodepair_embeds.dtype,
         )
         global_features = state.get_global_state_features()
         global_features = global_features.to(
@@ -2297,77 +2298,180 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                 f"{self.trim_global_feat_dim} global features, got "
                 f"{global_features.shape[-1]}"
             )
-        other_node_masks, other_edge_masks = \
-            self._get_other_route_overlap_masks(state)
-
-        for bi in range(batch_size):
-            route = state.current_routes[bi]
-            route = route[route > -1]
-            route_len = len(route)
-            if route_len <= state.min_route_len[bi]:
-                continue
-
-            min_len = int(state.min_route_len[bi].item())
-            max_len = max(int(state.max_route_len[bi].item()), 1)
-            route_time = state.current_route_time[bi].clamp_min(EPSILON)
-            times_from_start = state.current_route_times_from_start[bi]
-
-            if trim_start:
-                old_start = route[0]
-                for route_pos in range(1, route_len):
-                    remaining_len = route_len - route_pos
-                    if remaining_len < min_len:
-                        continue
-                    new_start = route[route_pos]
-                    removed_time = times_from_start[route_pos]
-                    remaining_time = route_time - removed_time
-                    scores_from = old_start
-                    scores_to = new_start
-                    direction_flag = 0.0
-                    removed_len = route_pos
-                    removed_nodes = route[:route_pos]
-                    removed_edge_nodes = route[:route_pos + 1]
-                    kept_nodes = route[route_pos:]
-                    kept_edge_nodes = route[route_pos:]
-                    self._write_trim_features(
-                        features, valid, bi, scores_from, scores_to,
-                        removed_len, remaining_len, route_len, max_len,
-                        removed_time, remaining_time, route_time,
-                        direction_flag, removed_nodes, removed_edge_nodes,
-                        kept_nodes, kept_edge_nodes, other_node_masks[bi],
-                        other_edge_masks[bi], global_features[bi]
-                    )
-            else:
-                old_end = route[-1]
-                for route_pos in range(route_len - 1):
-                    remaining_len = route_pos + 1
-                    if remaining_len < min_len:
-                        continue
-                    new_end = route[route_pos]
-                    remaining_time = times_from_start[route_pos]
-                    removed_time = route_time - remaining_time
-                    scores_from = new_end
-                    scores_to = old_end
-                    direction_flag = 1.0
-                    removed_len = route_len - remaining_len
-                    removed_nodes = route[route_pos + 1:]
-                    removed_edge_nodes = route[route_pos:]
-                    kept_nodes = route[:route_pos + 1]
-                    kept_edge_nodes = route[:route_pos + 1]
-                    self._write_trim_features(
-                        features, valid, bi, scores_from, scores_to,
-                        removed_len, remaining_len, route_len, max_len,
-                        removed_time, remaining_time, route_time,
-                        direction_flag, removed_nodes, removed_edge_nodes,
-                        kept_nodes, kept_edge_nodes, other_node_masks[bi],
-                        other_edge_masks[bi], global_features[bi]
-                    )
+        candidate_features, candidate_valid, from_nodes, to_nodes = \
+            self._get_trim_candidate_features(
+                state, global_features, features.dtype, trim_start)
+        candidate_valid = candidate_valid & (from_nodes >= 0) & (to_nodes >= 0)
+        if candidate_valid.any():
+            candidate_batch_idxs = torch.arange(
+                batch_size, device=state.device)[:, None]
+            candidate_batch_idxs = candidate_batch_idxs.expand_as(from_nodes)
+            safe_from = from_nodes.clamp(min=0)
+            safe_to = to_nodes.clamp(min=0)
+            features[
+                candidate_batch_idxs[candidate_valid],
+                safe_from[candidate_valid],
+                safe_to[candidate_valid],
+            ] = candidate_features[candidate_valid]
+            valid[
+                candidate_batch_idxs[candidate_valid],
+                safe_from[candidate_valid],
+                safe_to[candidate_valid],
+            ] = True
 
         if valid.any():
             trim_inputs = torch.cat((nodepair_embeds, features), dim=-1)
             scored = self.trim_scorer(trim_inputs[valid]).squeeze(-1)
             scores[valid] = scored
         return scores, valid
+
+    def _get_trim_candidate_features(self, state, global_features, dtype,
+                                     trim_start):
+        routes = state.current_routes.to(dtype=torch.long)
+        batch_size, route_capacity = routes.shape
+        route_lens = state.current_route_n_stops.to(dtype=torch.long)
+        positions = torch.arange(route_capacity, device=state.device)
+        pos = positions[None].expand(batch_size, -1)
+
+        min_lens = state.min_route_len.to(device=state.device,
+                                          dtype=torch.long)
+        max_lens = state.max_route_len.to(device=state.device,
+                                          dtype=dtype).clamp_min(1)
+        route_lens_f = route_lens.to(dtype=dtype).clamp_min(1)
+        route_time = state.current_route_time.to(dtype=dtype).clamp_min(EPSILON)
+        times_from_start = state.current_route_times_from_start.to(dtype=dtype)
+
+        if trim_start:
+            from_nodes = routes[:, :1].expand(-1, route_capacity)
+            to_nodes = routes
+            removed_len = pos
+            remaining_len = route_lens[:, None] - pos
+            removed_time = times_from_start
+            remaining_time = route_time[:, None] - removed_time
+            direction_flag = torch.zeros_like(route_lens_f)[:, None].expand_as(
+                times_from_start)
+            valid = (pos >= 1) & (pos < route_lens[:, None]) & \
+                (remaining_len >= min_lens[:, None])
+        else:
+            last_pos = (route_lens - 1).clamp_min(0)
+            old_end = routes.gather(1, last_pos[:, None])
+            from_nodes = routes
+            to_nodes = old_end.expand(-1, route_capacity)
+            remaining_len = pos + 1
+            removed_len = route_lens[:, None] - remaining_len
+            remaining_time = times_from_start
+            removed_time = route_time[:, None] - remaining_time
+            direction_flag = torch.ones_like(route_lens_f)[:, None].expand_as(
+                times_from_start)
+            valid = (pos < (route_lens - 1)[:, None]) & \
+                (remaining_len >= min_lens[:, None])
+
+        valid = valid & (route_lens[:, None] > min_lens[:, None])
+        route_len_frac = (
+            route_lens.to(dtype=dtype)[:, None] / max_lens[:, None]
+        ).expand_as(pos)
+        base_features = torch.stack((
+            removed_len.to(dtype=dtype) / route_lens_f[:, None],
+            remaining_len.to(dtype=dtype) / max_lens[:, None],
+            route_len_frac,
+            removed_time / route_time[:, None],
+            remaining_time / route_time[:, None],
+            direction_flag.to(dtype=dtype),
+        ), dim=-1)
+        overlap_features = self._get_vectorized_trim_overlap_features(
+            state, positions, trim_start, dtype)
+        expanded_global = global_features[:, None].expand(
+            -1, route_capacity, -1)
+        features = torch.cat(
+            (base_features, overlap_features, expanded_global), dim=-1)
+        return features, valid, from_nodes, to_nodes
+
+    def _get_vectorized_trim_overlap_features(self, state, positions,
+                                              trim_start, dtype):
+        routes = state.current_routes.to(dtype=torch.long)
+        batch_size, route_capacity = routes.shape
+        route_lens = state.current_route_n_stops.to(dtype=torch.long)
+        node_pos = positions[None, None]
+        cand_pos = positions[None, :, None]
+        route_valid = routes >= 0
+
+        other_node_masks, other_edge_masks = \
+            self._get_other_route_overlap_masks(state)
+        safe_routes = routes.clamp(min=0)
+        covered_route_nodes = other_node_masks.gather(1, safe_routes) & \
+            route_valid
+
+        if trim_start:
+            removed_node_pos = node_pos < cand_pos
+            kept_node_pos = (node_pos >= cand_pos) & \
+                (node_pos < route_lens[:, None, None])
+        else:
+            removed_node_pos = (node_pos > cand_pos) & \
+                (node_pos < route_lens[:, None, None])
+            kept_node_pos = node_pos <= cand_pos
+        removed_node_pos = removed_node_pos & route_valid[:, None]
+        kept_node_pos = kept_node_pos & route_valid[:, None]
+
+        removed_node_overlap = self._masked_candidate_fraction(
+            covered_route_nodes, removed_node_pos, dtype)
+        kept_node_overlap = self._masked_candidate_fraction(
+            covered_route_nodes, kept_node_pos, dtype)
+
+        if route_capacity > 1:
+            edge_pos = positions[:-1][None, None]
+            from_nodes = routes[..., :-1]
+            to_nodes = routes[..., 1:]
+            valid_edges = (from_nodes >= 0) & (to_nodes >= 0)
+            edge_batch_idxs = torch.arange(
+                batch_size, device=state.device)[:, None]
+            safe_from = from_nodes.clamp(min=0)
+            safe_to = to_nodes.clamp(min=0)
+            covered_route_edges = other_edge_masks[
+                edge_batch_idxs, safe_from, safe_to] & valid_edges
+
+            if trim_start:
+                removed_edge_pos = edge_pos < cand_pos
+                kept_edge_pos = (edge_pos >= cand_pos) & \
+                    (edge_pos < (route_lens - 1)[:, None, None])
+            else:
+                removed_edge_pos = (edge_pos >= cand_pos) & \
+                    (edge_pos < (route_lens - 1)[:, None, None])
+                kept_edge_pos = edge_pos < cand_pos
+            removed_edge_pos = removed_edge_pos & valid_edges[:, None]
+            kept_edge_pos = kept_edge_pos & valid_edges[:, None]
+            removed_edge_overlap = self._masked_candidate_fraction(
+                covered_route_edges, removed_edge_pos, dtype)
+            kept_edge_overlap = self._masked_candidate_fraction(
+                covered_route_edges, kept_edge_pos, dtype)
+        else:
+            empty = torch.zeros(
+                (batch_size, route_capacity), device=state.device,
+                dtype=dtype)
+            removed_edge_overlap = empty
+            kept_edge_overlap = empty
+
+        one = torch.ones((), device=state.device, dtype=dtype)
+        return torch.stack((
+            removed_node_overlap,
+            one - removed_node_overlap,
+            removed_edge_overlap,
+            one - removed_edge_overlap,
+            kept_node_overlap,
+            one - kept_node_overlap,
+            kept_edge_overlap,
+            one - kept_edge_overlap,
+        ), dim=-1)
+
+    def _masked_candidate_fraction(self, covered_items, candidate_mask, dtype):
+        covered = covered_items[:, None] & candidate_mask
+        counts = candidate_mask.sum(dim=-1)
+        denom = counts.clamp_min(1).to(dtype=dtype)
+        frac = covered.to(dtype=dtype).sum(dim=-1) / denom
+        return torch.where(
+            counts > 0,
+            frac,
+            torch.zeros_like(frac),
+        )
 
     def _write_trim_features(self, features, valid, batch_idx, from_node,
                              to_node, removed_len, remaining_len, route_len,
@@ -2398,6 +2502,14 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         valid[batch_idx, from_node, to_node] = True
 
     def _get_other_route_overlap_masks(self, state):
+        if hasattr(state.extra_data, "context_node_covered_mask") and \
+                hasattr(state.extra_data, "context_edge_covered_mask"):
+            return (
+                state.context_node_covered_mask.to(
+                    device=state.device, dtype=torch.bool),
+                state.context_edge_covered_mask.to(
+                    device=state.device, dtype=torch.bool),
+            )
         node_masks = torch.zeros(
             (state.batch_size, state.max_n_nodes),
             dtype=torch.bool,
