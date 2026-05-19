@@ -12,7 +12,8 @@
       "Bash(.venv/Scripts/python.exe _patch_eval_seeded.py)",
       "Bash(xargs grep *)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('D:/PythonProjects/connectpt/connectpt/routes_generator/improvement_learning.py'\\).read\\(\\)\\); ast.parse\\(open\\('D:/PythonProjects/connectpt/connectpt/routes_generator/transit_time_estimator.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
-      "Bash(python -c \"from connectpt.routes_generator import improvement_learning, transit_time_estimator; print\\('imports OK'\\); print\\('snapshot_for_buffer:', hasattr\\(transit_time_estimator.RouteGenBatchState, 'snapshot_for_buffer'\\)\\)\")"
+      "Bash(python -c \"from connectpt.routes_generator import improvement_learning, transit_time_estimator; print\\('imports OK'\\); print\\('snapshot_for_buffer:', hasattr\\(transit_time_estimator.RouteGenBatchState, 'snapshot_for_buffer'\\)\\)\")",
+      "Bash(D:/PythonProjects/connectpt/.venv/Scripts/python.exe _tmp_patch_gif_tail.py)"
     ]
   }
 }

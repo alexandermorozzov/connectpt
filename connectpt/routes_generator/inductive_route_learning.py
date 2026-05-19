@@ -110,15 +110,29 @@ class NNBaseline:
         return 1 + 1 + 2 + 2 + 4 + 11
 
     def update(self, costs):
-        # do backprop
+        """Run a critic update step.
+
+        Returns a dict with detached snapshots so the trainer can log
+        critic-quality metrics (MSE, value-vs-return calibration, residuals)
+        without needing to re-run the model.
+        """
         self.optim.zero_grad()
         costs = costs.to(self._curr_estimate.dtype)
         loss = self.loss_fn(self._curr_estimate, costs)
+        # Capture detached value/target snapshots BEFORE backward so that
+        # autograd intermediates can be freed by the backward pass.
+        values_snapshot = self._curr_estimate.detach().clone()
+        targets_snapshot = costs.detach().clone()
         loss.backward()
         self.optim.step()
         self._curr_estimate = None
         # update the feature normalization statistics
         self.model[0].update()
+        return {
+            "loss": float(loss.detach().item()),
+            "values": values_snapshot,
+            "targets": targets_snapshot,
+        }
 
     def inputs_from_data(self, graph_data, cost_weights):
         dev = graph_data[STOP_KEY].x.device

@@ -699,13 +699,32 @@ class D3POValueModule:
         return baseline.detach()
 
     def update(self, returns):
+        """Run a critic update step.
+
+        Returns a dict with per-objective MSE plus detached value/target
+        snapshots so the trainer can log critic-quality metrics
+        (per-objective MSE, explained variance, value-vs-return scatter)
+        without re-running the model.
+        """
         self.optim.zero_grad()
         returns = returns.to(self._curr_estimate.dtype)
+        # Per-objective MSE computed before backward so we get an unbiased
+        # snapshot of the predictor's current error per cost component.
+        per_obj_mse = (self._curr_estimate.detach() - returns).pow(2) \
+            .mean(dim=0)  # [n_objectives]
         loss = self.loss_fn(self._curr_estimate, returns)
+        values_snapshot = self._curr_estimate.detach().clone()
+        targets_snapshot = returns.detach().clone()
         loss.backward()
         self.optim.step()
         self._curr_estimate = None
         self.model[0].update()
+        return {
+            "loss": float(loss.detach().item()),
+            "per_obj_mse": per_obj_mse,
+            "values": values_snapshot,
+            "targets": targets_snapshot,
+        }
 
 
 def _merge_step_action_stats(counts, actions, action_kinds, active):
@@ -871,11 +890,18 @@ def _collect_lc_improvement_cfg_ppo_rollout(
     action_counts = _new_action_count_totals()
     episode_start_costs = []
     episode_final_costs = []
+    # Per-objective component breakdowns at episode start vs end. Mirrors
+    # the d3po collector so PPO history can populate ATT/RTT/connectivity
+    # delta columns and the cell-16 component plot.
+    episode_start_components = []
+    episode_final_components = []
 
     state = None
     prev_cost = None
     current_start_cost = None
+    current_start_components = None
     last_cost = None
+    last_components = None
     best_cost = None
     best_current_routes = None
     context_route_counts = None
@@ -894,6 +920,11 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                 prev_cost = current_start_cost.clone()
                 last_cost = current_start_cost.clone()
                 best_cost = current_start_cost.clone()
+                # Snapshot per-objective components at episode start.
+                start_cho = cost_obj(state)
+                current_start_components = cost_obj.get_cost_components(
+                    state, result=start_cho).detach()
+                last_components = current_start_components.clone()
                 context_route_counts = state.n_finished_routes.detach().clone()
                 best_current_routes = _get_current_routes_from_state(state)
                 if return_best_routes:
@@ -960,6 +991,8 @@ def _collect_lc_improvement_cfg_ppo_rollout(
 
             done_after = state.is_done()
             result = cost_obj(state)
+            result_components = cost_obj.get_cost_components(
+                state, result=result).detach()
             if incumbent_reward:
                 new_best_cost = torch.minimum(best_cost, result.cost)
                 step_rewards = (best_cost - new_best_cost) * reward_scale
@@ -1002,6 +1035,8 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                 prev_cost, result.cost, step_kinds, active,
                 zero_trim_reward=zero_trim_reward)
             last_cost = torch.where(active, result.cost, last_cost)
+            last_components = torch.where(
+                active[:, None], result_components, last_components)
             if return_best_routes:
                 state._lc_best_current_routes = \
                     _clone_route_list(best_current_routes)
@@ -1015,6 +1050,10 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                 output_cost = best_cost if return_best_routes else result.cost
                 episode_final_costs.append(
                     output_cost[just_finished].detach().cpu())
+                episode_start_components.append(
+                    current_start_components[just_finished].detach().cpu())
+                episode_final_components.append(
+                    result_components[just_finished].detach().cpu())
 
             _merge_step_action_stats(
                 action_counts, step_actions, step_kinds, active)
@@ -1038,6 +1077,10 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                 output_cost = best_cost if return_best_routes else last_cost
                 episode_final_costs.append(
                     output_cost[unfinished].detach().cpu())
+                episode_start_components.append(
+                    current_start_components[unfinished].detach().cpu())
+                episode_final_components.append(
+                    last_components[unfinished].detach().cpu())
             final_value_estimates = value_module.from_state(state)
             final_value_estimates = final_value_estimates * \
                 unfinished.to(final_value_estimates.dtype)
@@ -1062,9 +1105,15 @@ def _collect_lc_improvement_cfg_ppo_rollout(
     if len(episode_start_costs) > 0:
         rollout["episode_start_costs"] = torch.cat(episode_start_costs)
         rollout["episode_final_costs"] = torch.cat(episode_final_costs)
+        rollout["episode_start_components"] = torch.cat(
+            episode_start_components)
+        rollout["episode_final_components"] = torch.cat(
+            episode_final_components)
     else:
         rollout["episode_start_costs"] = torch.empty(0)
         rollout["episode_final_costs"] = torch.empty(0)
+        rollout["episode_start_components"] = torch.empty(0, 3)
+        rollout["episode_final_components"] = torch.empty(0, 3)
     return rollout
 
 
@@ -1086,6 +1135,11 @@ def _update_lc_improvement_cfg_ppo_from_rollout(
     ratio_count = 0
     clipped_count = 0
     objectives = []
+    critic_mse_values = []
+    critic_value_buffer = []
+    critic_target_buffer = []
+    last_critic_values = None
+    last_critic_targets = None
 
     train_orders = [
         torch.randperm(len(states), device=device)
@@ -1127,7 +1181,15 @@ def _update_lc_improvement_cfg_ppo_from_rollout(
                 mb_trim_allowed = mb_trim_allowed[mb_score]
 
             value_module.from_state(mb_states)
-            value_module.update(mb_returns)
+            critic_step = value_module.update(mb_returns)
+            if critic_step is not None:
+                critic_mse_values.append(float(critic_step["loss"]))
+                cv = critic_step["values"].detach().cpu()
+                ct = critic_step["targets"].detach().cpu()
+                critic_value_buffer.append(cv)
+                critic_target_buffer.append(ct)
+                last_critic_values = cv
+                last_critic_targets = ct
 
             if supports_route_actions:
                 _, _, new_logits, entropy = model.step_route_action(
@@ -1171,11 +1233,30 @@ def _update_lc_improvement_cfg_ppo_from_rollout(
                 (ratios.detach() > 1 + clip_epsilon)
             clipped_count += int(clipped.sum().item())
 
+    if critic_value_buffer:
+        all_values = torch.cat(critic_value_buffer)
+        all_targets = torch.cat(critic_target_buffer)
+        critic_mse_mean = float(np.mean(critic_mse_values))
+        target_var = all_targets.float().var(unbiased=False).item()
+        if target_var > 0:
+            residual_var = (all_targets - all_values).float() \
+                .var(unbiased=False).item()
+            critic_explained_variance = 1.0 - residual_var / target_var
+        else:
+            critic_explained_variance = float("nan")
+    else:
+        critic_mse_mean = float("nan")
+        critic_explained_variance = float("nan")
+
     stats = {
         "objective": float(np.mean(objectives)) if objectives else 0.0,
         "ratio_sum": ratio_sum,
         "ratio_count": ratio_count,
         "clipped_count": clipped_count,
+        "critic_mse_mean": critic_mse_mean,
+        "critic_explained_variance": critic_explained_variance,
+        "critic_last_values": last_critic_values,
+        "critic_last_targets": last_critic_targets,
     }
     return stats
 
@@ -1470,6 +1551,17 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
     clipped_count = 0
     objectives = []
     diversity_losses = []
+    critic_per_obj_mse_list = []
+    critic_loss_list = []
+    critic_value_buffer = []
+    critic_target_buffer = []
+    last_critic_values = None
+    last_critic_targets = None
+
+    return_sums = None
+    return_counts = 0
+    advantage_sums = None
+    advantage_counts = 0
 
     train_orders = [
         torch.randperm(len(states), device=device)
@@ -1512,8 +1604,30 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
             if mb_trim_allowed is not None:
                 mb_trim_allowed = mb_trim_allowed[mb_score]
 
+            # Accumulate per-objective return / advantage stats (pre-normalize).
+            r_cpu = mb_returns.detach().cpu()
+            a_cpu = mb_advantages.detach().cpu()
+            if return_sums is None:
+                return_sums = r_cpu.sum(dim=0)
+                advantage_sums = a_cpu.sum(dim=0)
+            else:
+                return_sums = return_sums + r_cpu.sum(dim=0)
+                advantage_sums = advantage_sums + a_cpu.sum(dim=0)
+            return_counts += r_cpu.shape[0]
+            advantage_counts += a_cpu.shape[0]
+
             value_module.from_state(mb_states)
-            value_module.update(mb_returns)
+            critic_step = value_module.update(mb_returns)
+            if critic_step is not None:
+                critic_loss_list.append(float(critic_step["loss"]))
+                critic_per_obj_mse_list.append(
+                    critic_step["per_obj_mse"].detach().cpu())
+                cv = critic_step["values"].detach().cpu()
+                ct = critic_step["targets"].detach().cpu()
+                critic_value_buffer.append(cv)
+                critic_target_buffer.append(ct)
+                last_critic_values = cv
+                last_critic_targets = ct
 
             if supports_route_actions:
                 _, _, new_logits, entropy = model.step_route_action(
@@ -1572,6 +1686,34 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
                 (ratios.detach() > 1 + clip_epsilon)
             clipped_count += int(clipped.sum().item())
 
+    # Aggregate per-objective critic stats across minibatches.
+    if critic_per_obj_mse_list:
+        per_obj_mse_stack = torch.stack(critic_per_obj_mse_list, dim=0)
+        critic_mse_per_obj = per_obj_mse_stack.mean(dim=0)  # [n_obj]
+        critic_mse_mean = float(critic_mse_per_obj.mean().item())
+        all_values = torch.cat(critic_value_buffer, dim=0)
+        all_targets = torch.cat(critic_target_buffer, dim=0)
+        target_var = all_targets.float().var(dim=0, unbiased=False)
+        residual_var = (all_targets - all_values).float() \
+            .var(dim=0, unbiased=False)
+        # Per-objective explained variance, NaN where target variance is 0.
+        explained_var_per_obj = torch.where(
+            target_var > 0,
+            1.0 - residual_var / target_var.clamp_min(1e-12),
+            torch.full_like(target_var, float("nan")),
+        )
+    else:
+        critic_mse_per_obj = None
+        critic_mse_mean = float("nan")
+        explained_var_per_obj = None
+
+    if return_sums is not None and return_counts > 0:
+        return_mean_per_obj = (return_sums / return_counts).tolist()
+        advantage_mean_per_obj = (advantage_sums / advantage_counts).tolist()
+    else:
+        return_mean_per_obj = None
+        advantage_mean_per_obj = None
+
     stats = {
         "objective": float(np.mean(objectives)) if objectives else 0.0,
         "diversity_loss": float(np.mean(diversity_losses))
@@ -1579,6 +1721,17 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
         "ratio_sum": ratio_sum,
         "ratio_count": ratio_count,
         "clipped_count": clipped_count,
+        "critic_mse_mean": critic_mse_mean,
+        "critic_mse_per_obj": (
+            critic_mse_per_obj.tolist()
+            if critic_mse_per_obj is not None else None),
+        "critic_explained_variance_per_obj": (
+            explained_var_per_obj.tolist()
+            if explained_var_per_obj is not None else None),
+        "return_mean_per_obj": return_mean_per_obj,
+        "advantage_mean_per_obj": advantage_mean_per_obj,
+        "critic_last_values": last_critic_values,
+        "critic_last_targets": last_critic_targets,
     }
     return stats
 
@@ -1591,9 +1744,17 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
                             return_action_stats=False,
                             target_n_routes=None,
                             return_best_routes=False):
+    """Evaluate the improvement model on ``indices``.
+
+    Returned dict includes seed/final scalar cost, win rate, route-change
+    rates, and per-objective component breakdowns (demand / route /
+    connectivity) used by the notebook for ATT/RTT/connectivity plots.
+    """
     model.eval()
     seed_costs = []
     final_costs = []
+    seed_components_list = []
+    final_components_list = []
     route_change_masks = []
     route_outputs = []
     action_counts = _new_action_count_totals()
@@ -1604,6 +1765,21 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
         graph_batch, route_batch = make_improvement_batch(
             graphs, seed_routes, batch_indices, device, training=False,
             target_n_routes=target_n_routes)
+
+        # Build the seed state explicitly so we can pull its component
+        # breakdown — rollout_lc_improvement constructs the same state
+        # internally but only returns its cho, not the state object.
+        seed_n_routes = route_batch.shape[1]
+        seed_state = RouteGenBatchState(
+            graph_batch, cost_obj, seed_n_routes,
+            min_route_len, max_route_len,
+            cost_weights=_clone_cost_weights(eval_weights))
+        seed_state.add_new_routes(route_batch)
+        seed_inline_result = cost_obj(seed_state)
+        seed_components_list.append(
+            cost_obj.get_cost_components(
+                seed_state, result=seed_inline_result).detach().cpu())
+
         rollout_output = rollout_lc_improvement(
             model, cost_obj, graph_batch, route_batch, min_route_len,
             max_route_len, greedy=True, cost_weights=eval_weights,
@@ -1620,6 +1796,9 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
             _merge_action_stats(action_counts, batch_action_stats)
         seed_costs.append(seed_result.cost.cpu())
         final_costs.append(final_result.cost.cpu())
+        final_components_list.append(
+            cost_obj.get_cost_components(
+                state, result=final_result).detach().cpu())
         final_routes = get_batch_tensor_from_routes(state.routes).cpu()
         route_outputs.append(final_routes)
         route_change_masks.append(
@@ -1628,6 +1807,12 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
     seed_costs = torch.cat(seed_costs)
     final_costs = torch.cat(final_costs)
     route_change_mask = torch.cat(route_change_masks)
+    seed_components = torch.cat(seed_components_list, dim=0)
+    final_components = torch.cat(final_components_list, dim=0)
+    seed_component_means = seed_components.mean(dim=0)
+    final_component_means = final_components.mean(dim=0)
+    component_delta_means = seed_component_means - final_component_means
+
     result = {
         "target_n_routes": int(
             target_n_routes if target_n_routes is not None
@@ -1640,6 +1825,16 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
         "changed_route_rate": route_change_mask.float().mean().item(),
         "changed_graph_rate": route_change_mask.any(dim=1).float().mean().item(),
         "routes": route_outputs,
+        # Per-objective breakdown: index 0 = demand, 1 = route, 2 = connectivity.
+        "seed_component_demand": float(seed_component_means[0]),
+        "seed_component_route": float(seed_component_means[1]),
+        "seed_component_connectivity": float(seed_component_means[2]),
+        "final_component_demand": float(final_component_means[0]),
+        "final_component_route": float(final_component_means[1]),
+        "final_component_connectivity": float(final_component_means[2]),
+        "component_delta_demand": float(component_delta_means[0]),
+        "component_delta_route": float(component_delta_means[1]),
+        "component_delta_connectivity": float(component_delta_means[2]),
     }
     if return_action_stats:
         result["action_stats"] = _finalize_action_stats(action_counts)
@@ -1915,14 +2110,19 @@ def train_lc_improvement_cfg_ppo(
         active_advantages = advantages[rollout["active_masks"]]
         start_costs = rollout["episode_start_costs"]
         final_costs = rollout["episode_final_costs"]
+        start_components = rollout["episode_start_components"]
+        final_components = rollout["episode_final_components"]
         if len(start_costs) > 0:
             train_seed = start_costs.mean().item()
             train_final = final_costs.mean().item()
             train_delta = (start_costs - final_costs).mean().item()
+            component_delta = (start_components - final_components).mean(
+                dim=0)
         else:
             train_seed = float("nan")
             train_final = float("nan")
             train_delta = float("nan")
+            component_delta = torch.full((3,), float("nan"))
 
         eval_due = (
             (iteration > 0 and (iteration + 1) % max(int(val_period), 1) == 0)
@@ -1952,6 +2152,9 @@ def train_lc_improvement_cfg_ppo(
             "win_rate": float("nan"),
             "changed_route_rate": float("nan"),
             "changed_graph_rate": float("nan"),
+            "component_delta_demand": float("nan"),
+            "component_delta_route": float("nan"),
+            "component_delta_connectivity": float("nan"),
         }
         row = {
             "iteration": iteration + 1,
@@ -1974,6 +2177,9 @@ def train_lc_improvement_cfg_ppo(
             "train_seed_cost": train_seed,
             "train_final_cost": train_final,
             "train_delta": train_delta,
+            "train_component_demand_delta": float(component_delta[0]),
+            "train_component_route_delta": float(component_delta[1]),
+            "train_component_connectivity_delta": float(component_delta[2]),
             "train_reward_mean": active_rewards.mean().item()
                 if active_rewards.numel() > 0 else 0.0,
             "train_return_mean": active_returns.mean().item()
@@ -1985,6 +2191,10 @@ def train_lc_improvement_cfg_ppo(
             "train_ppo_ratio_mean": ratio_mean,
             "train_ppo_clip_fraction": clip_fraction,
             "train_ppo_objective": ppo_stats["objective"],
+            "train_critic_mse_mean": ppo_stats.get(
+                "critic_mse_mean", float("nan")),
+            "train_critic_explained_variance": ppo_stats.get(
+                "critic_explained_variance", float("nan")),
             "is_eval_iteration": eval_due,
             "val_seed_cost": val["seed_cost"],
             "val_final_cost": val["final_cost"],
@@ -1992,6 +2202,12 @@ def train_lc_improvement_cfg_ppo(
             "val_win_rate": val["win_rate"],
             "val_changed_route_rate": val["changed_route_rate"],
             "val_changed_graph_rate": val["changed_graph_rate"],
+            "val_component_delta_demand": val.get(
+                "component_delta_demand", float("nan")),
+            "val_component_delta_route": val.get(
+                "component_delta_route", float("nan")),
+            "val_component_delta_connectivity": val.get(
+                "component_delta_connectivity", float("nan")),
         }
         row.update({
             f"train_action_{key}": value
@@ -2024,11 +2240,22 @@ def train_lc_improvement_cfg_ppo(
             f"eval={row['is_eval_iteration']}"
         )
 
+    # Capture last-iteration critic snapshot (values vs returns) for the
+    # value-vs-target scatter in the notebook critic-analysis cell.
+    critic_snapshot = None
+    if "ppo_stats" in dir() and \
+            ppo_stats.get("critic_last_values") is not None:
+        critic_snapshot = {
+            "values": ppo_stats["critic_last_values"].numpy(),
+            "targets": ppo_stats["critic_last_targets"].numpy(),
+        }
+
     return {
         "best_model_path": best_model_path,
         "history": history,
         "train_indices": train_indices,
         "val_indices": val_indices,
+        "critic_snapshot": critic_snapshot,
     }
 
 
@@ -2366,7 +2593,19 @@ def train_lc_improvement_cfg_d3po(
             "win_rate": float("nan"),
             "changed_route_rate": float("nan"),
             "changed_graph_rate": float("nan"),
+            "component_delta_demand": float("nan"),
+            "component_delta_route": float("nan"),
+            "component_delta_connectivity": float("nan"),
         }
+        critic_mse_per_obj = d3po_stats.get("critic_mse_per_obj") or [
+            float("nan"), float("nan"), float("nan")]
+        critic_ev_per_obj = d3po_stats.get(
+            "critic_explained_variance_per_obj") or [
+            float("nan"), float("nan"), float("nan")]
+        return_per_obj = d3po_stats.get("return_mean_per_obj") or [
+            float("nan"), float("nan"), float("nan")]
+        adv_per_obj = d3po_stats.get("advantage_mean_per_obj") or [
+            float("nan"), float("nan"), float("nan")]
         row = {
             "iteration": iteration + 1,
             "epoch": iteration + 1,
@@ -2400,12 +2639,29 @@ def train_lc_improvement_cfg_d3po(
                 if scalar_returns.numel() > 0 else 0.0,
             "train_advantage_mean": scalar_advantages.mean().item()
                 if scalar_advantages.numel() > 0 else 0.0,
+            "train_return_mean_demand": float(return_per_obj[0]),
+            "train_return_mean_route": float(return_per_obj[1]),
+            "train_return_mean_connectivity": float(return_per_obj[2]),
+            "train_advantage_mean_demand": float(adv_per_obj[0]),
+            "train_advantage_mean_route": float(adv_per_obj[1]),
+            "train_advantage_mean_connectivity": float(adv_per_obj[2]),
             "train_active_sample_count": int(
                 rollout["active_masks"].sum().item()),
             "train_d3po_ratio_mean": ratio_mean,
             "train_d3po_clip_fraction": clip_fraction,
             "train_d3po_objective": d3po_stats["objective"],
             "train_d3po_diversity_loss": d3po_stats["diversity_loss"],
+            "train_critic_mse_mean": d3po_stats.get(
+                "critic_mse_mean", float("nan")),
+            "train_critic_mse_demand": float(critic_mse_per_obj[0]),
+            "train_critic_mse_route": float(critic_mse_per_obj[1]),
+            "train_critic_mse_connectivity": float(critic_mse_per_obj[2]),
+            "train_critic_explained_variance_demand": float(
+                critic_ev_per_obj[0]),
+            "train_critic_explained_variance_route": float(
+                critic_ev_per_obj[1]),
+            "train_critic_explained_variance_connectivity": float(
+                critic_ev_per_obj[2]),
             "is_eval_iteration": eval_due,
             "val_seed_cost": val["seed_cost"],
             "val_final_cost": val["final_cost"],
@@ -2413,6 +2669,12 @@ def train_lc_improvement_cfg_d3po(
             "val_win_rate": val["win_rate"],
             "val_changed_route_rate": val["changed_route_rate"],
             "val_changed_graph_rate": val["changed_graph_rate"],
+            "val_component_delta_demand": val.get(
+                "component_delta_demand", float("nan")),
+            "val_component_delta_route": val.get(
+                "component_delta_route", float("nan")),
+            "val_component_delta_connectivity": val.get(
+                "component_delta_connectivity", float("nan")),
         }
         row.update({
             f"train_action_{key}": value
@@ -2444,11 +2706,22 @@ def train_lc_improvement_cfg_d3po(
             f"eval={row['is_eval_iteration']}"
         )
 
+    # Capture last-iteration critic snapshot (values vs returns per objective)
+    # for the value-vs-target scatter in the notebook critic-analysis cell.
+    critic_snapshot = None
+    if "d3po_stats" in dir() and \
+            d3po_stats.get("critic_last_values") is not None:
+        critic_snapshot = {
+            "values": d3po_stats["critic_last_values"].numpy(),
+            "targets": d3po_stats["critic_last_targets"].numpy(),
+        }
+
     return {
         "best_model_path": best_model_path,
         "history": history,
         "train_indices": train_indices,
         "val_indices": val_indices,
+        "critic_snapshot": critic_snapshot,
     }
 
 
