@@ -7,6 +7,7 @@
 # neural_mutator=false keeps the algorithm purely heuristic: the type-1 mutator
 # is `get_bee_1_variants` and the initial population is seeded from the
 # init_network supplied by `test_method`.
+batch_size: 1
 population_size: 10
 n_iterations: 400
 # n_type1_mutators: omitted -> defaults to (1 + mutate_parents) * pop_size // 2

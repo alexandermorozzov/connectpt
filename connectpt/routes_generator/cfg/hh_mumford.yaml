@@ -6,6 +6,7 @@
 # `f_0` is the Great Deluge final cost level. `delta_F` (the starting level's
 # height above f_0) is omitted -> the algorithm sets it to max(f0_cost - f_0, 0).
 # Provide exactly one of `n_iterations` / `duration_s` as the stopping budget.
+batch_size: 1
 f_0: 0.0
 n_iterations: 2000
 # delta_F:        # optional; auto-computed from the initial cost when omitted

@@ -6,6 +6,7 @@
 # than BCO (which evaluates `n_bees` candidates per iteration). The notebook
 # helper `build_sa_cfg` overrides `alg_args.n_iterations` to match the compute
 # budget of the other methods in the comparison.
+batch_size: 1
 alg_args:
   n_iterations: 40000
   schedule: linear          # 'linear' or 'exponential'
