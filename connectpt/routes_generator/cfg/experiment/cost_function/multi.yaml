@@ -1,0 +1,9 @@
+type: 'multi'
+kwargs:
+  mean_stop_time_s: 0
+  avg_transfer_wait_time_s: 300
+  # NSGA-II optimizes the raw objectives (mean demand time, total route time)
+  # via MultiObjectiveCostModule.get_cost; the weights only matter for
+  # preference-conditioned neural generation, which the Husselmann variant
+  # does not use.
+  variable_weights: true

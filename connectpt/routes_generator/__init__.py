@@ -86,6 +86,13 @@ from .initialization import (
 # === Optimization & Search ===
 from .bee_colony import bee_colony
 
+# === Comparison Baselines (ported from AHolliday/transit_learning) ===
+from .simulated_annealing import simulated_annealing_with_reheating
+from .genetic_algorithm import run as genetic_algorithm
+from .hyperheuristics import hyperheuristic
+from .nsgaii import NSGAII, husselmann_init
+from . import heuristics
+
 # === Evaluation & Sampling ===
 from .eval_route_generator import (
     sample_from_model,

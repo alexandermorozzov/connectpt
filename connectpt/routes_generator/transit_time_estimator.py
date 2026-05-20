@@ -1849,6 +1849,9 @@ class MultiObjectiveCostModule(MyCostModule):
         # don't sample any edge cases
         self.pp_fraction = 0.33
         self.op_fraction = 0.33
+        # median-connectivity fraction: required by the inherited
+        # sample_variable_weights; this class predated its addition.
+        self.mcw_fraction = 0.33
 
     def sample_weights(self, batch_size, device=None):
         weights = self.sample_variable_weights(batch_size, device)

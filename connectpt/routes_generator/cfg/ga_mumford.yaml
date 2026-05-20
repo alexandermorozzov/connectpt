@@ -1,0 +1,21 @@
+# Genetic algorithm -- ported from AHolliday/transit_learning
+# (learning/genetic_algorithm.py). The ancestor repo had no ga_*.yaml in its
+# cfg/ directory, so this file is written from scratch from the parameters the
+# code reads. The notebook helper `build_ga_cfg` adds `+eval=mumford0` and
+# overrides these values for the comparison runs.
+#
+# neural_mutator=false keeps the algorithm purely heuristic: the type-1 mutator
+# is `get_bee_1_variants` and the initial population is seeded from the
+# init_network supplied by `test_method`.
+population_size: 10
+n_iterations: 400
+# n_type1_mutators: omitted -> defaults to (1 + mutate_parents) * pop_size // 2
+shorten_prob: 0.2
+force_linking_unlinked: false
+neural_mutator: false
+init_from_model: false
+
+defaults:
+  - _self_
+  - experiment: standard
+  - init: john

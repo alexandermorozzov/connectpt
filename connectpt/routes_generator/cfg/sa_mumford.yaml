@@ -1,0 +1,22 @@
+# Simulated annealing with reheating -- ported from AHolliday/transit_learning
+# (cfg/sa_linear.yaml). The `alg_args` block is passed verbatim as keyword
+# arguments to `simulated_annealing_with_reheating` via `test_method`.
+#
+# SA performs one cheap mutation per iteration, so it runs far more iterations
+# than BCO (which evaluates `n_bees` candidates per iteration). The notebook
+# helper `build_sa_cfg` overrides `alg_args.n_iterations` to match the compute
+# budget of the other methods in the comparison.
+alg_args:
+  n_iterations: 40000
+  schedule: linear          # 'linear' or 'exponential'
+  cooling_rate: 1.0e-5      # written 1.0e-5 (not 1e-5) so YAML parses a float
+  initial_temp: 0.2
+  final_temp: 0.01
+  shorten_prob: 0.2
+  # reheating_threshold: 2000   # iterations without improvement before reheat
+  # reheating_factor: 1.05      # temperature multiplier on reheat
+
+defaults:
+  - _self_
+  - experiment: standard
+  - init: john
