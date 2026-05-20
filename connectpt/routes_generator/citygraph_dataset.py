@@ -22,7 +22,8 @@ from torch_geometric.data import Data, HeteroData, InMemoryDataset
 from torch_geometric.transforms import KNNGraph, RemoveIsolatedNodes, \
     BaseTransform, RandomRotate, RandomFlip, Compose
 
-from .torch_utils import load_routes_tensor, floyd_warshall
+from .torch_utils import get_batch_tensor_from_routes, load_routes_tensor, \
+    floyd_warshall
 
 RAW_GRAPH_FILENAME = 'raw_graphs_1000.pkl'
 
@@ -106,8 +107,168 @@ def get_dataset_from_config(ds_cfg, center_nodes=True, tensors:dict=None):
             scale_dynamically=do_scaling, extra_node_feats=extra_node_feats,
             fully_connected_demand=True, center_nodes=center_nodes)
         return [data]
+    elif ds_cfg['type'] == 'macsa':
+        do_scaling = ds_cfg.get('scale_dynamically', True)
+        extra_node_feats = ds_cfg.get('extra_node_feats', True)
+        tensors = load_macsa_tensors(ds_cfg.path)
+        data = CityGraphData.from_tensors_with_transformations(
+            tensors,
+            scale_dynamically=do_scaling,
+            extra_node_feats=extra_node_feats,
+            fully_connected_demand=True,
+            center_nodes=center_nodes,
+        )
+        return [data]
     else:
         raise ValueError(f"Unknown dataset type {ds_cfg['type']}")
+
+
+MACSA_REQUIRED_FILENAMES = (
+    'Coords.txt',
+    'TravelTimes.txt',
+    'Demand.txt',
+    'Routes.txt',
+)
+
+
+def is_macsa_scenario_dir(path):
+    path = Path(path)
+    return path.is_dir() and all((path / name).exists()
+                                 for name in MACSA_REQUIRED_FILENAMES)
+
+
+def load_macsa_tensors(scenario_dir, travel_time_scale=60.0):
+    """Load one MACSA-style scenario into the tensor dataset structure.
+
+    Travel times in the supplied files follow the Mumford convention and are
+    minutes, so they are converted to seconds by default.
+    """
+    scenario_dir = Path(scenario_dir)
+    coords = np.genfromtxt(scenario_dir / 'Coords.txt', skip_header=1)
+    travel_times = np.genfromtxt(scenario_dir / 'TravelTimes.txt')
+    demand = np.genfromtxt(scenario_dir / 'Demand.txt')
+
+    node_locs = torch.tensor(np.atleast_2d(coords), dtype=torch.float32)
+    street_adj = torch.tensor(np.atleast_2d(travel_times), dtype=torch.float32)
+    demand = torch.tensor(np.atleast_2d(demand), dtype=torch.float32)
+    street_adj = street_adj * float(travel_time_scale)
+
+    n_nodes = node_locs.shape[0]
+    expected_shape = (n_nodes, n_nodes)
+    if tuple(street_adj.shape) != expected_shape:
+        raise ValueError(
+            f"{scenario_dir}: TravelTimes.txt has shape "
+            f"{tuple(street_adj.shape)}, expected {expected_shape}"
+        )
+    if tuple(demand.shape) != expected_shape:
+        raise ValueError(
+            f"{scenario_dir}: Demand.txt has shape {tuple(demand.shape)}, "
+            f"expected {expected_shape}"
+        )
+
+    return {
+        'node_locs': node_locs,
+        'street_adj': street_adj,
+        'demand': demand,
+    }
+
+
+def _read_macsa_routes_file(path):
+    routes = []
+    with Path(path).open('r', encoding='utf-8') as file:
+        for line in file:
+            line = line.split('#', 1)[0].strip()
+            if not line:
+                continue
+            routes.append([int(part) for part in line.split()])
+    return routes
+
+
+def _normalize_macsa_route_indices(routes, n_nodes, one_indexed=None):
+    flat_nodes = [node for route in routes for node in route]
+    if not flat_nodes:
+        return routes
+
+    min_node = min(flat_nodes)
+    max_node = max(flat_nodes)
+    if one_indexed is None:
+        one_indexed = min_node >= 1 and max_node == n_nodes
+    if one_indexed:
+        routes = [[node - 1 for node in route] for route in routes]
+        flat_nodes = [node for route in routes for node in route]
+        min_node = min(flat_nodes)
+        max_node = max(flat_nodes)
+
+    if min_node < 0 or max_node >= n_nodes:
+        raise ValueError(
+            "MACSA routes contain node ids outside the scenario range: "
+            f"min={min_node}, max={max_node}, n_nodes={n_nodes}"
+        )
+    return routes
+
+
+def load_macsa_routes(scenario_dir, n_nodes=None, one_indexed=None,
+                      max_route_len=None):
+    """Load one-directional MACSA routes as a batched padded route tensor.
+
+    The returned tensor has shape ``(1, n_routes, max_route_len)`` and uses
+    ``-1`` padding, matching the BCO/RL evaluation helpers.
+    """
+    scenario_dir = Path(scenario_dir)
+    if n_nodes is None:
+        n_nodes = int(np.genfromtxt(scenario_dir / 'Coords.txt',
+                                    max_rows=1).item())
+    routes = _read_macsa_routes_file(scenario_dir / 'Routes.txt')
+    routes = _normalize_macsa_route_indices(routes, n_nodes, one_indexed)
+    if max_route_len is None:
+        max_route_len = n_nodes
+    longest_route = max((len(route) for route in routes), default=0)
+    if longest_route > max_route_len:
+        raise ValueError(
+            f"{scenario_dir}: longest route has {longest_route} stops, "
+            f"but max_route_len is {max_route_len}"
+        )
+    return get_batch_tensor_from_routes(routes, max_route_len=max_route_len)
+
+
+def load_macsa_scenario(scenario_dir, one_indexed=None,
+                        route_max_len=None):
+    """Load one MACSA scenario as tensors plus seeded routes."""
+    scenario_dir = Path(scenario_dir)
+    tensors = load_macsa_tensors(scenario_dir)
+    n_nodes = tensors['node_locs'].shape[0]
+    routes = load_macsa_routes(
+        scenario_dir,
+        n_nodes=n_nodes,
+        one_indexed=one_indexed,
+        max_route_len=route_max_len or n_nodes,
+    )
+    return {
+        'name': scenario_dir.name,
+        'path': scenario_dir,
+        'tensors': tensors,
+        'routes': routes,
+    }
+
+
+def load_macsa_scenarios(root_dir, one_indexed=None, route_max_len=None):
+    """Load every MACSA scenario directory under ``root_dir``."""
+    root_dir = Path(root_dir)
+    scenarios = []
+    for scenario_dir in sorted(root_dir.iterdir()):
+        if not is_macsa_scenario_dir(scenario_dir):
+            continue
+        scenarios.append(load_macsa_scenario(
+            scenario_dir,
+            one_indexed=one_indexed,
+            route_max_len=route_max_len,
+        ))
+    if not scenarios:
+        raise FileNotFoundError(
+            f"No MACSA scenarios with {MACSA_REQUIRED_FILENAMES} found in "
+            f"{root_dir}"
+        )
+    return scenarios
 
 
 def get_dynamic_training_set(min_nodes, max_nodes, space_scale, demand_scale, 
