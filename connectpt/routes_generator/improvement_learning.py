@@ -1509,6 +1509,8 @@ def _collect_lc_improvement_cfg_d3po_rollout(
         "zero_trim_reward": bool(zero_trim_reward),
         "max_trim_actions_per_route": max_trim_actions_per_route,
         "keep_rollout_on_device": bool(keep_rollout_on_device),
+        "enabled_component_mask": tuple(
+            getattr(cost_obj, "enabled_component_mask", (True, True, True))),
     }
     if len(episode_start_costs) > 0:
         rollout["episode_start_costs"] = torch.cat(episode_start_costs)
@@ -1525,21 +1527,32 @@ def _collect_lc_improvement_cfg_d3po_rollout(
     return rollout
 
 
-def _sample_neighbor_preferences(preferences, sigma):
+def _sample_neighbor_preferences(preferences, sigma, enabled_mask=None):
     """Sample a distractor preference vector by perturbing ``preferences``
     with Gaussian noise and re-projecting onto the simplex (paper Alg. 1
     line 21). ``sigma == 0`` yields the original preferences (no
     diversity pressure) — diversity should be disabled via
-    ``diversity_weight=0`` instead."""
+    ``diversity_weight=0`` instead.
+
+    ``enabled_mask`` (an iterable of three bools) keeps the distractor on
+    the same sub-simplex as ``preferences`` when a cost component is
+    disabled, so the noise never reintroduces a dropped objective."""
     neighbor = preferences + torch.randn_like(preferences) * sigma
     neighbor = neighbor.clamp_min(1e-6)
+    if enabled_mask is not None and not all(enabled_mask):
+        mask_row = torch.tensor(
+            [1.0 if on else 0.0 for on in enabled_mask],
+            device=neighbor.device, dtype=neighbor.dtype)
+        neighbor = neighbor * mask_row
     return _normalize_preference_weights(neighbor)
 
 
 def _estimate_d3po_diversity_loss(
         model, states, actions, action_kinds, trim_allowed, new_logits,
-        preferences, supports_route_actions, sigma, alpha):
-    neighbor_preferences = _sample_neighbor_preferences(preferences, sigma)
+        preferences, supports_route_actions, sigma, alpha,
+        enabled_mask=None):
+    neighbor_preferences = _sample_neighbor_preferences(
+        preferences, sigma, enabled_mask=enabled_mask)
     target = alpha * (preferences - neighbor_preferences).abs().sum(dim=-1)
 
     # In-place cost_weights swap instead of states.clone() to avoid
@@ -1586,6 +1599,8 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
     preferences = rollout["preferences"]
     score_masks = rollout.get("score_masks", rollout["active_masks"])
     trim_allowed_masks = rollout.get("trim_allowed_masks")
+    enabled_component_mask = rollout.get(
+        "enabled_component_mask", (True, True, True))
     batch_size = rewards.shape[1]
     n_states_per_minibatch = max(1, int(minibatch_size) // int(batch_size))
     supports_route_actions = getattr(model, "supports_trim_actions", False)
@@ -1711,7 +1726,8 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
                     model, mb_states, mb_actions, mb_action_kinds,
                     mb_trim_allowed, new_logits, mb_preferences,
                     supports_route_actions, preference_noise_sigma,
-                    diversity_alpha)
+                    diversity_alpha,
+                    enabled_mask=enabled_component_mask)
             objective = weighted_clip_obj.mean() + \
                 entropy.mean() * entropy_weight - \
                 diversity_weight * diversity_loss
@@ -1879,6 +1895,11 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
         "component_delta_demand": float(component_delta_means[0]),
         "component_delta_route": float(component_delta_means[1]),
         "component_delta_connectivity": float(component_delta_means[2]),
+        # Which cost components were active for this run, so notebook
+        # tables / plots can drop the disabled ones.
+        "enabled_components": list(getattr(
+            cost_obj, "enabled_component_names",
+            ("demand", "route", "connectivity"))),
     }
     if return_action_stats:
         result["action_stats"] = _finalize_action_stats(action_counts)
@@ -2302,6 +2323,9 @@ def train_lc_improvement_cfg_ppo(
         "train_indices": train_indices,
         "val_indices": val_indices,
         "critic_snapshot": critic_snapshot,
+        "enabled_components": list(getattr(
+            cost_obj, "enabled_component_names",
+            ("demand", "route", "connectivity"))),
     }
 
 
@@ -2770,6 +2794,9 @@ def train_lc_improvement_cfg_d3po(
         "train_indices": train_indices,
         "val_indices": val_indices,
         "critic_snapshot": critic_snapshot,
+        "enabled_components": list(getattr(
+            cost_obj, "enabled_component_names",
+            ("demand", "route", "connectivity"))),
     }
 
 

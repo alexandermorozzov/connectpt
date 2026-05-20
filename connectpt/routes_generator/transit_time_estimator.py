@@ -36,6 +36,77 @@ COST_WEIGHT_KEY_ORDER = (
     'median_connectivity_weight',
 )
 
+# Short, human-readable names for the three cost components, index-aligned
+# with COST_WEIGHT_KEY_ORDER. Used to enable / disable individual components.
+COST_COMPONENT_NAMES = ('demand', 'route', 'connectivity')
+
+# Accepted spellings for each cost component, mapped to its index. Lets
+# configs / notebooks refer to a component by short name, by its weight-key
+# name, or by a couple of common aliases (ATT / RTT).
+_COST_COMPONENT_ALIASES = {
+    'demand': 0, 'demand_time_weight': 0, 'demand_cost': 0,
+    'demand_time': 0, 'att': 0,
+    'route': 1, 'route_time_weight': 1, 'route_cost': 1,
+    'route_time': 1, 'rtt': 1,
+    'connectivity': 2, 'median_connectivity_weight': 2,
+    'median_connectivity': 2, 'connectivity_cost': 2,
+}
+
+
+def resolve_cost_component_index(item):
+    """Map a cost-component identifier to its index in
+    ``COST_WEIGHT_KEY_ORDER`` (0=demand, 1=route, 2=connectivity).
+
+    Accepts an integer index, a short name (``demand`` / ``route`` /
+    ``connectivity``), a weight-key name, or an ATT/RTT alias.
+    """
+    if isinstance(item, bool):
+        raise TypeError(f"invalid cost-component identifier: {item!r}")
+    if isinstance(item, (int, np.integer)):
+        idx = int(item)
+        if not 0 <= idx < len(COST_COMPONENT_NAMES):
+            raise ValueError(f"cost-component index out of range: {idx}")
+        return idx
+    key = str(item).strip().lower()
+    if key not in _COST_COMPONENT_ALIASES:
+        raise ValueError(
+            f"unknown cost component {item!r}; expected one of "
+            f"{COST_COMPONENT_NAMES} (or a weight-key / ATT-RTT alias)")
+    return _COST_COMPONENT_ALIASES[key]
+
+
+def resolve_enabled_cost_components(enabled_components=None,
+                                    disabled_components=None):
+    """Return a length-3 tuple of bools (index-aligned with
+    ``COST_COMPONENT_NAMES``) describing which cost components are active.
+
+    Pass at most one of ``enabled_components`` / ``disabled_components``;
+    ``None`` for both keeps all three components enabled — the default,
+    fully backward-compatible behaviour.
+    """
+    if enabled_components is not None and disabled_components is not None:
+        raise ValueError(
+            "pass only one of enabled_components / disabled_components")
+    if enabled_components is None and disabled_components is None:
+        return (True, True, True)
+    if disabled_components is not None:
+        items = disabled_components
+        if isinstance(items, (str, int)):
+            items = [items]
+        mask = [True, True, True]
+        for item in items:
+            mask[resolve_cost_component_index(item)] = False
+    else:
+        items = enabled_components
+        if isinstance(items, (str, int)):
+            items = [items]
+        mask = [False, False, False]
+        for item in items:
+            mask[resolve_cost_component_index(item)] = True
+    if not any(mask):
+        raise ValueError("at least one cost component must stay enabled")
+    return tuple(mask)
+
 
 def enforce_correct_batch(matrix, batch_size):
     if matrix.ndim == 2:
@@ -1431,14 +1502,15 @@ class CostModule(torch.nn.Module):
 
 
 class MyCostModule(CostModule):
-    def __init__(self, mean_stop_time_s=MEAN_STOP_TIME_S, 
+    def __init__(self, mean_stop_time_s=MEAN_STOP_TIME_S,
                  avg_transfer_wait_time_s=AVG_TRANSFER_WAIT_TIME_S,
                  symmetric_routes=True, low_memory_mode=False, use_weighted_connectivity=False,
                  demand_time_weight=0.33, route_time_weight=0.33,
                  median_connectivity_weight=0.33,
                  constraint_violation_weight=5, variable_weights=False,
-                 ignore_stops_oob=False, pp_fraction=0.33, 
-                 op_fraction=0.33, mcw_fraction=0.33):
+                 ignore_stops_oob=False, pp_fraction=0.33,
+                 op_fraction=0.33, mcw_fraction=0.33,
+                 enabled_components=None, disabled_components=None):
         super().__init__(mean_stop_time_s, avg_transfer_wait_time_s,
                          symmetric_routes, low_memory_mode)
         self.use_weighted_connectivity = use_weighted_connectivity
@@ -1454,10 +1526,94 @@ class MyCostModule(CostModule):
             assert pp_fraction + op_fraction + mcw_fraction <= 1, \
                 "fractions of extreme samples must sum to <= 1"
         self.ignore_stops_oob = ignore_stops_oob
+        # Which of the three cost components (demand / route / connectivity)
+        # are active. Disabled components are dropped from the weighted cost
+        # and from sampled / fixed cost-weight tensors; when all three are
+        # enabled (the default) every masking helper below is a no-op, so
+        # behaviour is bit-for-bit unchanged.
+        self.set_enabled_components(enabled_components, disabled_components)
 
     @property
     def cost_component_names(self):
         return COST_WEIGHT_KEY_ORDER
+
+    # ------------------------------------------------------------------
+    # Enable / disable individual cost components
+    # ------------------------------------------------------------------
+    def set_enabled_components(self, enabled_components=None,
+                               disabled_components=None):
+        """Configure which cost components are active (see
+        ``resolve_enabled_cost_components``)."""
+        self._enabled_components = resolve_enabled_cost_components(
+            enabled_components, disabled_components)
+        self._all_components_enabled = all(self._enabled_components)
+
+    @property
+    def enabled_component_mask(self):
+        """Tuple of three bools, index-aligned with ``COST_COMPONENT_NAMES``."""
+        return self._enabled_components
+
+    @property
+    def all_components_enabled(self):
+        return self._all_components_enabled
+
+    @property
+    def enabled_component_indices(self):
+        return tuple(i for i, on in enumerate(self._enabled_components) if on)
+
+    @property
+    def enabled_component_names(self):
+        return tuple(COST_COMPONENT_NAMES[i]
+                     for i in self.enabled_component_indices)
+
+    @property
+    def disabled_component_names(self):
+        return tuple(COST_COMPONENT_NAMES[i]
+                     for i, on in enumerate(self._enabled_components)
+                     if not on)
+
+    @property
+    def n_enabled_components(self):
+        return int(sum(self._enabled_components))
+
+    def _enabled_mask_row(self, device=None, dtype=torch.float32):
+        return torch.tensor(
+            [1.0 if on else 0.0 for on in self._enabled_components],
+            device=device, dtype=dtype)
+
+    def apply_enabled_mask(self, weights, normalize=True):
+        """Zero the weights of disabled cost components along the last axis
+        and (optionally) renormalize the survivors to sum to 1.
+
+        ``weights`` is a ``[..., 3]`` tensor. This is a no-op when every
+        component is enabled, so default runs are unaffected. Rows whose
+        enabled weights are all zero fall back to a uniform distribution
+        over the enabled components instead of producing a degenerate
+        all-zero (pure-constraint) cost."""
+        if self._all_components_enabled:
+            return weights
+        mask = self._enabled_mask_row(weights.device, weights.dtype)
+        weights = weights * mask
+        if normalize:
+            total = weights.sum(dim=-1, keepdim=True)
+            uniform = mask / mask.sum()
+            weights = torch.where(
+                total > EPSILON, weights / total.clamp_min(EPSILON),
+                uniform)
+        return weights
+
+    def _mask_weight_dict(self, wdict, normalize=True):
+        """Apply ``apply_enabled_mask`` to a dict of per-component weight
+        tensors keyed by ``COST_WEIGHT_KEY_ORDER``."""
+        if self._all_components_enabled:
+            return wdict
+        keys = list(COST_WEIGHT_KEY_ORDER)
+        stacked = torch.stack([wdict[k] for k in keys], dim=-1)
+        stacked = self.apply_enabled_mask(stacked, normalize=normalize)
+        out = dict(wdict)
+        for i, k in enumerate(keys):
+            out[k] = stacked[..., i]
+        return out
 
     def sample_variable_weights(self, batch_size, device=None):
         if not self.variable_weights:
@@ -1494,11 +1650,11 @@ class MyCostModule(CostModule):
                 rtw[is_intermediate] = weights[:, 1]
                 mcw[is_intermediate] = weights[:, 2]
 
-        return {
+        return self._mask_weight_dict({
             'demand_time_weight': dtw,
             'route_time_weight': rtw,
             'median_connectivity_weight': mcw,
-        }
+        })
     
     def get_weights(self, device=None):
         dtm = self.demand_time_weight
@@ -1510,12 +1666,12 @@ class MyCostModule(CostModule):
         mcw = self.median_connectivity_weight
         if type(mcw) is not Tensor:
             mcw = torch.tensor([mcw], device=device)
-        
-        return {
+
+        return self._mask_weight_dict({
             'demand_time_weight': dtm,
             'route_time_weight': rtm,
             'median_connectivity_weight': mcw,
-        }
+        })
     
     def set_weights(self, demand_time_weight=None, route_time_weight=None, 
                                     median_connectivity_weight=None,  constraint_violation_weight=None):
@@ -1529,18 +1685,30 @@ class MyCostModule(CostModule):
             self.constraint_violation_weight = constraint_violation_weight
 
     def get_preference_weights(self, state, normalize=False):
-        if hasattr(state, "get_cost_weights_tensor"):
-            return state.get_cost_weights_tensor(
-                COST_WEIGHT_KEY_ORDER, normalize=normalize)
+        if self._all_components_enabled:
+            if hasattr(state, "get_cost_weights_tensor"):
+                return state.get_cost_weights_tensor(
+                    COST_WEIGHT_KEY_ORDER, normalize=normalize)
 
-        weights = []
-        for key in COST_WEIGHT_KEY_ORDER:
-            weights.append(state.cost_weights[key])
-        weights = torch.stack(weights, dim=-1)
-        if normalize:
-            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(
-                EPSILON)
-        return weights
+            weights = []
+            for key in COST_WEIGHT_KEY_ORDER:
+                weights.append(state.cost_weights[key])
+            weights = torch.stack(weights, dim=-1)
+            if normalize:
+                weights = weights / weights.sum(
+                    dim=-1, keepdim=True).clamp_min(EPSILON)
+            return weights
+
+        # A disabled component must not carry preference mass — mask the
+        # raw weights, then renormalize the survivors when requested.
+        if hasattr(state, "get_cost_weights_tensor"):
+            weights = state.get_cost_weights_tensor(
+                COST_WEIGHT_KEY_ORDER, normalize=False)
+        else:
+            weights = torch.stack(
+                [state.cost_weights[key] for key in COST_WEIGHT_KEY_ORDER],
+                dim=-1)
+        return self.apply_enabled_mask(weights, normalize=normalize)
 
     def _expand_batch_value(self, value, batch_size, device):
         if type(value) is not Tensor:
@@ -1623,6 +1791,10 @@ class MyCostModule(CostModule):
         weights = torch.stack(
             (demand_time_weight, route_time_weight,
              median_connectivity_weight), dim=-1)
+        # Drop disabled components from the weighted cost (no-op when all
+        # three are enabled). The raw cost_components above are left intact
+        # so get_cost_components() still reports every component.
+        weights = self.apply_enabled_mask(weights)
 
         # compute the weight for the violated-constraint penalty, as an
          # upper bound on how bad the demand and route cost components may be
@@ -1691,7 +1863,7 @@ class MultiObjectiveCostModule(MyCostModule):
         weights['median_connectivity_weight'][0] = 0.0
         weights['median_connectivity_weight'][1] = 0.0
         weights['median_connectivity_weight'][2] = 1.0
-        return weights
+        return self._mask_weight_dict(weights)
 
     def forward(self, state, return_per_route_riders=False):
         cho = super().forward(state, return_per_route_riders=return_per_route_riders)

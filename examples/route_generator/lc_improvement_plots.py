@@ -494,6 +494,121 @@ def draw_route_sequence_table(ax, routes, title="Route sequences", *,
     return table
 
 
+# ---------------------------------------------------------------------------
+# Cost-component enable / disable helpers
+# ---------------------------------------------------------------------------
+# Both notebooks can switch individual cost components off (demand / route /
+# connectivity). When a component is disabled the library drops it from the
+# weighted cost; these helpers let the notebook tables / plots drop the
+# matching columns and panels so a disabled component is never displayed.
+
+COST_COMPONENT_NAMES = ("demand", "route", "connectivity")
+
+# Human-readable axis / panel labels per component.
+COMPONENT_DISPLAY_LABELS = {
+    "demand": "demand (ATT)",
+    "route": "route (RTT)",
+    "connectivity": "connectivity",
+}
+
+# Base (undecorated) dataframe columns owned by each cost component, across
+# both the evaluation_seeded and lc_improvement_training notebooks. The
+# filter below also recognizes these wrapped in ``mean_`` / ``std_``
+# prefixes and ``_with_worse`` / ``_without_worse`` suffixes (worse-accept
+# summary tables).
+_COMPONENT_OWNED_COLUMNS = {
+    "demand": {
+        "cost_demand_term", "cost_demand_component", "cost_demand_weight",
+        "ATT",
+        "train_component_demand_delta", "val_component_delta_demand",
+        "seed_component_demand", "final_component_demand",
+        "component_delta_demand",
+        "train_critic_mse_demand",
+        "train_critic_explained_variance_demand",
+        "train_return_mean_demand", "train_advantage_mean_demand",
+    },
+    "route": {
+        "cost_route_term", "cost_route_component", "cost_route_weight",
+        "RTT",
+        "train_component_route_delta", "val_component_delta_route",
+        "seed_component_route", "final_component_route",
+        "component_delta_route",
+        "train_critic_mse_route",
+        "train_critic_explained_variance_route",
+        "train_return_mean_route", "train_advantage_mean_route",
+    },
+    "connectivity": {
+        "cost_connectivity_term", "cost_connectivity_component",
+        "cost_connectivity_weight",
+        "median_connectivity", "# disconnected node pairs",
+        "train_component_connectivity_delta",
+        "val_component_delta_connectivity",
+        "seed_component_connectivity", "final_component_connectivity",
+        "component_delta_connectivity",
+        "train_critic_mse_connectivity",
+        "train_critic_explained_variance_connectivity",
+        "train_return_mean_connectivity",
+        "train_advantage_mean_connectivity",
+    },
+}
+
+
+def resolve_enabled_components(enabled):
+    """Normalize an ``enabled`` argument to a tuple of component names.
+
+    Accepts ``None`` (all enabled), a cost module exposing
+    ``enabled_component_names``, a result/history dict carrying an
+    ``"enabled_components"`` key, or an explicit iterable of names.
+    """
+    if enabled is None:
+        return COST_COMPONENT_NAMES
+    if hasattr(enabled, "enabled_component_names"):
+        return tuple(enabled.enabled_component_names)
+    if isinstance(enabled, dict):
+        names = enabled.get("enabled_components", COST_COMPONENT_NAMES)
+        return tuple(names)
+    return tuple(enabled)
+
+
+def disabled_components(enabled):
+    """Return the disabled component names (canonical order)."""
+    active = set(resolve_enabled_components(enabled))
+    return tuple(c for c in COST_COMPONENT_NAMES if c not in active)
+
+
+def _strip_column_decorators(col):
+    base = str(col)
+    for suffix in ("_without_worse", "_with_worse"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    for prefix in ("mean_", "std_"):
+        if base.startswith(prefix):
+            base = base[len(prefix):]
+            break
+    return base
+
+
+def disabled_component_columns(columns, enabled):
+    """Return the subset of ``columns`` owned by a disabled cost component."""
+    owned = set()
+    for comp in disabled_components(enabled):
+        owned |= _COMPONENT_OWNED_COLUMNS[comp]
+    return [c for c in columns if _strip_column_decorators(c) in owned]
+
+
+def filter_component_columns(columns, enabled):
+    """Drop disabled-component entries from a list of column names."""
+    drop = set(disabled_component_columns(columns, enabled))
+    return [c for c in columns if c not in drop]
+
+
+def drop_disabled_component_columns(df, enabled):
+    """Return ``df`` with disabled-component columns removed."""
+    drop = disabled_component_columns(list(df.columns), enabled)
+    return df.drop(columns=drop) if drop else df
+
+
 __all__ = [
     "route_to_list",
     "route_edge_list",
@@ -512,4 +627,11 @@ __all__ = [
     "plot_plain_route_set",
     "plot_route_diff",
     "draw_route_sequence_table",
+    "COST_COMPONENT_NAMES",
+    "COMPONENT_DISPLAY_LABELS",
+    "resolve_enabled_components",
+    "disabled_components",
+    "disabled_component_columns",
+    "filter_component_columns",
+    "drop_disabled_component_columns",
 ]

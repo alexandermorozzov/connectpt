@@ -830,6 +830,55 @@ def test_my_cost_components_reconstruct_scalar_cost_for_simplex_weights():
     )
 
 
+def test_disabling_a_cost_component_drops_it_from_the_weighted_cost():
+    weights = {
+        "demand_time_weight": torch.tensor([0.2]),
+        "route_time_weight": torch.tensor([0.3]),
+        "median_connectivity_weight": torch.tensor([0.5]),
+    }
+
+    def _build(cost_obj):
+        state = RouteGenBatchState(
+            make_line_graph(n_nodes=3),
+            cost_obj,
+            n_routes_to_plan=1,
+            min_route_len=2,
+            max_route_len=3,
+            cost_weights=dict(weights),
+        )
+        state.set_current_routes([0, 1])
+        return state
+
+    cost_obj = MyCostModule(
+        demand_time_weight=0.2, route_time_weight=0.3,
+        median_connectivity_weight=0.5, use_weighted_connectivity=True,
+        disabled_components=["connectivity"])
+
+    assert cost_obj.enabled_component_names == ("demand", "route")
+    assert cost_obj.disabled_component_names == ("connectivity",)
+
+    state = _build(cost_obj)
+    result = cost_obj(state)
+    preferences = cost_obj.get_preference_weights(state, normalize=True)
+    components = cost_obj.get_cost_components(state, result=result)
+
+    # The connectivity component carries zero preference mass and the
+    # demand / route survivors renormalize to sum to one.
+    assert preferences[0, 2].item() == 0.0
+    assert torch.isclose(preferences.sum(dim=-1),
+                         torch.ones(1), atol=1e-6).all()
+    # Scalar cost is the weighted sum over the enabled components only.
+    assert torch.allclose(
+        (components * preferences).sum(dim=-1), result.cost, atol=1e-6)
+
+
+def test_my_cost_module_all_components_enabled_is_a_noop():
+    cost_obj = MyCostModule()
+    assert cost_obj.all_components_enabled
+    raw = torch.tensor([[0.33, 0.33, 0.33]])
+    assert torch.equal(cost_obj.apply_enabled_mask(raw), raw)
+
+
 def test_vector_ppo_returns_and_advantages_keep_objective_dim():
     rewards = torch.ones((2, 3, 3), dtype=torch.float32)
     value_estimates = torch.zeros_like(rewards)
