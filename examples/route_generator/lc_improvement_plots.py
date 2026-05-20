@@ -444,9 +444,14 @@ def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
     ax.axis("off")
 
 
-def draw_route_sequence_table(ax, routes, *, title="Route sequences",
+def draw_route_sequence_table(ax, routes, title="Route sequences", *,
                               palette="tab20"):
-    """Render a small mpl table listing each route's node sequence."""
+    """Render a small mpl table listing each route's node sequence.
+
+    ``title`` is positional-or-keyword so the training notebook's
+    ``draw_route_sequence_table(ax, routes, "Initial route nodes")`` call
+    keeps working.
+    """
     routes = get_first_route_set(routes)
     colors = route_colors_for(routes, palette=palette)
     rows = []
