@@ -92,6 +92,7 @@ from .genetic_algorithm import run as genetic_algorithm
 from .hyperheuristics import hyperheuristic
 from .nsgaii import NSGAII, husselmann_init
 from . import heuristics
+from .nx_heuristic import build_nx_heuristic_routes, generate_initial_routes
 
 # === Evaluation & Sampling ===
 from .eval_route_generator import (
