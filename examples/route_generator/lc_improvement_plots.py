@@ -274,15 +274,26 @@ def summarize_route_changes(routes, reference_routes):
     return summary
 
 
-def plot_plain_route_set(ax, routes, graph_or_coords, street_adj=None, *,
-                         title, subtitle=None, palette="tab20",
-                         with_overlap_curves=True):
+def plot_plain_route_set(ax, routes, graph_or_coords, street_adj=None,
+                         title=None, subtitle=None, *,
+                         palette="tab20", with_overlap_curves=True):
     """Draw a single route set on top of the underlying street graph.
 
-    ``graph_or_coords`` is either a PyG ``HeteroData`` graph (with
-    ``[STOP_KEY].pos`` and ``.street_adj``) or a raw coords array, in which
-    case ``street_adj`` must also be provided.
+    Two positional conventions are supported:
+
+    * PyG graph:  ``plot_plain_route_set(ax, routes, graph, title, ...)`` —
+      ``graph_or_coords`` is a ``HeteroData`` with ``[STOP_KEY].pos`` and
+      ``.street_adj``; the 4th positional arg is the title.
+    * Raw arrays: ``plot_plain_route_set(ax, routes, coords, street_adj,
+      title, ...)`` — explicit coords + street_adj arrays.
+
+    A string in the ``street_adj`` slot is interpreted as the title (the
+    PyG-graph convention).
     """
+    if isinstance(street_adj, str):
+        street_adj, title = None, street_adj
+    if title is None:
+        title = ""
     routes = get_first_route_set(routes)
     coords, street_adj_arr = extract_coords_street_adj(
         graph_or_coords, street_adj)
@@ -322,14 +333,23 @@ def plot_plain_route_set(ax, routes, graph_or_coords, street_adj=None, *,
 
 
 def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
-                    street_adj=None, *, title, subtitle=None,
+                    street_adj=None, title=None, subtitle=None, *,
                     palette="tab20", with_overlap_curves=True):
     """Draw ``routes`` overlaid with diff markings vs ``reference_routes``.
 
     Edges only in the reference are drawn as dashed grey lines; shared edges
     are dimmed in the route color; new edges are emphasized in the route
     color. Nodes added/removed/shared are marked distinctly.
+
+    Like :func:`plot_plain_route_set`, accepts either the PyG-graph
+    convention ``(..., graph, title, ...)`` or the raw-arrays convention
+    ``(..., coords, street_adj, title, ...)``; a string in the
+    ``street_adj`` slot is taken as the title.
     """
+    if isinstance(street_adj, str):
+        street_adj, title = None, street_adj
+    if title is None:
+        title = ""
     routes = get_first_route_set(routes)
     reference_routes = get_first_route_set(reference_routes)
     coords, street_adj_arr = extract_coords_street_adj(

@@ -25,6 +25,11 @@ worse_selection_decay: 0.995
 worse_selection_min_temperature: 0.001
 worse_selection_uniform_mix: 0.05
 worse_selection_elite_count: 1
+# trim_grace_period > 0 enables trim-grace selection: a route-shrinking
+# (trim) mutation is force-accepted as a setup move and the bee is shielded
+# from cost-based selection for this many population-selection rounds, so a
+# follow-up extend can build on the trim. 0 keeps cost-only selection.
+trim_grace_period: 0
 
 defaults:
   - _self_

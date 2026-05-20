@@ -250,7 +250,38 @@ def _ensure_selection_stats_bucket(mutation_counts_out):
     bucket.setdefault('parent_copies', 0)
     bucket.setdefault('nonbest_parent_copies', 0)
     bucket.setdefault('worse_parent_copies', 0)
+    bucket.setdefault('trim_grace_forced_accepts', 0)
+    bucket.setdefault('trim_grace_protected', 0)
     return bucket
+
+
+def _record_trim_grace_stats(mutation_counts_out, *, forced_accepts=0,
+                             protected=0):
+    """Record trim-grace activity (force-accepted trims, protected bees)."""
+    if mutation_counts_out is None:
+        return
+    bucket = _ensure_selection_stats_bucket(mutation_counts_out)
+    bucket['trim_grace_forced_accepts'] += int(forced_accepts)
+    bucket['trim_grace_protected'] += int(protected)
+
+
+def _apply_trim_grace_to_parents(parent_idxs, trim_grace, bee_idxs):
+    """Force trim-protected bees to be their own parent during selection.
+
+    A bee whose route was just trimmed has a temporarily worse cost. Without
+    protection, cost-based selection (recruiter/follower or soft) discards it
+    immediately, so the trim never reaches the next generation and a
+    follow-up extend never gets the chance to recover the loss. Bees with
+    ``trim_grace > 0`` keep their own just-trimmed network instead.
+
+    Returns ``(parent_idxs, n_protected)``.
+    """
+    protected = trim_grace > 0
+    if not protected.any():
+        return parent_idxs, 0
+    self_idxs = bee_idxs[None].expand_as(parent_idxs)
+    parent_idxs = torch.where(protected, self_idxs, parent_idxs)
+    return parent_idxs, int(protected.sum().item())
 
 
 def _record_selection_stats(mutation_counts_out, parent_idxs,
@@ -365,7 +396,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                worse_selection_decay=0.995,
                worse_selection_min_temperature=0.001,
                worse_selection_uniform_mix=0.05,
-               worse_selection_elite_count=1):
+               worse_selection_elite_count=1,
+               trim_grace_period=0):
     """Implementation of the method of  Nikolic and Teodorovic (2013).
     
     state -- A RouteGenBatchState object representing the initial state.
@@ -422,6 +454,14 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         parent distribution to preserve exploration.
     worse_selection_elite_count -- number of best current bees copied into
         the first population slots before the remaining slots are sampled.
+    trim_grace_period -- if > 0, enable trim-grace selection. A route-edit
+        that shrinks its route (a trim) is a setup move: on its own it
+        raises cost, so plain cost-based acceptance/selection discards it
+        before a follow-up extend can pay off. With trim grace, a trimming
+        mutation is force-accepted (one per grace window) and the bee is
+        protected from cost-based selection for ``trim_grace_period``
+        population-selection rounds, letting the trim survive into the next
+        generation. Set to 0 to keep the original cost-only selection.
     """
     if edit_model is None and getattr(bee_model, 'supports_trim_actions', False):
         edit_model = bee_model
@@ -470,6 +510,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         raise ValueError("worse_selection_uniform_mix must be in [0, 1]")
     if worse_selection_elite_count < 0:
         raise ValueError("worse_selection_elite_count must be >= 0")
+    if trim_grace_period < 0:
+        raise ValueError("trim_grace_period must be >= 0")
 
     if n_type3_bees > 0:
         # instantiate a random path-combining model
@@ -562,6 +604,11 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     cost_history[:, 0] = best_raw_costs
     use_worse_accept = worse_accept_temperature > 0
     use_worse_selection = worse_selection_temperature > 0
+    use_trim_grace = trim_grace_period > 0
+    # Per-bee countdown: > 0 means the bee was recently trimmed and is
+    # protected from cost-based selection until the counter expires.
+    trim_grace = torch.zeros((batch_size, n_bees), dtype=torch.long,
+                             device=dev)
 
     for iteration in tqdm(range(n_iterations), disable=silent):
         if use_worse_accept:
@@ -683,6 +730,25 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                 else:
                     worse_accepted = torch.zeros_like(better_idxs)
                     accepted_idxs = better_idxs
+
+                # Trim-grace: a mutation that shrinks its chosen route is a
+                # setup move. Force-accept it (one per grace window) so the
+                # trimmed network reaches the next generation, where a
+                # follow-up extend can recover and improve on it.
+                forced_trim_accepts = torch.zeros_like(better_idxs)
+                if use_trim_grace:
+                    new_modified_routes = new_bee_networks.gather(
+                        2, gather_idx).squeeze(2)
+                    old_route_lens = (old_modified_routes > -1).sum(-1)
+                    new_route_lens = (new_modified_routes > -1).sum(-1)
+                    is_trim_mutation = new_route_lens < old_route_lens
+                    forced_trim_accepts = is_trim_mutation & \
+                        (trim_grace == 0) & ~accepted_idxs
+                    accepted_idxs = accepted_idxs | forced_trim_accepts
+                    _record_trim_grace_stats(
+                        mutation_counts_out,
+                        forced_accepts=int(forced_trim_accepts.sum().item()))
+
                 _record_accepted_mutations(
                     mutation_counts_out,
                     mutation_types,
@@ -702,6 +768,12 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                 bee_adjustment_penalties[accepted_idxs] = \
                     new_bee_adjustment_penalties[accepted_idxs]
                 bee_metrics[accepted_idxs] = new_bee_metrics[accepted_idxs]
+
+                if use_trim_grace:
+                    # Arm the grace counter for any bee whose accepted
+                    # mutation trimmed its route.
+                    graced_now = accepted_idxs & is_trim_mutation
+                    trim_grace[graced_now] = trim_grace_period
 
             # do "backward pass"
 
@@ -731,6 +803,11 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                     uniform_mix=worse_selection_uniform_mix,
                     elite_count=worse_selection_elite_count,
                 )
+                if use_trim_grace:
+                    parent_idxs, n_protected = _apply_trim_grace_to_parents(
+                        parent_idxs, trim_grace, bee_idxs)
+                    _record_trim_grace_stats(
+                        mutation_counts_out, protected=n_protected)
                 _record_selection_stats(
                     mutation_counts_out, parent_idxs, bee_objective_costs)
 
@@ -743,6 +820,9 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                 bee_adjustment_penalties = \
                     bee_adjustment_penalties[batch_idxs[:, None], parent_idxs]
                 bee_metrics = bee_metrics[batch_idxs[:, None], parent_idxs]
+                if use_trim_grace:
+                    trim_grace = trim_grace[batch_idxs[:, None], parent_idxs]
+                    trim_grace = (trim_grace - 1).clamp_min(0)
                 continue
 
             # decide whether each bee is a recruiter or follower
@@ -760,6 +840,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
 
             if not are_recruiters.any():
                 # no recruiters, so make everyone keep their own network.
+                if use_trim_grace:
+                    trim_grace = (trim_grace - 1).clamp_min(0)
                 continue
 
             # decide which recruiter each follower will follow
@@ -776,6 +858,11 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
             recruiters[no_valid_recruiters] = bee_idxs
             recruiters[are_recruiters] = \
                 bee_idxs[None].expand(batch_size, -1)[are_recruiters]
+            if use_trim_grace:
+                recruiters, n_protected = _apply_trim_grace_to_parents(
+                    recruiters, trim_grace, bee_idxs)
+                _record_trim_grace_stats(
+                    mutation_counts_out, protected=n_protected)
             _record_selection_stats(
                 mutation_counts_out, recruiters, bee_objective_costs)
 
@@ -789,6 +876,9 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
             bee_adjustment_penalties = \
                 bee_adjustment_penalties[batch_idxs[:, None], recruiters]
             bee_metrics = bee_metrics[batch_idxs[:, None], recruiters]
+            if use_trim_grace:
+                trim_grace = trim_grace[batch_idxs[:, None], recruiters]
+                trim_grace = (trim_grace - 1).clamp_min(0)
 
         if sum_writer is not None:
             # log the various metrics
@@ -1513,6 +1603,7 @@ def main(cfg: DictConfig, tensors:dict):
         cfg.get('worse_selection_min_temperature', 0.001)
     worse_selection_uniform_mix = cfg.get('worse_selection_uniform_mix', 0.05)
     worse_selection_elite_count = cfg.get('worse_selection_elite_count', 1)
+    trim_grace_period = cfg.get('trim_grace_period', 0)
 
     if not use_neural_bees:
         bee_model = None
@@ -1563,7 +1654,8 @@ def main(cfg: DictConfig, tensors:dict):
             worse_selection_decay=worse_selection_decay,
             worse_selection_min_temperature=worse_selection_min_temperature,
             worse_selection_uniform_mix=worse_selection_uniform_mix,
-            worse_selection_elite_count=worse_selection_elite_count)
+            worse_selection_elite_count=worse_selection_elite_count,
+            trim_grace_period=trim_grace_period)
     routes = test_output[-1]
     metrics = test_output[-2]
     unserved_demand = test_output[-3]

@@ -1,5 +1,5 @@
 ppo:
-  n_iterations: 60
+  n_iterations: 30
   val_period: 10
   # n_epochs / minibatch_size baked in from the lc_improvement notebook;
   # gae_lambda lowered 1.0 -> 0.95 to trade a little bias for much lower
@@ -21,7 +21,7 @@ keep_rollout_on_device: true
 max_trim_actions_per_route: 1
 # When true, the value baseline shares the actor's GNN encoder
 # (stop-gradient) instead of a small hand-crafted feature MLP.
-shared_critic: true
+shared_critic: false
 baseline_lr: 0.0005
 # entropy_weight raised 0.0 -> 0.01 to keep exploration alive longer so the
 # policy does not collapse to the safe "halt" no-op before discovering the
