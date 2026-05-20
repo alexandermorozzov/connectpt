@@ -1,12 +1,15 @@
 ppo:
   n_iterations: 60
   val_period: 10
-  n_epochs: 1
-  minibatch_size: 32
+  # n_epochs / minibatch_size baked in from the lc_improvement notebook;
+  # gae_lambda lowered 1.0 -> 0.95 to trade a little bias for much lower
+  # advantage variance (helps the policy fine-tune toward good edits).
+  n_epochs: 2
+  minibatch_size: 256
   horizon: 200
   epsilon: 0.2
   use_gae: true
-  gae_lambda: 1.0
+  gae_lambda: 0.95
 
 trainer: ppo
 discount_rate: 1.0
@@ -16,14 +19,20 @@ return_best_routes: false
 zero_trim_reward: true
 keep_rollout_on_device: true
 max_trim_actions_per_route: 1
+# When true, the value baseline shares the actor's GNN encoder
+# (stop-gradient) instead of a small hand-crafted feature MLP.
+shared_critic: true
 baseline_lr: 0.0005
-entropy_weight: 0.0
+# entropy_weight raised 0.0 -> 0.01 to keep exploration alive longer so the
+# policy does not collapse to the safe "halt" no-op before discovering the
+# rare beneficial edits.
+entropy_weight: 0.01
 batch_size: 512
 reward_scale: 1.0
 edit_step_penalty: 0
 forced_halt_penalty: 0
-lr: 0.0016134816080499328
-decay: 0.0008404361781997002
+lr: 0.0003
+decay: 0.00001
 optimizer: Adam
 
 eval:

@@ -634,8 +634,21 @@ def _make_optimizer_from_cfg(model, cfg):
 
 
 class D3POValueModule:
+    """Multi-head critic for D3PO.
+
+    When ``actor_model`` is provided and exposes ``get_critic_features``,
+    the critic shares the actor's GNN encoder: it consumes pooled node
+    embeddings (graph + current route) plus global state features. This
+    gives the critic a rich, edit-aware state representation instead of a
+    handful of graph-level summary scalars. The encoder is used in a
+    stop-gradient manner — only the value head is trained here.
+
+    When ``actor_model`` is None, it falls back to the legacy hand-crafted
+    21-feature input (kept for backwards compatibility).
+    """
+
     def __init__(self, learning_rate=0.0005, n_objectives=3, decay=0.01,
-                 device=None):
+                 device=None, actor_model=None):
         self.learning_rate = learning_rate
         self.decay = decay
         self.n_objectives = int(n_objectives)
@@ -643,22 +656,36 @@ class D3POValueModule:
         self.loss_fn = torch.nn.MSELoss()
         if device is None:
             device = torch.device("cpu")
+        self.device = device
+        self.actor_model = actor_model
+        self._shared_critic = actor_model is not None and \
+            hasattr(actor_model, "get_critic_features")
+        # The shared-critic input dim depends on the encoder embed size and
+        # the global-feature count, both known only at first forward — so
+        # the value head is built lazily. The legacy path has a fixed dim.
+        self.model = None
+        self.optim = None
+        if not self._shared_critic:
+            self._build_model(self.legacy_input_dim)
+
+    @property
+    def legacy_input_dim(self):
+        return 1 + 1 + 2 + 2 + 4 + 11
+
+    def _build_model(self, input_dim):
         self.model = torch.nn.Sequential(
-            FeatureNorm(self.input_dim, 0.001),
-            get_mlp(3, self.input_dim * 2, in_dim=self.input_dim,
+            FeatureNorm(input_dim, 0.001),
+            get_mlp(3, input_dim * 2, in_dim=input_dim,
                     out_dim=self.n_objectives, dropout=0.0)
-        ).to(device)
+        ).to(self.device)
         self.optim = torch.optim.Adam(
             self.model.parameters(), lr=self.learning_rate,
             weight_decay=self.decay)
 
-    @property
-    def input_dim(self):
-        return 1 + 1 + 2 + 2 + 4 + 11
-
     def inputs_from_data(self, graph_data, cost_weights):
         dev = graph_data[STOP_KEY].x.device
-        input_data = torch.zeros(graph_data.num_graphs, self.input_dim,
+        input_data = torch.zeros(graph_data.num_graphs,
+                                 self.legacy_input_dim,
                                  dtype=torch.float, device=dev)
         input_data[:, 0] = graph_data.demand.sum(dim=(1, 2))
 
@@ -674,7 +701,10 @@ class D3POValueModule:
             dmd_weighted_times = dmd_graph.edge_attr[:, 0] * \
                 dmd_graph.edge_attr[:, 1]
             input_data[bi, 4] = dmd_weighted_times.mean()
-            input_data[bi, 5] = dmd_weighted_times.mean()
+            if dmd_graph.num_edges > 1:
+                input_data[bi, 5] = dmd_weighted_times.std()
+            else:
+                input_data[bi, 5] = 0
             x_dim = dl[STOP_KEY].x.shape[1]
             input_data[bi, 6:6 + x_dim] = dl[STOP_KEY].x.mean(dim=0)
 
@@ -687,12 +717,19 @@ class D3POValueModule:
 
         return input_data
 
-    def from_state(self, state):
+    def _features_from_state(self, state):
+        if self._shared_critic:
+            return self.actor_model.get_critic_features(state)
         input_data = self.inputs_from_data(
             state.graph_data, state.cost_weights)
         glob_feats = state.get_global_state_features()
         input_data[..., -glob_feats.shape[-1]:] = glob_feats
+        return input_data
 
+    def from_state(self, state):
+        input_data = self._features_from_state(state)
+        if self.model is None:
+            self._build_model(input_data.shape[-1])
         baseline = self.model(input_data)
         self._curr_estimate = baseline
         assert baseline.isfinite().all()
@@ -1489,10 +1526,12 @@ def _collect_lc_improvement_cfg_d3po_rollout(
 
 
 def _sample_neighbor_preferences(preferences, sigma):
-    if sigma > 0:
-        neighbor = preferences + torch.randn_like(preferences) * sigma
-    else:
-        neighbor = preferences.roll(shifts=1, dims=-1)
+    """Sample a distractor preference vector by perturbing ``preferences``
+    with Gaussian noise and re-projecting onto the simplex (paper Alg. 1
+    line 21). ``sigma == 0`` yields the original preferences (no
+    diversity pressure) — diversity should be disabled via
+    ``diversity_weight=0`` instead."""
+    neighbor = preferences + torch.randn_like(preferences) * sigma
     neighbor = neighbor.clamp_min(1e-6)
     return _normalize_preference_weights(neighbor)
 
@@ -1524,7 +1563,12 @@ def _estimate_d3po_diversity_loss(
     finally:
         states.set_cost_weights(saved_weights)
 
-    sampled_kl = (new_logits - neighbor_logits).abs()
+    # Schulman's k3 estimator of D_KL(pi(.|omega) || pi(.|omega')) for the
+    # sampled action: (r - 1) - log r, with r = pi(a|omega') / pi(a|omega).
+    # Unlike the previous abs(log-ratio) heuristic, k3 is unbiased for the
+    # KL, always >= 0 (matching the paper's D_KL >= 0), and lower variance.
+    log_ratio = (neighbor_logits - new_logits).clamp(-10.0, 10.0)
+    sampled_kl = log_ratio.exp() - 1.0 - log_ratio
     return (sampled_kl - target).pow(2).mean()
 
 
@@ -1912,8 +1956,10 @@ def train_lc_improvement_cfg_ppo(
     # global DEVICE, so set it before construction.
     from . import inductive_route_learning as il
     il.DEVICE = device
+    use_shared_critic = bool(_get_cfg_value(cfg, "shared_critic", True))
     value_module = il.NNBaseline(
-        learning_rate=float(_get_cfg_value(cfg, "baseline_lr", 0.0005))
+        learning_rate=float(_get_cfg_value(cfg, "baseline_lr", 0.0005)),
+        actor_model=model if use_shared_critic else None,
     )
 
     if (train_indices is None) != (val_indices is None):
@@ -2353,10 +2399,12 @@ def train_lc_improvement_cfg_d3po(
         d3po_cfg, "normalize_advantages_per_objective", True))
 
     optimizer = _make_optimizer_from_cfg(model, cfg)
+    use_shared_critic = bool(_get_cfg_value(cfg, "shared_critic", True))
     value_module = D3POValueModule(
         learning_rate=float(_get_cfg_value(cfg, "baseline_lr", 0.0005)),
         n_objectives=n_objectives,
         device=device,
+        actor_model=model if use_shared_critic else None,
     )
 
     if (train_indices is None) != (val_indices is None):

@@ -1626,11 +1626,46 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         assert (np_scores.abs() < 10**6).all(), "Nodepair scores are " \
             "blowing up, something wierd is going on!"
 
-        path_scores = tu.aggr_edges_over_sequences(path_seqs, 
+        path_scores = tu.aggr_edges_over_sequences(path_seqs,
                                                    np_scores[..., None], 'sum')
         path_scores.squeeze_(-1)
 
         return node_descs, node_pad_mask, np_embeds, path_scores
+
+    def get_critic_features(self, state: RouteGenBatchState):
+        """Pooled GNN node embeddings for a shared-encoder critic.
+
+        Returns ``[batch, 2 * embed_dim + n_global_features]``:
+        graph mean-pool || current-route mean-pool || global state feats.
+
+        The encoder forward is detached: value-function gradients do not
+        flow back into the actor's GNN. This gives the critic the same
+        rich state representation the actor sees, without destabilizing
+        the policy via mixed value/policy gradients.
+        """
+        with torch.no_grad():
+            node_descs, node_pad_mask, _, _ = self._encode_graph(state)
+        node_descs = node_descs.detach()
+
+        # Graph-level mean pool over valid (non-padding) nodes.
+        valid = (~node_pad_mask).to(node_descs.dtype).unsqueeze(-1)
+        graph_embed = (node_descs * valid).sum(dim=1) / \
+            valid.sum(dim=1).clamp_min(1.0)
+
+        # Pool the embeddings of the nodes on the route currently being
+        # edited so the critic sees the specific route, not just the graph.
+        routes = state.current_routes
+        route_mask = (routes >= 0)
+        safe_routes = routes.clamp_min(0)
+        gather_idx = safe_routes.unsqueeze(-1).expand(
+            -1, -1, node_descs.shape[-1])
+        route_node_descs = torch.gather(node_descs, 1, gather_idx)
+        route_valid = route_mask.to(node_descs.dtype).unsqueeze(-1)
+        route_embed = (route_node_descs * route_valid).sum(dim=1) / \
+            route_valid.sum(dim=1).clamp_min(1.0)
+
+        global_feats = state.get_global_state_features().to(node_descs.dtype)
+        return torch.cat([graph_embed, route_embed, global_feats], dim=-1)
 
     def _get_extension_scores(self, state: RouteGenBatchState, route_lens, 
                               are_on_routes, all_paths, nodepair_embeds, 

@@ -85,29 +85,52 @@ class RollingBaseline:
 
 
 class NNBaseline:
-    def __init__(self, learning_rate=0.0005, decay=0.01):
+    """Scalar value baseline.
+
+    When ``actor_model`` is provided and exposes ``get_critic_features``,
+    the baseline shares the actor's GNN encoder (stop-gradient) and
+    consumes pooled node embeddings instead of hand-crafted summary
+    scalars — a far richer, edit-aware state representation. The value
+    head input dim is then known only at first forward, so the head is
+    built lazily. When ``actor_model`` is None it uses the legacy
+    21-feature input (unchanged for construction PPO).
+    """
+
+    def __init__(self, learning_rate=0.0005, decay=0.01, actor_model=None):
         self.learning_rate = learning_rate
         self.decay = decay
         self.optim = None
         self.model = None
         self._curr_estimate = None
         self.loss_fn = torch.nn.MSELoss()
+        self.actor_model = actor_model
+        self._shared_critic = actor_model is not None and \
+            hasattr(actor_model, "get_critic_features")
+        if not self._shared_critic:
+            self._build_model(self.legacy_input_dim)
+
+    def _build_model(self, input_dim):
         self.model = torch.nn.Sequential(
-            FeatureNorm(self.input_dim, 0.001),
-            get_mlp(3, self.input_dim*2, in_dim=self.input_dim, out_dim=1, 
+            FeatureNorm(input_dim, 0.001),
+            get_mlp(3, input_dim * 2, in_dim=input_dim, out_dim=1,
                     dropout=0.0)
         ).to(DEVICE)
         self.optim = torch.optim.Adam(self.model.parameters(),
-                                        lr=self.learning_rate, 
-                                        weight_decay=self.decay)
+                                      lr=self.learning_rate,
+                                      weight_decay=self.decay)
 
     @property
-    def input_dim(self):
+    def legacy_input_dim(self):
         # total demand, num demand edges, mean and std edge demand,
-         # mean and std edge time weighted by demand on edge, 
+         # mean and std edge time weighted by demand on edge,
          # max num of mean stop features, # routes so far and # routes left,
          # weights of the two cost components
         return 1 + 1 + 2 + 2 + 4 + 11
+
+    @property
+    def input_dim(self):
+        # Back-compat alias for the legacy hand-crafted feature dim.
+        return self.legacy_input_dim
 
     def update(self, costs):
         """Run a critic update step.
@@ -152,7 +175,10 @@ class NNBaseline:
             dmd_weighted_times = dmd_graph.edge_attr[:, 0] * \
                 dmd_graph.edge_attr[:, 1]
             input_data[bi, 4] = dmd_weighted_times.mean()
-            input_data[bi, 5] = dmd_weighted_times.mean()
+            if dmd_graph.num_edges > 1:
+                input_data[bi, 5] = dmd_weighted_times.std()
+            else:
+                input_data[bi, 5] = 0
             x_dim = dl[STOP_KEY].x.shape[1]
             input_data[bi, 6:6+x_dim] = dl[STOP_KEY].x.mean(dim=0)
 
@@ -172,13 +198,19 @@ class NNBaseline:
         self.model[0].running_mean[-15:] = 0
         self.model[0].running_var[-15:] = 1
     
-    def from_state(self, state):
-        # set up the input data        
-        input_data = self.inputs_from_data(state.graph_data, 
+    def _features_from_state(self, state):
+        if self._shared_critic:
+            return self.actor_model.get_critic_features(state)
+        input_data = self.inputs_from_data(state.graph_data,
                                            state.cost_weights)
         glob_feats = state.get_global_state_features()
         input_data[..., -glob_feats.shape[-1]:] = glob_feats
-        
+        return input_data
+
+    def from_state(self, state):
+        input_data = self._features_from_state(state)
+        if self.model is None:
+            self._build_model(input_data.shape[-1])
         baseline = self.model(input_data).squeeze(-1)
         self._curr_estimate = baseline
 
