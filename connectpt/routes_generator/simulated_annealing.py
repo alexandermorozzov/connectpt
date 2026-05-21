@@ -84,6 +84,8 @@ def simulated_annealing_with_reheating(state, cost_obj, init_network,
     """
     schedule = _resolve_schedule(schedule)
     dev = state.device
+    # keep the initial network on the algorithm's device
+    init_network = init_network.to(dev)
     # get all shortest paths
     shortest_paths, _ = reconstruct_all_paths(state.nexts)
     demand = torch.nn.functional.pad(state.demand, (0, 1, 0, 1))

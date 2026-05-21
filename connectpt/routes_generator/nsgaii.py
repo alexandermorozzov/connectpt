@@ -76,6 +76,13 @@ class NSGAII:
 
         assert state.batch_size == 1, "NSGA-II only supports batch_size=1"
 
+        # NSGA-II (Husselmann init, crossover, the hs.* mutators) mixes the
+        # state's graph tensors with CPU-built network tensors, so it must run
+        # on CPU to avoid cross-device errors. The cost objective is stateless
+        # and evaluates fine on CPU.
+        if state.device.type != 'cpu':
+            state = state.to_device('cpu')
+
         # Initialize population
         pop = self.get_init_population(state, init_mode)
 
@@ -103,7 +110,7 @@ class NSGAII:
         # initialize the population state
         exp_states = [state] * self.pop_size
         pop_states = RouteGenBatchState.batch_from_list(exp_states)
-        pop_states = pop_states.to_device(DEVICE)
+        pop_states = pop_states.to_device(state.device)
         init_weights = self.cost_obj.sample_weights(self.pop_size)
         pop_states.set_cost_weights(init_weights)
 
@@ -165,7 +172,7 @@ class NSGAII:
 
             # Compute costs for children and mutants
             child_states = pop_states.clone()
-            child_states.replace_routes(mutated_networks.to(DEVICE))
+            child_states.replace_routes(mutated_networks.to(state.device))
             child_costs, has_violation = self._get_costs(child_states)
             # replace invalid mutants with un-mutated children
             has_violation = has_violation.cpu().numpy()
@@ -286,8 +293,8 @@ class NSGAII:
                 batch_size = batch_ntwks.shape[0]
                 cost_states = [state] * batch_size
                 cost_states = RouteGenBatchState.batch_from_list(cost_states)
-                cost_states = cost_states.to_device(DEVICE)
-                cost_states.replace_routes(batch_ntwks.to(DEVICE))
+                cost_states = cost_states.to_device(state.device)
+                cost_states.replace_routes(batch_ntwks.to(state.device))
                 costs, are_invalid = self._get_costs(cost_states)
                 costs = costs.cpu().numpy()
                 zipped = zip(batch_ntwks.cpu(), costs, are_invalid)
@@ -503,7 +510,9 @@ def husselmann_init(state: RouteGenBatchState, n_networks=2000,
     """
     # first, do the K-shortest-paths maximizing missing vertices, with K=50.
     n_nodes = state.max_n_nodes
-    weighted_adj_mat = state.street_adj[0].clone()
+    # husselmann_init builds CPU network tensors throughout; keep the graph
+    # tensors on CPU too so parallel_crossover / repair_network stay consistent.
+    weighted_adj_mat = state.street_adj[0].clone().cpu()
     weighted_adj_mat[weighted_adj_mat.isinf()] = 0
     graph = nx.from_numpy_array(weighted_adj_mat.cpu().numpy())
     dmd_mat = state.demand[0].cpu().numpy()

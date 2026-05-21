@@ -815,8 +815,13 @@ class RouteGenBatchState:
                     # partially initialized network
                     continue
                 if length < 2:
-                    # this is an invalid route
-                    log.warn('invalid route!')
+                    # A route with a single stop is degenerate: drop it from
+                    # the finished-route list (the cost objective scores the
+                    # resulting network as constraint-violating). This happens
+                    # routinely as a transient while heuristic search (BCO /
+                    # SA / GA / HH / NSGA-II) explores candidate networks, so
+                    # it is logged at debug level rather than spamming WARNING.
+                    log.debug('dropping degenerate route with fewer than 2 stops')
                     continue
                 self._finished_routes[bi].append(route[:length])
     

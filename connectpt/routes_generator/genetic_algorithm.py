@@ -147,7 +147,9 @@ def run(state, cost_obj, pop_size=10, shorten_prob=0.2, n_iterations=400,
     for iteration in tqdm(range(n_iterations), disable=silent):
         set_population = [set(individual) for individual in population]
         # crossover
-        first_parents = torch.arange(pop_size, device=dev)
+        # CPU tensor: i1 only indexes Python lists and is compared with the
+        # CPU-side i2 below -- keeping it on `dev` would mismatch i2.
+        first_parents = torch.arange(pop_size)
 
         children = []
         # perform crossover

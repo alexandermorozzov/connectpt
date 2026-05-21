@@ -122,6 +122,10 @@ def hyperheuristic(state, cost_obj, f_0, delta_F=None, duration_s=None,
     max_route_len = state.max_route_len
 
     if init_network is not None:
+        # HH runs on CPU internally; init_network arrives on the caller's
+        # device (possibly CUDA), so move it to CPU before splicing it into
+        # the CPU `tmp` buffer.
+        init_network = init_network.cpu()
         tmp = torch.full((batch_size, n_routes, max_n_nodes), -1)
         tmp[:, :, :init_network.shape[-1]] = init_network
         init_network = tmp
