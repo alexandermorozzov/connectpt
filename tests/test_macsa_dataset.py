@@ -11,7 +11,7 @@ from connectpt.routes_generator.citygraph_dataset import (
 )
 
 
-MACSA_ROOT = Path(__file__).resolve().parents[1] / "examples" / "data" / "MACSA_data"
+MACSA_ROOT = Path(__file__).resolve().parents[1] / "datasets" / "MACSA_data"
 MANDL_8_DIR = MACSA_ROOT / "mandl_8"
 
 

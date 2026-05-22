@@ -4,5 +4,5 @@ min_route_len: 2
 max_route_len: 6
 dataset:
   type: mumford
-  path: /root/connectpt/data
+  path: /root/connectpt/datasets/benchmark
   city: MandlTrolleybus

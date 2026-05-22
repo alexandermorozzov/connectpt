@@ -1,0 +1,401 @@
+"""SA / GA / hyper-heuristic / NSGA-II runners and the cross-benchmark sweep.
+
+Extracted verbatim from the notebook's §9b / §9c / §12 cells -- the function
+and config definitions only; the execution that drives each section stays in
+the notebook. Helper names resolve via ``from .helpers import *``; each section
+keeps its own connectpt-library imports.
+"""
+from .context import *  # noqa: F401,F403
+from .params import *  # noqa: F401,F403
+from .helpers import *  # noqa: F401,F403
+from . import plots as _plots
+
+
+def load_benchmark_tensors(city_name: str = CITY_NAME) -> dict:
+    """Load a benchmark city's coords / travel-times / demand text files."""
+    node_locs = torch.tensor(
+        np.genfromtxt(BENCHMARK_DIR / f"{city_name}Coords.txt", skip_header=1),
+        dtype=torch.float32,
+    )
+    street_adj = torch.tensor(
+        np.genfromtxt(BENCHMARK_DIR / f"{city_name}TravelTimes.txt"),
+        dtype=torch.float32,
+    ) * 60
+    demand = torch.tensor(
+        np.genfromtxt(BENCHMARK_DIR / f"{city_name}Demand.txt"),
+        dtype=torch.float32,
+    )
+    return {"node_locs": node_locs, "street_adj": street_adj, "demand": demand}
+
+
+# === from the notebook's section 9b (Baseline Optimizers) ===
+# Baseline optimizers ported from AHolliday/transit_learning:
+# simulated annealing, a genetic algorithm and a selection hyper-heuristic.
+# All three are purely heuristic (no neural model). They are run on Mumford0
+# from the same LC-seeded initial routes as the BCO experiments above, via the
+# shared `test_method` contract, so the table is directly comparable.
+import pandas as pd
+from IPython.display import display
+from omegaconf import OmegaConf
+
+from connectpt.routes_generator import (
+    simulated_annealing_with_reheating,
+    genetic_algorithm,
+    hyperheuristic,
+)
+
+# Compute budgets (tunable). SA does one cost evaluation per iteration; GA does
+# ~population_size per iteration; HH does one per completed heuristic sequence.
+SA_N_ITERATIONS = 4000
+GA_N_ITERATIONS = 200
+GA_POP_SIZE = 10
+HH_N_ITERATIONS = 2000
+
+
+def _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len):
+    return [
+        "+eval=mumford0",
+        "++eval.dataset.type=tensor",
+        f"++eval.n_routes={n_routes}",
+        f"++eval.min_route_len={min_route_len}",
+        f"++eval.max_route_len={max_route_len}",
+        f"++experiment.cost_function.kwargs.demand_time_weight={DEMAND_TIME_WEIGHT}",
+        f"++experiment.cost_function.kwargs.route_time_weight={ROUTE_TIME_WEIGHT}",
+        f"++experiment.cost_function.kwargs.median_connectivity_weight={MEDIAN_CONNECTIVITY_WEIGHT}",
+        f"++run_name={safe_run_name(run_name)}",
+    ]
+
+
+def _compose_baseline_cfg(config_name, overrides):
+    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
+        cfg = compose(config_name=config_name, overrides=overrides)
+    cfg.batch_size = 1
+    return cfg
+
+
+def build_sa_cfg(run_name, n_routes, min_route_len, max_route_len,
+                 n_iterations=SA_N_ITERATIONS):
+    overrides = _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len)
+    overrides.append(f"++alg_args.n_iterations={n_iterations}")
+    return _compose_baseline_cfg("sa_mumford", overrides)
+
+
+def build_ga_cfg(run_name, n_routes, min_route_len, max_route_len,
+                 n_iterations=GA_N_ITERATIONS, population_size=GA_POP_SIZE):
+    overrides = _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len)
+    overrides.append(f"++n_iterations={n_iterations}")
+    overrides.append(f"++population_size={population_size}")
+    return _compose_baseline_cfg("ga_mumford", overrides)
+
+
+def build_hh_cfg(run_name, n_routes, min_route_len, max_route_len,
+                 n_iterations=HH_N_ITERATIONS):
+    overrides = _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len)
+    overrides.append(f"++n_iterations={n_iterations}")
+    return _compose_baseline_cfg("hh_mumford", overrides)
+
+
+def _run_baseline(method_fn, cfg, init_routes, prefix, method_kwargs, *, tensors=None):
+    # tensors=None -> Mumford0 dataloader; tensors=<dict> -> explicit tensor
+    # dataset (mirrors the run_bco signature). The initial routes are passed
+    # through test_method's `routes_tensor` + a "tensor" init config.
+    if tensors is None:
+        dataloader = make_test_dataloader(cfg.eval.dataset)
+    else:
+        dataloader = make_tensor_dataloader(cfg.eval.dataset, tensors)
+    device, run_name, _, cost_obj, _ = lrnu.process_standard_experiment_cfg(
+        cfg, run_name_prefix=prefix, weights_required=False)
+    output = lrnu.test_method(
+        method_fn,
+        dataloader,
+        cfg.eval,
+        OmegaConf.create({"method": "tensor"}),
+        cost_obj,
+        silent=True,
+        device=device,
+        return_routes=True,
+        routes_tensor=init_routes,
+        **method_kwargs,
+    )
+    _, _, unserved_demand, metrics, routes = output
+    routes_tensor = as_route_tensor(routes)
+    metrics = add_cost_breakdown_to_metrics(
+        metrics, dataloader, cfg.eval, cost_obj, routes_tensor, device)
+    return run_name, metrics, unserved_demand, routes_tensor
+
+
+def run_sa(cfg, init_routes, *, tensors=None, run_name_scope=""):
+    return _run_baseline(
+        simulated_annealing_with_reheating, cfg, init_routes,
+        f"{run_name_scope}sa_",
+        OmegaConf.to_container(cfg.alg_args, resolve=True),
+        tensors=tensors)
+
+
+def run_ga(cfg, init_routes, *, tensors=None, run_name_scope=""):
+    return _run_baseline(
+        genetic_algorithm, cfg, init_routes, f"{run_name_scope}ga_",
+        dict(pop_size=int(cfg.population_size),
+             n_iterations=int(cfg.n_iterations),
+             shorten_prob=float(cfg.get("shorten_prob", 0.2)),
+             force_linking_unlinked=bool(cfg.get("force_linking_unlinked", False))),
+        tensors=tensors)
+
+
+def run_hh(cfg, init_routes, *, tensors=None, run_name_scope=""):
+    return _run_baseline(
+        hyperheuristic, cfg, init_routes, f"{run_name_scope}hh_",
+        dict(f_0=float(cfg.f_0), n_steps=int(cfg.n_iterations)),
+        tensors=tensors)
+
+
+# === from the notebook's section 9c (NSGA-II) ===
+# NSGA-II multi-objective optimizer ported from AHolliday/transit_learning.
+# Unlike SA/GA/HH it does not fit the test_method (state, cost, init) ->
+# (state, history) contract: it is a class whose .run() returns a Pareto front.
+# We run it in the pure-heuristic Husselmann configuration, reduce the Pareto
+# front to one solution (minimum weighted-sum cost under the table weights),
+# and evaluate that solution with the same MyCostModule the other rows use.
+import numpy as np
+import matplotlib.pyplot as plt
+
+import connectpt.routes_generator.nsgaii as _nsgaii_mod
+from connectpt.routes_generator import NSGAII, RouteGenBatchState
+from connectpt.routes_generator import heuristics as _hs
+
+# Compute budgets (tunable). NSGA-II is the heaviest baseline: the Husselmann
+# initialisation does K-shortest-paths over every node pair, and each iteration
+# evaluates pop_size networks. Keep these modest for a notebook run.
+NSGAII_N_ITERATIONS = 30
+NSGAII_POP_SIZE = 40
+
+
+def build_nsgaii_cfg(run_name, n_routes, min_route_len, max_route_len,
+                     n_iterations=NSGAII_N_ITERATIONS, pop_size=NSGAII_POP_SIZE):
+    overrides = [
+        "+eval=mumford0",
+        "++eval.dataset.type=tensor",
+        f"++eval.n_routes={n_routes}",
+        f"++eval.min_route_len={min_route_len}",
+        f"++eval.max_route_len={max_route_len}",
+        f"++run_name={safe_run_name(run_name)}",
+        f"++n_iterations={n_iterations}",
+        f"++pop_size={pop_size}",
+    ]
+    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
+        cfg = compose(config_name="nsgaii_mumford", overrides=overrides)
+    cfg.batch_size = 1
+    return cfg
+
+
+def run_nsgaii(cfg, *, tensors=None, run_name_scope=""):
+    if tensors is None:
+        dataloader = make_test_dataloader(cfg.eval.dataset)
+    else:
+        dataloader = make_tensor_dataloader(cfg.eval.dataset, tensors)
+    device, run_name, _, cost_obj, _ = lrnu.process_standard_experiment_cfg(
+        cfg, run_name_prefix=f"{run_name_scope}nsgaii_", weights_required=False)
+    # NSGA-II reads its device from a module global (the ancestor set it in
+    # the Hydra main()); point it at the device we just resolved.
+    _nsgaii_mod.DEVICE = device
+    data = next(iter(dataloader))
+    if device.type != "cpu":
+        data = data.cuda()
+    state = RouteGenBatchState(data, cost_obj, cfg.eval.n_routes,
+                               cfg.eval.min_route_len, cfg.eval.max_route_len)
+    mutators = [_hs.add_terminal, _hs.delete_terminal, _hs.add_inside,
+                _hs.delete_inside, _hs.invert_nodes, _hs.exchange_routes,
+                _hs.replace_node, _hs.donate_node]
+    if cfg.get("use_cost_based_heuristics", True):
+        mutators += [_hs.cost_based_grow, _hs.cost_based_trim]
+    optimizer = NSGAII(
+        cost_obj, init_models=[], mutators=mutators,
+        n_iterations=int(cfg.n_iterations), pop_size=int(cfg.pop_size),
+        p_crossover=float(cfg.p_crossover), p_mutation=float(cfg.p_mutation),
+        mutator_p_t=float(cfg.mutator_p_t),
+        batch_size=int(cfg.get("gen_batch_size", cfg.pop_size)))
+    with torch.no_grad():
+        output = optimizer.run(state, cfg.get("init_mode", "husselmann"),
+                               sum_writer=None)
+    return run_name, output
+
+
+def reduce_pareto_front(output, demand_weight, route_weight):
+    """Collapse the Pareto front to its lowest weighted-sum member.
+
+    NSGA-II objectives are (mean demand time, total route time)."""
+    pareto = output["pareto_pop"]
+    return min(pareto, key=lambda m: (demand_weight * float(m["cost"][0])
+                                      + route_weight * float(m["cost"][1])))
+
+
+# === from the notebook's section 12 (Benchmark Sweep) ===
+# Benchmark sweep: NX-heuristic init -> BCO variants / RL / SA / GA / HH / NSGA-II.
+import gc
+
+from connectpt.routes_generator import CityGraphData, build_nx_heuristic_routes
+
+BENCHMARK_SPECS = [
+    {"city": "Mandl",    "n_routes": 6,  "min_route_len": 2,  "max_route_len": 8},
+    {"city": "Mumford0", "n_routes": 12, "min_route_len": 2,  "max_route_len": 15},
+    # {"city": "Mumford1", "n_routes": 15, "min_route_len": 10, "max_route_len": 30},
+    # {"city": "Mumford2", "n_routes": 56, "min_route_len": 10, "max_route_len": 22},
+    # {"city": "Mumford3", "n_routes": 60, "min_route_len": 12, "max_route_len": 25},
+]
+BENCHMARK_NX_SEED = 0
+BENCHMARK_RUN_RL_IMPROVEMENT = RUN_RL_ONLY_BASELINE
+BENCHMARK_RUN_NSGAII = True            # NSGA-II is slow on Mumford2/3
+REUSE_EXISTING_BENCHMARK_SWEEP = True
+
+# requested metrics only: Cp (ATT) | Co (RTT) | d0 | d1 | d2 | d_un | cost
+BENCHMARK_METRIC_KEYS = {
+    "Cp (ATT)": "ATT",
+    "Co (RTT)": "RTT",
+    "d0": "$d_0$",
+    "d1": "$d_1$",
+    "d2": "$d_2$",
+    "d_un": "$d_{un}$",
+    "cost": "cost",
+}
+
+
+def summarize_benchmark_run(benchmark, method, metrics):
+    row = {"benchmark": benchmark, "method": method}
+    for label, key in BENCHMARK_METRIC_KEYS.items():
+        row[label] = metric_value(metrics, key)
+    return row
+
+
+def load_benchmark_graph(spec):
+    """Load a benchmark city and build its NX-heuristic initial route set."""
+    tensors = load_benchmark_tensors(spec["city"])
+    graph = CityGraphData.from_tensors(
+        tensors["node_locs"], tensors["street_adj"], tensors["demand"],
+        pos_only=False)
+    init_routes = build_nx_heuristic_routes(
+        graph, num_routes=spec["n_routes"], min_len=spec["min_route_len"],
+        max_len=spec["max_route_len"], seed=BENCHMARK_NX_SEED)
+    return tensors, init_routes
+
+
+def _record(rows, city, method, run_fn, routes_out=None, metrics_out=None):
+    """Run run_fn(); on failure log it and append an all-NaN row so one bad
+    method/benchmark does not abort the whole sweep.
+
+    ``run_fn()`` returns the full runner tuple ``(run_name, metrics, unserved,
+    routes, ...)``; the metrics land in the rows table and -- when
+    ``routes_out`` / ``metrics_out`` are passed -- the route tensor and full
+    metrics dict are kept under ``(city, method)`` for the route figures.
+
+    The finally-block frees GPU memory after every method. gc.collect()
+    breaks the reference cycle that a caught exception's traceback holds
+    over the failed run's frames -- otherwise that run's CUDA tensors stay
+    alive. torch.cuda.empty_cache() returns the freed blocks so the next
+    method gets a clean, de-fragmented allocator. Without this an OOM in
+    one method poisons every method after it."""
+    try:
+        result = run_fn()
+        rows.append(summarize_benchmark_run(city, method, result[1]))
+        if routes_out is not None:
+            routes_out[(city, method)] = as_route_tensor(result[3])
+        if metrics_out is not None:
+            metrics_out[(city, method)] = result[1]
+    except Exception as exc:
+        print(f"  [{city}] {method} FAILED: {exc}")
+        rows.append({"benchmark": city, "method": method,
+                     **{label: float("nan") for label in BENCHMARK_METRIC_KEYS}})
+    finally:
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+def run_benchmark_sweep(specs=None):
+    """Cross-benchmark sweep. Returns a dict ``{rows_df, routes, metrics,
+    specs}``: ``rows_df`` is the metric table, ``routes`` / ``metrics`` are
+    keyed by ``(city, method)`` for the route-comparison figures."""
+    if specs is None:
+        specs = BENCHMARK_SPECS
+    rows = []
+    routes_by_method = {}
+    metrics_by_method = {}
+    for spec in specs:
+        city = spec["city"]
+        n_routes = spec["n_routes"]
+        min_len = spec["min_route_len"]
+        max_len = spec["max_route_len"]
+        print(f"=== {city}: n_routes={n_routes} min={min_len} max={max_len} ===")
+        try:
+            tensors, init_routes = load_benchmark_graph(spec)
+        except Exception as exc:
+            print(f"  [{city}] could not build NX-heuristic init: {exc}")
+            continue
+        print(f"  NX-heuristic init routes: {tuple(init_routes.shape)}")
+
+        # NX-heuristic initial routes (reference baseline)
+        _record(rows, city, "NX-heuristic (initial)", lambda: _run_baseline(
+            None, build_sa_cfg(f"{city}_nxh_init", n_routes, min_len, max_len),
+            init_routes, f"{city}_nxh_init_", {}, tensors=tensors),
+            routes_by_method, metrics_by_method)
+
+        # BCO variants
+        for variant in BCO_VARIANTS:
+            def _bco(variant=variant):
+                cfg = build_bco_cfg(
+                    run_name=f"{city}_{variant['run_name']}",
+                    n_routes=n_routes, min_route_len=min_len,
+                    max_route_len=max_len,
+                    use_neural_bees=variant["use_neural_bees"],
+                    n_type1_bees=variant["n_type1_bees"],
+                    n_type2_bees=variant["n_type2_bees"],
+                    n_type4_bees=variant["n_type4_bees"],
+                    n_type5_bees=variant.get("n_type5_bees", 0),
+                    n_type6_bees=variant.get("n_type6_bees", 0),
+                    n_type7_bees=variant.get("n_type7_bees", 0),
+                )
+                return run_bco(cfg, init_routes, tensors=tensors,
+                               run_name_scope=f"{city}_")
+            _record(rows, city, f"BCO: {variant['summary_label']}", _bco,
+                    routes_by_method, metrics_by_method)
+
+        if BENCHMARK_RUN_RL_IMPROVEMENT:
+            # RL improvement only
+            _record(rows, city, "RL improvement only", lambda: run_rl_improvement(
+                init_routes, run_name=f"{city}_rl_only", n_routes=n_routes,
+                min_route_len=min_len, max_route_len=max_len, tensors=tensors),
+                routes_by_method, metrics_by_method)
+
+        # simulated annealing / genetic algorithm / hyper-heuristics
+        _record(rows, city, "Simulated annealing", lambda: run_sa(
+            build_sa_cfg(f"{city}_sa", n_routes, min_len, max_len),
+            init_routes, tensors=tensors, run_name_scope=f"{city}_"),
+            routes_by_method, metrics_by_method)
+        _record(rows, city, "Genetic algorithm", lambda: run_ga(
+            build_ga_cfg(f"{city}_ga", n_routes, min_len, max_len),
+            init_routes, tensors=tensors, run_name_scope=f"{city}_"),
+            routes_by_method, metrics_by_method)
+        _record(rows, city, "Hyper-heuristics", lambda: run_hh(
+            build_hh_cfg(f"{city}_hh", n_routes, min_len, max_len),
+            init_routes, tensors=tensors, run_name_scope=f"{city}_"),
+            routes_by_method, metrics_by_method)
+
+        # NSGA-II (multi-objective; builds its own population, ignores init)
+        if BENCHMARK_RUN_NSGAII:
+            def _nsgaii():
+                _, output = run_nsgaii(
+                    build_nsgaii_cfg(f"{city}_nsgaii", n_routes, min_len, max_len),
+                    tensors=tensors, run_name_scope=f"{city}_")
+                best = reduce_pareto_front(
+                    output, DEMAND_TIME_WEIGHT, ROUTE_TIME_WEIGHT)
+                routes = best["routes"]
+                if routes.ndim == 2:
+                    routes = routes[None]
+                return _run_baseline(
+                    None,
+                    build_sa_cfg(f"{city}_nsgaii_eval", n_routes, min_len, max_len),
+                    routes, f"{city}_nsgaii_eval_", {}, tensors=tensors)
+            _record(rows, city, "NSGA-II", _nsgaii,
+                    routes_by_method, metrics_by_method)
+
+    return {"rows_df": pd.DataFrame(rows), "routes": routes_by_method,
+            "metrics": metrics_by_method, "specs": list(specs)}

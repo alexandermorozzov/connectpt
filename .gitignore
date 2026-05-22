@@ -71,3 +71,6 @@ examples/route_generator/lc_improvement_outputs/improvement_lc_improvement_trim.
 examples/route_generator/lc_improvement_outputs/old_improvement_lc_improvement_trim_val_routes.pt
 examples/route_generator/lc_improvement_outputs/old_improvement_lc_improvement_trim.pt
 examples/route_generator/lc_improvement_outputs/improvement_lc_improvement_trim_val_routes.pt
+
+# Large generated datasets
+datasets/raw_graphs_1000.pkl

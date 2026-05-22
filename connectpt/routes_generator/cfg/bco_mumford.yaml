@@ -4,7 +4,7 @@ n_type4_bees: 0
 n_type5_bees: 0
 n_type6_bees: 0
 n_type7_bees: 0
-n_iterations: 150
+n_iterations: 20
 batch_size: 10
 force_linking_unlinked: false
 adjustment_degree_weight: 0.0
@@ -30,6 +30,9 @@ worse_selection_elite_count: 1
 # from cost-based selection for this many population-selection rounds, so a
 # follow-up extend can build on the trim. 0 keeps cost-only selection.
 trim_grace_period: 0
+# trim_grace_period the notebook worse-accept experiment applies when
+# worse-acceptance is ON (eval_lib re-exports it as BCO_TRIM_GRACE_PERIOD).
+worse_accept_trim_grace_period: 3
 
 defaults:
   - _self_
