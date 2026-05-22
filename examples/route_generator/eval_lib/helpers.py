@@ -493,21 +493,29 @@ def run_rl_improvement(
     if route_batch.ndim == 2:
         route_batch = route_batch.unsqueeze(0)
     eval_weights = cost_obj.get_weights(device)
-    rollout_output = rollout_lc_improvement(
-        edit_model,
-        cost_obj,
-        graph_batch,
-        route_batch,
-        cfg.eval.min_route_len,
-        cfg.eval.max_route_len,
-        greedy=True,
-        cost_weights=eval_weights,
-        return_actions=True,
-        force_nonhalt_first_step=force_nonhalt_first_step,
-        max_route_edit_steps=max_route_edit_steps,
-        max_trim_actions_per_route=max_trim_actions_per_route,
-        return_best_routes=return_best_routes,
-    )
+    # Pure-evaluation rollout: run under no_grad. Without it PyTorch builds a
+    # full autograd graph -- every edit step over every route keeps its GNN /
+    # attention activations alive for a backward pass that never happens. On
+    # the large benchmark graphs (Mumford2 / Mumford3: ~60 routes over many
+    # nodes) that autograd graph is what OOMs. The batch is already a single
+    # graph (cfg.batch_size = 1), so shrinking the batch would not help -- the
+    # memory is the per-graph rollout graph, not multiple graphs.
+    with torch.no_grad():
+        rollout_output = rollout_lc_improvement(
+            edit_model,
+            cost_obj,
+            graph_batch,
+            route_batch,
+            cfg.eval.min_route_len,
+            cfg.eval.max_route_len,
+            greedy=True,
+            cost_weights=eval_weights,
+            return_actions=True,
+            force_nonhalt_first_step=force_nonhalt_first_step,
+            max_route_edit_steps=max_route_edit_steps,
+            max_trim_actions_per_route=max_trim_actions_per_route,
+            return_best_routes=return_best_routes,
+        )
     final_state = rollout_output[0]
     routes_tensor = as_route_tensor(final_state.routes)
     # rollout_output[5:7] = (route_actions, route_action_kinds) when
