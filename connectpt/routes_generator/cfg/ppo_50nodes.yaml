@@ -1,5 +1,5 @@
 ppo:
-  n_iterations: 2
+  n_iterations: 200
   val_period: 10
   # n_epochs / minibatch_size baked in from the lc_improvement notebook;
   # gae_lambda lowered 1.0 -> 0.95 to trade a little bias for much lower

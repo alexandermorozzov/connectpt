@@ -44,18 +44,22 @@ from connectpt.routes_generator import (
     hyperheuristic,
 )
 
-# Compute budgets (tunable). SA does one cost evaluation per iteration; GA does
-# ~population_size per iteration; HH does one per completed heuristic sequence.
-SA_N_ITERATIONS = 4000
+# Compute budgets. SA / HH counts (and the NSGA-II budget below) are the
+# AHolliday/transit_learning reference values -- cfg/sa_linear.yaml (40000),
+# cfg/hyperheuristic.yaml (40000), cfg/nsgaii_husselmann.yaml (2000 / pop 400)
+# -- halved. GA has no reference cfg in that repo, so it keeps a notebook
+# default.
+SA_N_ITERATIONS = 20000
 GA_N_ITERATIONS = 200
 GA_POP_SIZE = 10
-HH_N_ITERATIONS = 2000
+HH_N_ITERATIONS = 20000
 
 
 def _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len):
     return [
         "+eval=mumford0",
         "++eval.dataset.type=tensor",
+        "++experiment.logdir=null",  # no empty TensorBoard run dir for eval runs
         f"++eval.n_routes={n_routes}",
         f"++eval.min_route_len={min_route_len}",
         f"++eval.max_route_len={max_route_len}",
@@ -163,11 +167,12 @@ import connectpt.routes_generator.nsgaii as _nsgaii_mod
 from connectpt.routes_generator import NSGAII, RouteGenBatchState
 from connectpt.routes_generator import heuristics as _hs
 
-# Compute budgets (tunable). NSGA-II is the heaviest baseline: the Husselmann
-# initialisation does K-shortest-paths over every node pair, and each iteration
-# evaluates pop_size networks. Keep these modest for a notebook run.
-NSGAII_N_ITERATIONS = 30
-NSGAII_POP_SIZE = 40
+# NSGA-II budget: AHolliday cfg/nsgaii_husselmann.yaml (2000 iters / 400 pop)
+# halved. NSGA-II is the heaviest baseline -- the Husselmann initialisation
+# does K-shortest-paths over every node pair and each iteration evaluates
+# pop_size networks -- so this is slow on Mumford2/3.
+NSGAII_N_ITERATIONS = 1000
+NSGAII_POP_SIZE = 200
 
 
 def build_nsgaii_cfg(run_name, n_routes, min_route_len, max_route_len,
@@ -175,6 +180,7 @@ def build_nsgaii_cfg(run_name, n_routes, min_route_len, max_route_len,
     overrides = [
         "+eval=mumford0",
         "++eval.dataset.type=tensor",
+        "++experiment.logdir=null",  # no empty TensorBoard run dir for eval runs
         f"++eval.n_routes={n_routes}",
         f"++eval.min_route_len={min_route_len}",
         f"++eval.max_route_len={max_route_len}",
@@ -238,9 +244,9 @@ from connectpt.routes_generator import CityGraphData, build_nx_heuristic_routes
 BENCHMARK_SPECS = [
     {"city": "Mandl",    "n_routes": 6,  "min_route_len": 2,  "max_route_len": 8},
     {"city": "Mumford0", "n_routes": 12, "min_route_len": 2,  "max_route_len": 15},
-    # {"city": "Mumford1", "n_routes": 15, "min_route_len": 10, "max_route_len": 30},
-    # {"city": "Mumford2", "n_routes": 56, "min_route_len": 10, "max_route_len": 22},
-    # {"city": "Mumford3", "n_routes": 60, "min_route_len": 12, "max_route_len": 25},
+    {"city": "Mumford1", "n_routes": 15, "min_route_len": 10, "max_route_len": 30},
+    {"city": "Mumford2", "n_routes": 56, "min_route_len": 10, "max_route_len": 22},
+    {"city": "Mumford3", "n_routes": 60, "min_route_len": 12, "max_route_len": 25},
 ]
 BENCHMARK_NX_SEED = 0
 BENCHMARK_RUN_RL_IMPROVEMENT = RUN_RL_ONLY_BASELINE

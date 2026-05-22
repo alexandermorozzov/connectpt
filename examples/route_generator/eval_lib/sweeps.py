@@ -19,7 +19,7 @@ from . import plots as _plots
 # === section 8 (Worse Acceptance Seed Sweep) ===
 from IPython.display import display
 
-WORSE_ACCEPT_SEEDS = list(range(1))
+WORSE_ACCEPT_SEEDS = list(range(1))  # seed 0 only
 WORSE_ACCEPT_ON_TEMPERATURE = 2
 WORSE_SELECTION_ON_TEMPERATURE = 2
 WORSE_ACCEPT_DUMP_ROUTES = False

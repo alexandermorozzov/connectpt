@@ -42,7 +42,6 @@ MODEL_WEIGHTS_DIR = ARTIFACTS_DIR / "model_weights"
 EDIT_MODEL_WEIGHTS_DIR = MODEL_WEIGHTS_DIR / "improvement"
 MODEL_OUTPUTS_DIR = ARTIFACTS_DIR / "lc_improvement_outputs"
 OUTPUT_ROUTES_DIR = ARTIFACTS_DIR / "output_routes"
-TRAINING_LOGS_DIR = ARTIFACTS_DIR / "training_logs"
 # pretrained neural-BCO bee model (input checkpoint, ships with the repo)
 MODEL_WEIGHTS_PATH = (
     MODEL_WEIGHTS_DIR / "inductive_random_graphs_weighted_connectivity.pt"
@@ -56,5 +55,5 @@ EDIT_MODEL_WEIGHTS_PATH = (
 # Make sure the artifact output dirs exist (inputs under datasets/ must already
 # be present; only the write targets are created here).
 for _artifact_dir in (MODEL_WEIGHTS_DIR, EDIT_MODEL_WEIGHTS_DIR,
-                      MODEL_OUTPUTS_DIR, OUTPUT_ROUTES_DIR, TRAINING_LOGS_DIR):
+                      MODEL_OUTPUTS_DIR, OUTPUT_ROUTES_DIR):
     _artifact_dir.mkdir(parents=True, exist_ok=True)
