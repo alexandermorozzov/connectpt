@@ -2,10 +2,11 @@
 
 `render_route_comparison_figure` draws one grid figure: cell 0 is a reference
 :class:`RunResult` (plain route set), the remaining cells are case
-:class:`RunResult` objects drawn as route diffs vs the reference. Each cell
-keeps a sequence table underneath and a rich subtitle (cost delta, per-component
-breakdown, route-change summary, and -- depending on the run kind -- RL action
-counts or BCO mutation counts).
+:class:`RunResult` objects drawn as route diffs vs the reference. Each cell has
+a subtitle with raw metric values (ATT / RTT / d_un / disconnected pairs) and --
+depending on the run kind -- RL action counts or BCO mutation counts, plus an
+optional node-sequence table underneath (``show_tables`` /
+``SHOW_ROUTE_SEQUENCE_TABLES``).
 
 It is the extracted rendering half of the training notebook's
 ``render_lc_improvement_case``. The training notebook feeds it weight-scenario
@@ -18,6 +19,7 @@ import math
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
+from .params import SHOW_ROUTE_SEQUENCE_TABLES
 from .helpers import (metric_value, as_route_tensor, aggregate_mutation_stats,
                       plot_mutation_histogram)
 from . import plots as _plots
@@ -45,15 +47,27 @@ def _count_nonempty_routes(routes) -> int:
     return int(((routes > -1).sum(dim=-1) > 1).sum().item())
 
 
-def _breakdown_line(metrics: dict, prefix: str = "objective") -> str:
-    """Per-component cost breakdown line read from a RunResult.metrics dict."""
+def _raw_line(metrics: dict) -> str:
+    """Raw (un-normalized) metric values read from a RunResult.metrics dict."""
     metrics = metrics or {}
     return (
-        f"{prefix}: ATTcmp={metric_value(metrics, 'cost_demand_term'):.3f} "
-        f"RTTcmp={metric_value(metrics, 'cost_route_term'):.3f} "
-        f"conn={metric_value(metrics, 'cost_connectivity_term'):.3f} "
-        f"pen={metric_value(metrics, 'cost_penalty_term'):.3f}"
+        f"ATT={metric_value(metrics, 'ATT'):.3g} "
+        f"RTT={metric_value(metrics, 'RTT'):.3g} "
+        f"d_un={metric_value(metrics, '$d_{un}$'):.3g} "
+        f"disconn={metric_value(metrics, '# disconnected node pairs'):.3g}"
     )
+
+
+def _raw_delta_line(metrics: dict, ref_metrics: dict) -> str:
+    """Raw metric values as reference -> case transitions."""
+    metrics, ref_metrics = metrics or {}, ref_metrics or {}
+    parts = []
+    for label, key in (("ATT", "ATT"), ("RTT", "RTT"),
+                        ("d_un", "$d_{un}$"),
+                        ("disconn", "# disconnected node pairs")):
+        parts.append(f"{label} {metric_value(ref_metrics, key):.3g}"
+                     f"->{metric_value(metrics, key):.3g}")
+    return ", ".join(parts)
 
 
 def _action_line(action_stats: dict):
@@ -85,34 +99,20 @@ def _mutation_line(mutation_stats: dict):
 
 
 def default_reference_subtitle(result) -> str:
-    """Subtitle for the reference cell (plain route set)."""
-    metrics = result.metrics or {}
+    """Subtitle for the reference cell: raw metric values + route count."""
     return (
-        f"cost={metric_value(metrics, 'cost'):.3f}\n"
-        f"{_breakdown_line(metrics, 'objective')}\n"
+        f"{_raw_line(result.metrics)}\n"
         f"routes={_count_nonempty_routes(result.routes)}"
     )
 
 
 def default_case_subtitle(result, reference) -> str:
-    """Subtitle for a case cell: cost delta vs reference, breakdown, route-change
-    summary and (RL) action / (BCO) mutation counters -- the rich annotations
-    the training-notebook figure used to carry."""
-    metrics = result.metrics or {}
-    ref_cost = metric_value(reference.metrics or {}, "cost")
-    cost = metric_value(metrics, "cost")
-    delta = cost - ref_cost
+    """Subtitle for a case cell: raw metric values (reference -> case) plus the
+    RL action / BCO mutation counters."""
     lines = [
-        f"cost {ref_cost:.3f} -> {cost:.3f}, delta={delta:+.3f}, "
+        f"{_raw_delta_line(result.metrics, reference.metrics)}, "
         f"routes={_count_nonempty_routes(result.routes)}",
-        _breakdown_line(metrics, "objective"),
     ]
-    change = _plots.summarize_route_changes(result.routes, reference.routes)
-    lines.append(
-        f"changed={change['changed_routes']}, "
-        f"+seg={change['added_edges']}, -seg={change['removed_edges']}, "
-        f"+stop={change['added_stops']}, -stop={change['removed_stops']}"
-    )
     extra = (_action_line(getattr(result, "action_stats", None))
              or _mutation_line(getattr(result, "mutation_stats", None)))
     if extra:
@@ -122,7 +122,7 @@ def default_case_subtitle(result, reference) -> str:
 
 def render_route_comparison_figure(reference, cases, graph, street_adj=None, *,
                                    title="", ncols=3, palette="tab20",
-                                   with_overlap_curves=True, show_tables=True,
+                                   with_overlap_curves=True, show_tables=None,
                                    reference_subtitle_fn=default_reference_subtitle,
                                    case_subtitle_fn=default_case_subtitle,
                                    figsize=None, save_as=None):
@@ -140,6 +140,8 @@ def render_route_comparison_figure(reference, cases, graph, street_adj=None, *,
     RunResult + the graph) is persisted via ``save_route_results`` so the
     figure can be regenerated later -- the *data* is saved, not the image.
     """
+    if show_tables is None:
+        show_tables = SHOW_ROUTE_SEQUENCE_TABLES
     items = [reference] + list(cases)
     n_cells = len(items)
     ncols = max(1, min(int(ncols), n_cells))

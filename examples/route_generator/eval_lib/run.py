@@ -39,8 +39,8 @@ class RunResult:
 # "ON" annealing temperatures for the worse-accept mode (mirror of
 # eval_lib.sweeps.WORSE_ACCEPT_EXPERIMENTS; kept here to avoid an import cycle
 # since eval_lib.sweep imports this module).
-WORSE_ACCEPT_ON_TEMPERATURE = 2
-WORSE_SELECTION_ON_TEMPERATURE = 2
+WORSE_ACCEPT_ON_TEMPERATURE = 1
+WORSE_SELECTION_ON_TEMPERATURE = 1
 
 # accept-mode -> worse-accept knobs passed straight to build_bco_cfg.
 ACCEPT_MODES = {

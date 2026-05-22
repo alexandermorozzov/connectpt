@@ -1,8 +1,6 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-
-# C extensions
 *.so
 
 # Distribution / packaging
@@ -18,17 +16,16 @@ htmlcov/
 .coverage
 .cache
 .pytest_cache/
+.mypy_cache/
 
-# Django stuff
+# Logs / local config
 *.log
 local_settings.py
 db.sqlite3
-
-# Flask stuff
 instance/
 .webassets-cache
 
-# Jupyter Notebook
+# Jupyter
 .ipynb_checkpoints
 
 # Environments
@@ -38,39 +35,13 @@ instance/
 venv/
 ENV/
 
-# MyPy
-.mypy_cache/
-
-# PyCharm env
+# Editors
 .idea
 
-# Local caches for examples
-# .examples/cache/   
-examples/cache/  
-examples/data 
-cache 
-backlog_notebooks
-
-data
-.csv
-examples/cache/    
-
-examples/output_routes
-examples/training_logs
-examples/route_generator/datasets
-examples/route_generator/experiment_results
-examples/route_generator/output_graphs
-examples/route_generator/output_routes
-examples/route_generator/training_logs
-data/*
-data/MandlCoords.txt
-
-examples/lc_results_old/
-examples/route_generator/lc_improvement_outputs/improvement_lc_improvement_trim_val_routes.pt
-examples/route_generator/lc_improvement_outputs/improvement_lc_improvement_trim.pt
-examples/route_generator/lc_improvement_outputs/old_improvement_lc_improvement_trim_val_routes.pt
-examples/route_generator/lc_improvement_outputs/old_improvement_lc_improvement_trim.pt
-examples/route_generator/lc_improvement_outputs/improvement_lc_improvement_trim_val_routes.pt
-
-# Large generated datasets
+# datasets/ is tracked, except files over GitHub's 100 MB hard limit
+# (restore raw_graphs_1000.pkl locally or use git-lfs).
 datasets/raw_graphs_1000.pkl
+
+# Generated run artifacts -- results CSV, route dumps, model weights,
+# training logs -- are kept local only; regenerate by running the notebooks.
+artifacts/

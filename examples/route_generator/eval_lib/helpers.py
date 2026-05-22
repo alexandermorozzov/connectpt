@@ -748,39 +748,6 @@ def aggregate_mutation_stats(mutation_counts_list):
     return agg
 
 
-def plot_sweep_mutation_grid(sweep, title_prefix):
-    """Grid of unified mutation histograms for a seed-sweep result.
-
-    Rows = accept experiments, cols = BCO variants; each subplot is the
-    seed-averaged plot_mutation_histogram. Works for both the LC-init and
-    NX-init sweeps (they share the run_bco_seed_sweep result shape).
-    """
-    results = sweep["results"]
-    accept_experiments = sweep["accept_experiments"]
-    n_rows = len(accept_experiments)
-    n_cols = len(BCO_VARIANTS)
-    fig, axes = plt.subplots(
-        n_rows, n_cols,
-        figsize=(4.7 * n_cols, 4.4 * n_rows),
-        squeeze=False,
-    )
-    for row_idx, accept_cfg in enumerate(accept_experiments):
-        accept_key = accept_cfg["key"]
-        for col_idx, variant in enumerate(BCO_VARIANTS):
-            runs = results.get(accept_key, {}).get(variant["key"], [])
-            agg = aggregate_mutation_stats(
-                [run["mutation_counts"] for run in runs])
-            plot_mutation_histogram(
-                agg,
-                f"{variant['summary_label']}\n{accept_cfg['label']}",
-                ax=axes[row_idx, col_idx],
-            )
-    fig.suptitle(f"{title_prefix}: mutation attempts vs accepts",
-                 fontsize=14, fontweight="bold")
-    plt.tight_layout()
-    plt.show()
-
-
 def print_lc_result(run_name: str, metrics: dict, routes, step_counts=None):
     routes_tensor = as_route_tensor(routes)
     print(f"Run name: {run_name}")

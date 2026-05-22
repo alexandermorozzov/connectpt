@@ -38,20 +38,23 @@ LC_RESULTS_DIR = DATASETS_DIR / "nx_heuristic_results_10r_len12"
 
 # === run artifacts + model checkpoints (repo-root artifacts/) ===
 ARTIFACTS_DIR = ROOT_DIR / "artifacts"
-MODEL_OUTPUTS_DIR = ARTIFACTS_DIR / "lc_improvement_outputs"
 MODEL_WEIGHTS_DIR = ARTIFACTS_DIR / "model_weights"
+EDIT_MODEL_WEIGHTS_DIR = MODEL_WEIGHTS_DIR / "improvement"
+MODEL_OUTPUTS_DIR = ARTIFACTS_DIR / "lc_improvement_outputs"
 OUTPUT_ROUTES_DIR = ARTIFACTS_DIR / "output_routes"
 TRAINING_LOGS_DIR = ARTIFACTS_DIR / "training_logs"
 # pretrained neural-BCO bee model (input checkpoint, ships with the repo)
 MODEL_WEIGHTS_PATH = (
     MODEL_WEIGHTS_DIR / "inductive_random_graphs_weighted_connectivity.pt"
 )
-# trained LC edit/improvement model (produced by the training notebook)
+# trained LC edit / improvement model weights -- produced by the training
+# notebook, kept under model_weights/improvement/ alongside the other weights.
 EDIT_MODEL_WEIGHTS_PATH = (
-    MODEL_OUTPUTS_DIR / "improvement_lc_improvement_trim.pt"
+    EDIT_MODEL_WEIGHTS_DIR / "improvement_lc_improvement_trim.pt"
 )
 
 # Make sure the artifact output dirs exist (inputs under datasets/ must already
 # be present; only the write targets are created here).
-for _artifact_dir in (MODEL_OUTPUTS_DIR, OUTPUT_ROUTES_DIR, TRAINING_LOGS_DIR):
+for _artifact_dir in (MODEL_WEIGHTS_DIR, EDIT_MODEL_WEIGHTS_DIR,
+                      MODEL_OUTPUTS_DIR, OUTPUT_ROUTES_DIR, TRAINING_LOGS_DIR):
     _artifact_dir.mkdir(parents=True, exist_ok=True)

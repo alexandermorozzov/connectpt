@@ -20,6 +20,10 @@ MAX_ROUTE_LEN = 12
 LC_SAMPLES = 100
 USE_NEURAL_BCO = False
 
+# Route-comparison figures: draw the per-route node-sequence tables under each
+# panel. Set False for compact figures (route maps + subtitles only).
+SHOW_ROUTE_SEQUENCE_TABLES = True
+
 # === BCO algorithm constants -- sourced from cfg/bco_mumford.yaml ===
 # The algorithm YAML is the single source of truth; the BCO_* names below are
 # re-exports so existing notebook / helper code keeps working.
