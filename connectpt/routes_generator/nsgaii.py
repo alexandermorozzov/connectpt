@@ -68,10 +68,18 @@ class NSGAII:
         cho = self.cost_obj(state)
         return self.cost_obj.get_cost(cho)
 
-    def run(self, state: RouteGenBatchState, init_mode: str, sum_writer=None):
+    def run(self, state: RouteGenBatchState, init_mode: str, sum_writer=None,
+            *, seed_routes=None):
         """Runs the NSGA-II algorithm on a given problem.
 
         init_mode: 'model', 'john', or 'husselmann'.
+        seed_routes: optional ``[R, L]`` or ``[1, R, L]`` tensor of initial
+            routes to inject into the starting population as one explicit
+            member. When given, the rest of ``pop_size`` is still filled via
+            ``init_mode`` so NSGA-II keeps its diversity; the seed just
+            establishes a known floor (e.g. the NX-heuristic init shared with
+            the rest of the benchmark sweep). ``None`` keeps the original
+            behaviour (build the entire population via ``init_mode``).
         """
 
         assert state.batch_size == 1, "NSGA-II only supports batch_size=1"
@@ -84,7 +92,8 @@ class NSGAII:
             state = state.to_device('cpu')
 
         # Initialize population
-        pop = self.get_init_population(state, init_mode)
+        pop = self.get_init_population(state, init_mode,
+                                       seed_routes=seed_routes)
 
         # Non-dominated Sorting
         pop, pareto_front = non_dominated_sorting(pop)
@@ -231,12 +240,56 @@ class NSGAII:
             'mutator_use_counts': mutator_use_counts
         }
 
-    def get_init_population(self, state, mode='model'):
-        """Valid modes are 'model', 'john', and 'husselmann'."""
+    def get_init_population(self, state, mode='model', *, seed_routes=None):
+        """Valid modes are 'model', 'john', and 'husselmann'.
+
+        ``seed_routes`` (optional ``[R, L]`` or ``[1, R, L]`` route tensor) is
+        injected as one explicit population member before the configured
+        ``mode`` fills the rest. The seed is padded/truncated to the state's
+        ``max_route_len`` and validated through the same cost / invalid-mask
+        path as the generated networks -- invalid seeds are dropped with a
+        warning. Use this to start NSGA-II from the same initial network as
+        the rest of the benchmark sweep (e.g. the NX-heuristic init).
+        """
         ii = 0
         pop = []
         # then, while the population is not full, generate random networks
         max_route_len = state.max_route_len[0].cpu()
+
+        # Inject explicit seed network as the first population member. The
+        # remaining pop_size - 1 slots are filled via the configured mode
+        # below, so NSGA-II keeps its usual diversity behaviour on top of a
+        # known-good starting point.
+        if seed_routes is not None:
+            seed_t = seed_routes.detach().cpu()
+            if seed_t.ndim == 2:
+                seed_t = seed_t.unsqueeze(0)
+            cur_len = int(seed_t.shape[-1])
+            tgt_len = int(max_route_len)
+            if cur_len < tgt_len:
+                seed_t = torch.nn.functional.pad(
+                    seed_t, (0, tgt_len - cur_len), value=-1)
+            elif cur_len > tgt_len:
+                seed_t = seed_t[..., :tgt_len]
+            seed_state = RouteGenBatchState.batch_from_list([state])
+            seed_state = seed_state.to_device(state.device)
+            seed_state.replace_routes(seed_t.to(state.device))
+            seed_cost, seed_invalid = self._get_costs(seed_state)
+            if not bool(seed_invalid[0].item()):
+                pop.append({
+                    'routes': seed_t[0].cpu().clone(),
+                    'cost': seed_cost[0].cpu().numpy(),
+                    'rank': None, 'crowding_distance': None,
+                })
+                log.info(
+                    f"NSGA-II: injected seed network into init pop "
+                    f"(cost={pop[-1]['cost']})")
+            else:
+                log.warning(
+                    "NSGA-II: seed_routes was invalid under the cost module; "
+                    "dropping it -- init pop will be built entirely from mode "
+                    f"'{mode}'.")
+
         if mode == 'model':
             exp_states = [state] * self.batch_size
             gen_states = RouteGenBatchState.batch_from_list(exp_states)

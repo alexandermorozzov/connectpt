@@ -194,7 +194,15 @@ def build_nsgaii_cfg(run_name, n_routes, min_route_len, max_route_len,
     return cfg
 
 
-def run_nsgaii(cfg, *, tensors=None, run_name_scope=""):
+def run_nsgaii(cfg, *, tensors=None, init_routes=None, run_name_scope=""):
+    """Run NSGA-II and return ``(run_name, output)``.
+
+    ``init_routes`` (optional) is forwarded as the NSGA-II seed network: it is
+    injected into the initial population as one explicit member, with the
+    remaining ``pop_size - 1`` slots still filled via ``cfg.init_mode``
+    (default ``husselmann``). Pass the same NX-heuristic init the other
+    benchmark methods start from to make NSGA-II seeded comparably.
+    """
     if tensors is None:
         dataloader = make_test_dataloader(cfg.eval.dataset)
     else:
@@ -222,7 +230,7 @@ def run_nsgaii(cfg, *, tensors=None, run_name_scope=""):
         batch_size=int(cfg.get("gen_batch_size", cfg.pop_size)))
     with torch.no_grad():
         output = optimizer.run(state, cfg.get("init_mode", "husselmann"),
-                               sum_writer=None)
+                               sum_writer=None, seed_routes=init_routes)
     return run_name, output
 
 
@@ -385,12 +393,17 @@ def run_benchmark_sweep(specs=None):
             init_routes, tensors=tensors, run_name_scope=f"{city}_"),
             routes_by_method, metrics_by_method)
 
-        # NSGA-II (multi-objective; builds its own population, ignores init)
+        # NSGA-II (multi-objective). Seeded with the same NX-heuristic init
+        # routes as every other benchmark method: the seed lands in the
+        # initial population as one explicit member, the remaining pop_size-1
+        # slots are still filled via cfg.init_mode (default 'husselmann') so
+        # NSGA-II keeps its diversity behaviour on top of a known floor.
         if BENCHMARK_RUN_NSGAII:
             def _nsgaii():
                 _, output = run_nsgaii(
                     build_nsgaii_cfg(f"{city}_nsgaii", n_routes, min_len, max_len),
-                    tensors=tensors, run_name_scope=f"{city}_")
+                    tensors=tensors, init_routes=init_routes,
+                    run_name_scope=f"{city}_")
                 best = reduce_pareto_front(
                     output, DEMAND_TIME_WEIGHT, ROUTE_TIME_WEIGHT)
                 routes = best["routes"]
