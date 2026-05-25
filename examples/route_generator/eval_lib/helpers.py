@@ -380,10 +380,6 @@ def format_absolute_metrics(metrics):
     )
 
 
-def format_plot_metrics(metrics):
-    return f"{format_cost_terms(metrics)}\n{format_absolute_metrics(metrics)}"
-
-
 def run_lc(cfg, init_routes=None, revisit_routes=None, *,
            tensors=None, run_name_prefix="lc_"):
     # tensors=None -> Mumford0 dataloader; tensors=<dict> -> explicit
@@ -767,18 +763,6 @@ def print_lc_result(run_name: str, metrics: dict, routes, step_counts=None):
         print(f"Step counts: {step_counts}")
 
 
-def print_bco_result(mode_label: str, variant_label: str, run_name: str, metrics: dict, routes, mutation_stats: dict):
-    routes_tensor = as_route_tensor(routes)
-    n_route_sets = routes_tensor.shape[0] if routes_tensor.ndim >= 3 else 1
-    print(f"[{mode_label}] {variant_label}")
-    print(f"Run name: {run_name}")
-    print(format_cost_terms(metrics))
-    print(format_absolute_metrics(metrics))
-    print(f"Returned route sets: {n_route_sets}")
-    print(f"Mutation stats: {summarize_mutation_stats(mutation_stats)}")
-    print()
-
-
 def route_selection_run_name(base_run_name: str, mode_key: str) -> str:
     return f"{base_run_name}_{route_selection_mode_suffix(mode_key)}"
 
@@ -866,26 +850,33 @@ def build_default_bco_variants():
         #     "n_type7_bees": BCO_N_BEES,
         # },
         {
+            # "Construct" + trim, but BOTH bees use the trained LC-improvement
+            # edit_model -- type5 (extend/trim/halt action set) for the
+            # "construct" half, type6 (trim/halt only) for the trim half.
+            # type4 (bestsofar_feb2023 construction model) is NOT used here.
             "key": "construction_trim_split_5_5",
             "summary_label": "Construction + trim BCO (5+5)",
             "run_name": "seeded_bco_construction_trim_split_5_5_from_lc_mumford0",
-            "use_neural_bees": True,
+            "use_neural_bees": False,
             "n_type1_bees": 0,
             "n_type2_bees": 0,
-            "n_type4_bees": 5,
-            "n_type5_bees": 0,
+            "n_type4_bees": 0,
+            "n_type5_bees": 5,
             "n_type6_bees": 5,
             "n_type7_bees": 0,
         },
         {
+            # Same idea as construction_trim_split_5_5 but with an 8+2 split:
+            # 8 type5 (edit-model extend/trim/halt) + 2 type6 (edit-model
+            # trim/halt). No bestsofar_feb2023 construction bee.
             "key": "construction_trim_split_8_2",
             "summary_label": "Construction + trim BCO (8+2)",
             "run_name": "seeded_bco_construction_trim_split_8_2_from_lc_mumford0",
-            "use_neural_bees": True,
+            "use_neural_bees": False,
             "n_type1_bees": 0,
             "n_type2_bees": 0,
-            "n_type4_bees": 8,
-            "n_type5_bees": 0,
+            "n_type4_bees": 0,
+            "n_type5_bees": 8,
             "n_type6_bees": 2,
             "n_type7_bees": 0,
         },
@@ -956,71 +947,6 @@ def run_lc_seeded(seed_routes):
         "routes": routes,
         "step_counts": step_counts,
     }
-
-
-def bco_variant_type2_bees(variant: dict, n_bees: int = BCO_N_BEES) -> int:
-    if variant["n_type2_bees"] is not None:
-        return variant["n_type2_bees"]
-    return (
-        n_bees
-        - variant["n_type1_bees"]
-        - variant["n_type4_bees"]
-        - variant.get("n_type5_bees", 0)
-        - variant.get("n_type6_bees", 0)
-        - variant.get("n_type7_bees", 0)
-    )
-
-
-def run_bco_experiment_results(init_routes):
-    results = {}
-    for mode_key, mode_cfg in BCO_ROUTE_SELECTION_MODES.items():
-        mode_results = {}
-        for variant in BCO_VARIANTS:
-            cfg = build_bco_cfg(
-                run_name=route_selection_run_name(variant["run_name"], mode_key),
-                n_routes=N_ROUTES,
-                min_route_len=MIN_ROUTE_LEN,
-                max_route_len=MAX_ROUTE_LEN,
-                use_neural_bees=variant["use_neural_bees"],
-                n_type1_bees=variant["n_type1_bees"],
-                n_type2_bees=variant["n_type2_bees"],
-                n_type4_bees=variant["n_type4_bees"],
-                n_type5_bees=variant.get("n_type5_bees", 0),
-                n_type6_bees=variant.get("n_type6_bees", 0),
-                n_type7_bees=variant.get("n_type7_bees", 0),
-                ignore_type4_max_route_len=BCO_CONSTRUCTION_IGNORE_MAX_ROUTE_LEN,
-                ignore_type5_max_route_len=BCO_EDIT_IGNORE_MAX_ROUTE_LEN,
-                ignore_type6_max_route_len=BCO_TRIM_IGNORE_MAX_ROUTE_LEN,
-                ignore_type7_max_route_len=BCO_TRIM_EXTEND_IGNORE_MAX_ROUTE_LEN,
-                use_demand_weighted_route_selection=mode_cfg["use_demand_weighted_route_selection"],
-            )
-            mutation_counts = {}
-            run_name, metrics, unserved_demand, routes, mutation_counts = run_bco(
-                cfg,
-                init_routes=init_routes,
-                mutation_counts_out=mutation_counts,
-            )
-            dump_routes(run_name, routes.cpu(), out_dir=OUTPUT_ROUTES_DIR)
-            mode_results[variant["key"]] = {
-                "mode_key": mode_key,
-                "mode_label": mode_cfg["label"],
-                "variant_key": variant["key"],
-                "variant_label": variant["summary_label"],
-                "n_type1_bees": variant["n_type1_bees"],
-                "n_type2_bees": variant["n_type2_bees"],
-                "n_type4_bees": variant["n_type4_bees"],
-                "n_type5_bees": variant.get("n_type5_bees", 0),
-                "n_type6_bees": variant.get("n_type6_bees", 0),
-                "n_type7_bees": variant.get("n_type7_bees", 0),
-                "run_name": run_name,
-                "metrics": metrics,
-                "unserved_demand": unserved_demand,
-                "routes": routes,
-                "routes_tensor": routes,
-                "mutation_counts": mutation_counts,
-            }
-        results[mode_key] = mode_results
-    return results
 
 
 def run_seed_sweep(

@@ -98,14 +98,6 @@ def plot_route_diff(ax, routes, reference_routes, coords, street_adj,
     )
 
 
-def get_worse_plot_result(sweep_results: dict, accept_key: str, variant_key: str, seed: int):
-    variant_results = sweep_results["results"][accept_key][variant_key]
-    for result in variant_results:
-        if int(result["seed"]) == int(seed):
-            return result
-    return variant_results[0]
-
-
 # === section 10 (NX-dataset routes evaluation) ===
 def evaluate_routes_on_tensors(cfg, tensors, routes_tensor):
     dataloader = make_tensor_dataloader(cfg.eval.dataset, tensors)
