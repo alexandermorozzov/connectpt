@@ -416,5 +416,7 @@ def run_benchmark_sweep(specs=None):
             _record(rows, city, "NSGA-II", _nsgaii,
                     routes_by_method, metrics_by_method)
 
-    return {"rows_df": pd.DataFrame(rows), "routes": routes_by_method,
+    from .tables import TABLE_DECIMALS as _TABLE_DECIMALS
+    return {"rows_df": pd.DataFrame(rows).round(_TABLE_DECIMALS),
+            "routes": routes_by_method,
             "metrics": metrics_by_method, "specs": list(specs)}

@@ -1043,12 +1043,13 @@ def run_seed_sweep(
         "accepted_construction_extend",
         "accepted_total",
     ], ENABLED_COST_COMPONENTS)
+    from .tables import TABLE_DECIMALS as _TABLE_DECIMALS
     summary_df = pd.DataFrame({
         "mean": df[summary_cols].mean(),
         "std": df[summary_cols].std(ddof=0),
         "min": df[summary_cols].min(),
         "max": df[summary_cols].max(),
-    }).round(4)
+    }).round(_TABLE_DECIMALS)
     return {
         "mode_key": mode_key,
         "mode_label": mode_cfg["label"],

@@ -18,12 +18,16 @@ import pandas as pd
 
 from .params import *  # noqa: F401,F403  (N_ROUTES, MIN/MAX_ROUTE_LEN ...)
 from .run import run_method
-from .tables import run_result_row, _METRIC_COLUMNS
+from .tables import run_result_row, _METRIC_COLUMNS, TABLE_DECIMALS as _TABLE_DECIMALS
 from . import plots as _plots
 
 
 def _summarize_seed_sweep(rows_df: pd.DataFrame) -> pd.DataFrame:
-    """Seed-average ``rows_df`` -> mean/std per dataset/method/accept_mode."""
+    """Seed-average ``rows_df`` -> mean/std per dataset/method/accept_mode.
+
+    The returned summary is rounded to :data:`tables.TABLE_DECIMALS` so the CSV
+    and the notebook display share precision with :func:`build_comparison_table`.
+    """
     if rows_df.empty:
         return rows_df
     group_cols = [c for c in ("dataset", "method", "kind", "accept_mode")
@@ -37,7 +41,7 @@ def _summarize_seed_sweep(rows_df: pd.DataFrame) -> pd.DataFrame:
     summary = stats
     if "seed" in rows_df.columns:
         summary = summary.join(grouped["seed"].nunique().rename("n_seeds"))
-    return summary.reset_index()
+    return summary.reset_index().round(_TABLE_DECIMALS)
 
 
 def run_seed_sweep(graph_specs, method_specs, seeds,
@@ -104,7 +108,9 @@ def run_seed_sweep(graph_specs, method_specs, seeds,
         row["seed"] = seed
         rows.append(row)
 
-    rows_df = pd.DataFrame(rows)
+    # Pre-round numeric columns so the raw per-run table matches the precision
+    # of build_comparison_table / _summarize_seed_sweep.
+    rows_df = pd.DataFrame(rows).round(_TABLE_DECIMALS)
     return {
         "rows_df": rows_df,
         "summary_df": _summarize_seed_sweep(rows_df),

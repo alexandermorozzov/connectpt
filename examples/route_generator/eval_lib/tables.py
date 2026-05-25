@@ -4,12 +4,21 @@
 experiment section (LC / NX / MACSA / Mumford-Mandl): one row per run, with
 worse / without-worse as separate rows (an ``accept_mode`` column), and deltas
 vs the reference (initial-network) row.
+
+Numeric columns are rounded to ``TABLE_DECIMALS`` (default 3) before the
+DataFrame is returned, so both the CSV that ``save_table`` writes and any
+``display()`` of the DataFrame in notebooks use the same precision.
 """
 import pandas as pd
 
 from .params import ENABLED_COST_COMPONENTS
 from .helpers import summarize_run, metric_value
 from . import plots as _plots
+
+
+# Number of decimals every table-builder rounds its numeric columns to.
+# Tweak here once -- all experiment tables / saved CSVs pick it up.
+TABLE_DECIMALS = 3
 
 _METRIC_COLUMNS = [
     "cost", "cost_demand_term", "cost_route_term", "cost_connectivity_term",
@@ -62,4 +71,5 @@ def build_comparison_table(results, reference_kind="initial") -> pd.DataFrame:
     deltas = [c for c in df.columns if c.startswith("delta_")]
     keep = _plots.filter_component_columns(lead + metrics + deltas,
                                            ENABLED_COST_COMPONENTS)
-    return df[keep]
+    # Round numeric columns -- DataFrame.round skips non-numerics.
+    return df[keep].round(TABLE_DECIMALS)
