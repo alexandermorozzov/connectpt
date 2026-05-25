@@ -8,14 +8,15 @@ graph coords/street_adj), so any figure can be regenerated later with
 * ``save_table``        -- a results DataFrame -> ``artifacts/results/<name>.csv``
 * ``save_route_results`` -- RunResult route tensors + metadata -> ``<name>_routes.pt``
 * ``load_route_results`` -- reload the .pt payload back into RunResult objects
-* ``redraw_route_results`` -- reload + render in one call
+* ``redraw_route_results`` -- reload + render the diff figure in one call
+* ``redraw_route_set``    -- reload + render the plain (no-diff) figure in one call
 """
 import torch
 
 from .context import ARTIFACTS_DIR
 from .helpers import as_route_tensor
 from .run import RunResult
-from .figures import render_route_comparison_figure
+from .figures import render_route_comparison_figure, render_route_set_figure
 
 RESULTS_DIR = ARTIFACTS_DIR / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -75,7 +76,7 @@ def load_route_results(name: str):
 
 
 def redraw_route_results(name: str, **figure_kwargs):
-    """Reload a saved route-result payload and re-render its figure.
+    """Reload a saved route-result payload and re-render its diff figure.
 
     ``figure_kwargs`` are forwarded to :func:`render_route_comparison_figure`
     (``title``, ``ncols``, ``palette``, ...). The first run is the reference.
@@ -85,3 +86,17 @@ def redraw_route_results(name: str, **figure_kwargs):
         raise ValueError(f"no runs stored in results/{name}_routes.pt")
     return render_route_comparison_figure(
         results[0], results[1:], coords, street_adj, **figure_kwargs)
+
+
+def redraw_route_set(name: str, **figure_kwargs):
+    """Reload a saved route-result payload and re-render as plain routes.
+
+    Companion to :func:`redraw_route_results` -- draws every run as a plain
+    route set (no diff vs reference, no diff legend); each panel's subtitle
+    leads with ``cost=...``. ``figure_kwargs`` forward to
+    :func:`render_route_set_figure`.
+    """
+    results, coords, street_adj = load_route_results(name)
+    if not results:
+        raise ValueError(f"no runs stored in results/{name}_routes.pt")
+    return render_route_set_figure(results, coords, street_adj, **figure_kwargs)

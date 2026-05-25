@@ -47,14 +47,25 @@ def _count_nonempty_routes(routes) -> int:
     return int(((routes > -1).sum(dim=-1) > 1).sum().item())
 
 
+def _fmt(value, decimals: int = 2) -> str:
+    """Fixed-point format with NaN-safe handling. No ``e`` notation."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "nan"
+    if math.isnan(value):
+        return "nan"
+    return f"{value:.{decimals}f}"
+
+
 def _raw_line(metrics: dict) -> str:
     """Raw (un-normalized) metric values read from a RunResult.metrics dict."""
     metrics = metrics or {}
     return (
-        f"ATT={metric_value(metrics, 'ATT'):.3g} "
-        f"RTT={metric_value(metrics, 'RTT'):.3g} "
-        f"d_un={metric_value(metrics, '$d_{un}$'):.3g} "
-        f"disconn={metric_value(metrics, '# disconnected node pairs'):.3g}"
+        f"ATT={_fmt(metric_value(metrics, 'ATT'))} "
+        f"RTT={_fmt(metric_value(metrics, 'RTT'))} "
+        f"d_un={_fmt(metric_value(metrics, '$d_{un}$'))} "
+        f"disconn={_fmt(metric_value(metrics, '# disconnected node pairs'))}"
     )
 
 
@@ -65,8 +76,8 @@ def _raw_delta_line(metrics: dict, ref_metrics: dict) -> str:
     for label, key in (("ATT", "ATT"), ("RTT", "RTT"),
                         ("d_un", "$d_{un}$"),
                         ("disconn", "# disconnected node pairs")):
-        parts.append(f"{label} {metric_value(ref_metrics, key):.3g}"
-                     f"->{metric_value(metrics, key):.3g}")
+        parts.append(f"{label} {_fmt(metric_value(ref_metrics, key))}"
+                     f"->{_fmt(metric_value(metrics, key))}")
     return ", ".join(parts)
 
 
@@ -111,6 +122,26 @@ def default_case_subtitle(result, reference) -> str:
     RL action / BCO mutation counters."""
     lines = [
         f"{_raw_delta_line(result.metrics, reference.metrics)}, "
+        f"routes={_count_nonempty_routes(result.routes)}",
+    ]
+    extra = (_action_line(getattr(result, "action_stats", None))
+             or _mutation_line(getattr(result, "mutation_stats", None)))
+    if extra:
+        lines.append(extra)
+    return "\n".join(lines)
+
+
+def default_plain_subtitle(result) -> str:
+    """Subtitle for the plain (no-diff) figure: cost first, then raw metrics
+    and route count, plus the optional RL action / BCO mutation counter line.
+
+    Used by :func:`render_route_set_figure`; cost is the top line so it acts
+    as the per-panel headline.
+    """
+    metrics = result.metrics or {}
+    lines = [
+        f"cost={_fmt(metric_value(metrics, 'cost'))}",
+        f"{_raw_line(metrics)}, "
         f"routes={_count_nonempty_routes(result.routes)}",
     ]
     extra = (_action_line(getattr(result, "action_stats", None))
@@ -196,6 +227,77 @@ def render_route_comparison_figure(reference, cases, graph, street_adj=None, *,
         fig.suptitle(title, fontsize=15, fontweight="bold")
     if save_as:
         # Persist the route data (not the image) so the figure can be redrawn.
+        from .results_io import save_route_results
+        save_route_results(items, save_as, coords=graph, street_adj=street_adj)
+    return fig
+
+
+def render_route_set_figure(results, graph, street_adj=None, *,
+                            title="", ncols=3, palette="tab20",
+                            with_overlap_curves=True, show_tables=None,
+                            subtitle_fn=default_plain_subtitle,
+                            figsize=None, save_as=None):
+    """Grid figure drawing each :class:`RunResult` as a *plain* route set.
+
+    Companion to :func:`render_route_comparison_figure`. Every cell is drawn
+    via :func:`plot_plain_route_set` (no diff vs reference, no diff legend).
+    Per-panel subtitle is produced by ``subtitle_fn`` -- default
+    :func:`default_plain_subtitle` puts ``cost=...`` on the first line so the
+    cost shows up as the per-panel headline.
+
+    Parameters mirror :func:`render_route_comparison_figure` except there is
+    no separate reference cell. ``show_tables`` defaults to
+    ``SHOW_ROUTE_SEQUENCE_TABLES``; ``save_as`` persists the route data so the
+    figure can be regenerated later via
+    :func:`results_io.redraw_route_set`.
+    """
+    if show_tables is None:
+        show_tables = SHOW_ROUTE_SEQUENCE_TABLES
+    items = list(results)
+    n_cells = len(items)
+    if n_cells == 0:
+        raise ValueError("render_route_set_figure: results is empty")
+    ncols = max(1, min(int(ncols), n_cells))
+    n_cell_rows = math.ceil(n_cells / ncols)
+
+    if figsize is None:
+        figsize = (8.0 * ncols, (11.0 if show_tables else 8.0) * n_cell_rows)
+    fig = plt.figure(figsize=figsize, constrained_layout=True)
+
+    if show_tables:
+        grid = fig.add_gridspec(2 * n_cell_rows, ncols,
+                                height_ratios=[4.2, 1.15] * n_cell_rows)
+    else:
+        grid = fig.add_gridspec(n_cell_rows, ncols)
+
+    for cell_idx in range(n_cell_rows * ncols):
+        cell_row, col = divmod(cell_idx, ncols)
+        plot_row = 2 * cell_row if show_tables else cell_row
+        plot_ax = fig.add_subplot(grid[plot_row, col])
+        table_ax = (fig.add_subplot(grid[plot_row + 1, col])
+                    if show_tables else None)
+
+        if cell_idx >= n_cells:
+            plot_ax.axis("off")
+            if table_ax is not None:
+                table_ax.axis("off")
+            continue
+
+        result = items[cell_idx]
+        result_label = getattr(result, "label", "") or f"run {cell_idx}"
+        _plots.plot_plain_route_set(
+            plot_ax, result.routes, graph, street_adj,
+            title=result_label,
+            subtitle=subtitle_fn(result),
+            palette=palette, with_overlap_curves=with_overlap_curves)
+        if table_ax is not None:
+            _plots.draw_route_sequence_table(
+                table_ax, result.routes, f"{result_label} route nodes",
+                palette=palette)
+
+    if title:
+        fig.suptitle(title, fontsize=15, fontweight="bold")
+    if save_as:
         from .results_io import save_route_results
         save_route_results(items, save_as, coords=graph, street_adj=street_adj)
     return fig
