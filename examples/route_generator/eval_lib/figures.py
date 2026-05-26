@@ -303,6 +303,85 @@ def render_route_set_figure(results, graph, street_adj=None, *,
     return fig
 
 
+def plot_alpha_pareto_grid(rows_df, *, cities=None, methods=None,
+                           x_metric="ATT", y_metric="RTT",
+                           figsize_per_city=(5.5, 4.6),
+                           title_prefix="Pareto trade-off across alpha"):
+    """Figure-5-style Pareto trade-off grid: ``(x_metric, y_metric)`` per city.
+
+    ``rows_df`` is the per-run table from :func:`run_alpha_pareto_sweep` (must
+    contain ``dataset``, ``method``, ``alpha`` and both metric columns). Each
+    subplot is one ``dataset``; each curve is one ``method``, with one point
+    per ``alpha`` averaged across seeds. Points are connected in increasing
+    α order so the trade-off curve sweeps down-and-leftward from α=0
+    (operator perspective, lowest C_o) to α=1 (passenger perspective, lowest
+    C_p) -- matching the paper's Figure 3/4/5 reading direction. Error bars
+    show seed std (zero-width with one seed).
+
+    Defaults to ATT/RTT (the paper's C_p/C_o); pass ``x_metric``/``y_metric``
+    if a different pair is wanted. Returns the matplotlib ``Figure``.
+    """
+    if cities is None:
+        cities = list(dict.fromkeys(rows_df["dataset"].tolist()))
+    if methods is None:
+        methods = list(dict.fromkeys(rows_df["method"].tolist()))
+
+    n_cities = len(cities)
+    n_cols = min(n_cities, 3)
+    n_rows = math.ceil(n_cities / n_cols) if n_cities else 1
+    fig, axes = plt.subplots(
+        n_rows, n_cols, squeeze=False,
+        figsize=(figsize_per_city[0] * n_cols,
+                 figsize_per_city[1] * n_rows))
+
+    cmap = plt.get_cmap("tab10")
+    method_colors = {m: cmap(i % 10) for i, m in enumerate(methods)}
+
+    for idx, city in enumerate(cities):
+        ax = axes[idx // n_cols, idx % n_cols]
+        city_df = rows_df[rows_df["dataset"] == city]
+        for method in methods:
+            mdf = city_df[city_df["method"] == method]
+            if mdf.empty:
+                continue
+            agg = (mdf.groupby("alpha")[[x_metric, y_metric]]
+                       .agg(["mean", "std"])
+                       .reset_index()
+                       .sort_values("alpha"))
+            x_means = agg[(x_metric, "mean")]
+            y_means = agg[(y_metric, "mean")]
+            x_stds = agg[(x_metric, "std")].fillna(0.0)
+            y_stds = agg[(y_metric, "std")].fillna(0.0)
+            ax.errorbar(x_means, y_means, xerr=x_stds, yerr=y_stds,
+                        marker="o", linestyle="-", linewidth=1.6,
+                        markersize=5, label=method,
+                        color=method_colors[method], capsize=2, alpha=0.9)
+        ax.set_xlabel(f"{x_metric}  (lower = better)")
+        ax.set_ylabel(f"{y_metric}  (lower = better)")
+        ax.set_title(city, fontweight="bold")
+        ax.grid(alpha=0.25)
+
+    for j in range(n_cities, n_rows * n_cols):
+        axes[j // n_cols, j % n_cols].axis("off")
+
+    # One shared legend below the grid.
+    seen_labels, handles = set(), []
+    for ax in axes.flat:
+        for h, lbl in zip(*ax.get_legend_handles_labels()):
+            if lbl not in seen_labels:
+                seen_labels.add(lbl)
+                handles.append(h)
+    if handles:
+        fig.legend(handles, [h.get_label() for h in handles],
+                   loc="lower center",
+                   bbox_to_anchor=(0.5, -0.04),
+                   ncol=min(4, len(handles)), frameon=True)
+    if title_prefix:
+        fig.suptitle(title_prefix, fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=(0, 0.04, 1, 0.96))
+    return fig
+
+
 def plot_seed_sweep_mutation_grid(sweep, title_prefix=""):
     """Mutation-histogram grid for a :func:`run_seed_sweep` result.
 

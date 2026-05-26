@@ -246,10 +246,15 @@ class NSGAII:
         ``seed_routes`` (optional ``[R, L]`` or ``[1, R, L]`` route tensor) is
         injected as one explicit population member before the configured
         ``mode`` fills the rest. The seed is padded/truncated to the state's
-        ``max_route_len`` and validated through the same cost / invalid-mask
-        path as the generated networks -- invalid seeds are dropped with a
-        warning. Use this to start NSGA-II from the same initial network as
-        the rest of the benchmark sweep (e.g. the NX-heuristic init).
+        ``max_route_len``, scored, and added to the population **unconditionally**
+        -- constraint violations (``n_stops_oob`` / ``n_disconnected_demand_edges``
+        / ``n_duplicate_stops``) are logged but do NOT drop the seed. NSGA-II's
+        non-dominated sorting + selection will Pareto-dominate a bad seed
+        naturally, but you still get the requested starting point. This matters
+        for large/restrictive benchmarks like Mumford2 where the NX-heuristic
+        init does not satisfy demand-coverage but is still the desired anchor.
+        Use this to start NSGA-II from the same initial network as the rest of
+        the benchmark sweep (e.g. the NX-heuristic init).
         """
         ii = 0
         pop = []
@@ -259,7 +264,7 @@ class NSGAII:
         # Inject explicit seed network as the first population member. The
         # remaining pop_size - 1 slots are filled via the configured mode
         # below, so NSGA-II keeps its usual diversity behaviour on top of a
-        # known-good starting point.
+        # known-good (or known-bad) starting point.
         if seed_routes is not None:
             seed_t = seed_routes.detach().cpu()
             if seed_t.ndim == 2:
@@ -275,20 +280,27 @@ class NSGAII:
             seed_state = seed_state.to_device(state.device)
             seed_state.replace_routes(seed_t.to(state.device))
             seed_cost, seed_invalid = self._get_costs(seed_state)
-            if not bool(seed_invalid[0].item()):
-                pop.append({
-                    'routes': seed_t[0].cpu().clone(),
-                    'cost': seed_cost[0].cpu().numpy(),
-                    'rank': None, 'crowding_distance': None,
-                })
+            seed_is_invalid = bool(seed_invalid[0].item())
+            # Always inject the seed regardless of constraint validity. Bad
+            # seeds will be Pareto-dominated and selected against in the
+            # surviving-network stage; what matters is that the search starts
+            # from the requested network.
+            pop.append({
+                'routes': seed_t[0].cpu().clone(),
+                'cost': seed_cost[0].cpu().numpy(),
+                'rank': None, 'crowding_distance': None,
+            })
+            if seed_is_invalid:
+                log.warning(
+                    "NSGA-II: seed_routes violates a cost-module constraint "
+                    "(n_stops_oob / n_disconnected_demand_edges / "
+                    "n_duplicate_stops); injecting anyway -- NSGA-II will "
+                    "dominate it with valid networks in subsequent iterations. "
+                    f"Seed cost={pop[-1]['cost']}")
+            else:
                 log.info(
                     f"NSGA-II: injected seed network into init pop "
                     f"(cost={pop[-1]['cost']})")
-            else:
-                log.warning(
-                    "NSGA-II: seed_routes was invalid under the cost module; "
-                    "dropping it -- init pop will be built entirely from mode "
-                    f"'{mode}'.")
 
         if mode == 'model':
             exp_states = [state] * self.batch_size

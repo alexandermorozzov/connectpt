@@ -73,3 +73,35 @@ def build_comparison_table(results, reference_kind="initial") -> pd.DataFrame:
                                            ENABLED_COST_COMPONENTS)
     # Round numeric columns -- DataFrame.round skips non-numerics.
     return df[keep].round(TABLE_DECIMALS)
+
+
+def split_comparison_table_by_accept_mode(df: pd.DataFrame):
+    """Split a :func:`build_comparison_table` result into two views by
+    ``accept_mode``.
+
+    Returns ``(without_worse_df, worse_df)``. Each split contains:
+
+    * every ``kind == 'initial'`` row (reference network, shared across views),
+    * every ``kind == 'rl_only'`` row (deterministic, accept-mode-agnostic),
+    * every ``kind == 'bco'`` row whose ``accept_mode`` matches the split.
+
+    Use this to print two compact tables instead of one wide
+    ``(method x accept_mode)`` cross. When the input has no ``accept_mode``
+    column or no ``worse`` rows, the second split returns an empty DataFrame
+    while the first returns ``df`` unchanged.
+    """
+    if df.empty or "accept_mode" not in df.columns:
+        return df, df.iloc[0:0]
+
+    has_accept = df["accept_mode"].notna() & (df["accept_mode"] != "n/a")
+    shared_mask = ~has_accept  # initial + rl_only rows, kept in both splits
+    shared = df[shared_mask]
+
+    def _slice(mode_value):
+        mode_rows = df[has_accept & (df["accept_mode"] == mode_value)]
+        # Place the shared (initial / rl_only) rows first so the reader sees
+        # the reference network at the top of every split, then the methods
+        # filtered for this accept mode.
+        return pd.concat([shared, mode_rows], ignore_index=True)
+
+    return _slice("without_worse"), _slice("worse")

@@ -116,3 +116,82 @@ def run_seed_sweep(graph_specs, method_specs, seeds,
         "summary_df": _summarize_seed_sweep(rows_df),
         "results": results,
     }
+
+
+def run_alpha_pareto_sweep(city_specs, method_specs, alphas, seeds=(0,),
+                           accept_modes=("without_worse",),
+                           run_name_scope="pareto_") -> dict:
+    """Figure-5-style C_p-vs-C_o Pareto trade-off sweep.
+
+    For each ``alpha`` in ``alphas`` runs :func:`run_seed_sweep` with weights
+    ``(demand_time_weight=alpha, route_time_weight=1-alpha,
+    median_connectivity_weight=0)`` over ``city_specs`` x ``method_specs`` x
+    ``seeds`` x ``accept_modes``. The α-mapping mirrors the paper -- α=0 is
+    the operator perspective (route-time only), α=1 the passenger perspective
+    (demand-time only), intermediate values trade them off.
+
+    ``city_specs`` is a list of graph specs in the same shape that
+    :func:`run_seed_sweep` accepts (``dataset`` / ``init_routes`` /
+    ``tensors`` / per-city ``n_routes`` / ``min_route_len`` / ``max_route_len``).
+    Any ``weights`` key in a city spec is overridden by the α-derived weights.
+
+    Returns ``{"rows_df", "summary_df", "results"}`` where ``rows_df`` has an
+    extra ``alpha`` column (every other column matches :func:`run_seed_sweep`)
+    and ``summary_df`` groups mean/std per (dataset, method, accept_mode, alpha).
+    The single-seed case yields zero-width std bars, which is the expected
+    behaviour for the Figure-3/4/5 style plots.
+    """
+    all_rows, all_results = [], []
+    alphas = [float(a) for a in alphas]
+    for alpha_idx, alpha in enumerate(alphas, 1):
+        weights = {
+            "demand_time_weight": alpha,
+            "route_time_weight": 1.0 - alpha,
+            "median_connectivity_weight": 0.0,
+        }
+        print(f"\n=== alpha {alpha_idx}/{len(alphas)}: "
+              f"alpha={alpha:.2f} -> weights={weights} ===")
+        # Each city spec gets the α-derived weights for this pass; we shallow-
+        # copy so an outer caller's specs are not mutated.
+        alpha_specs = [{**spec, "weights": weights} for spec in city_specs]
+        sweep = run_seed_sweep(
+            alpha_specs, method_specs, seeds,
+            accept_modes=accept_modes,
+            run_name_scope=f"{run_name_scope}a{alpha:.2f}_",
+            progress=True)
+        rows = sweep["rows_df"].copy()
+        if not rows.empty:
+            rows["alpha"] = alpha
+            all_rows.append(rows)
+        all_results.extend(sweep["results"])
+        # Tag the RunResult objects too so callers can sort them by α later.
+        for result in sweep["results"]:
+            setattr(result, "alpha", alpha)
+
+    rows_df = (pd.concat(all_rows, ignore_index=True)
+               if all_rows else pd.DataFrame())
+    summary_df = _summarize_alpha_pareto(rows_df)
+    return {"rows_df": rows_df, "summary_df": summary_df,
+            "results": all_results}
+
+
+def _summarize_alpha_pareto(rows_df: pd.DataFrame) -> pd.DataFrame:
+    """Per-(dataset, method, kind, accept_mode, alpha) mean/std summary.
+
+    Same shape as :func:`_summarize_seed_sweep` but with an additional
+    ``alpha`` grouping column; used to drive the Pareto plot.
+    """
+    if rows_df.empty or "alpha" not in rows_df.columns:
+        return rows_df
+    group_cols = [c for c in ("dataset", "method", "kind", "accept_mode", "alpha")
+                  if c in rows_df.columns]
+    metric_cols = _plots.filter_component_columns(
+        [c for c in _METRIC_COLUMNS if c in rows_df.columns],
+        ENABLED_COST_COMPONENTS)
+    grouped = rows_df.groupby(group_cols, sort=False)
+    stats = grouped[metric_cols].agg(["mean", "std"])
+    stats.columns = [f"{stat}_{col}" for col, stat in stats.columns]
+    summary = stats
+    if "seed" in rows_df.columns:
+        summary = summary.join(grouped["seed"].nunique().rename("n_seeds"))
+    return summary.reset_index().round(_TABLE_DECIMALS)
