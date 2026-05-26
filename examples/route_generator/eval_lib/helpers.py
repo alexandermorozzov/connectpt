@@ -880,6 +880,13 @@ def build_default_bco_variants():
             "n_type6_bees": 2,
             "n_type7_bees": 0,
         },
+        # Note: Figure-5-style ablation variants (neural construction vs
+        # random-path-combiner construction, both paired with trained edit/trim
+        # bees) are intentionally NOT in the default list -- they exist only
+        # for the Pareto-alpha experiment in pareto_alpha_sweep.ipynb and
+        # would otherwise pollute the §12 benchmark sweep / MACSA / worse-accept
+        # tables with rows that are not meaningful outside the alpha sweep.
+        # See pareto_alpha_sweep.ipynb config cell for the inline definitions.
     ]
 
 
