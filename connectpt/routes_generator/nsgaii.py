@@ -193,8 +193,31 @@ class NSGAII:
                 child_states.replace_routes(mutated_networks.to(DEVICE))
                 # recompute costs
                 child_costs, has_violation = self._get_costs(child_states)
-            assert not has_violation.any(), \
-                "Child networks should not violate constraints!"
+            if has_violation.any():
+                # Children themselves are invalid -- usually because they
+                # inherited from an invalid seed network injected into the
+                # init pop (see `get_init_population(seed_routes=...)`).
+                # Repair by replacing each invalid child with a clone of an
+                # arbitrary current pop member; by iteration N>0 the pop is
+                # mostly valid networks, so this almost always lands on a
+                # valid donor. If even the donor is invalid we keep the
+                # network anyway -- Pareto sorting dominates it out next gen.
+                if pop:
+                    repl_idxs = np.where(has_violation)[0]
+                    for ri in repl_idxs:
+                        donor = pop[np.random.randint(len(pop))]
+                        mutated_networks[ri] = donor['routes']
+                    mutator_idxs[has_violation] = -1
+                    child_states.replace_routes(
+                        mutated_networks.to(state.device))
+                    child_costs, has_violation = self._get_costs(child_states)
+                    has_violation = has_violation.cpu().numpy()
+                if has_violation.any():
+                    log.warning(
+                        f"NSGA-II iter {it}: {int(has_violation.sum())}/"
+                        f"{self.pop_size} children violate constraints even "
+                        f"after fallback; keeping them, Pareto sorting will "
+                        f"drop them.")
 
             # Create Merged Population
             child_costs = child_costs.cpu().numpy()
