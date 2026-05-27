@@ -6,7 +6,6 @@ import random
 from itertools import count
 from heapq import heappush, heappop
 
-import hydra
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -14,6 +13,7 @@ import numpy as np
 from omegaconf import DictConfig
 import matplotlib.pyplot as plt
 import networkx as nx
+from hydra.core.global_hydra import GlobalHydra
 
 from . import models
 from .initialization import init_from_cfg
@@ -84,9 +84,16 @@ def get_graphnet_from_cfg(net_cfg, common_cfg):
 
 
 def get_random_path_combiner():
-    # with hydra.initialize(version_base=None, config_path="cfg"):
-    cfg = hydra.compose(config_name='neural_bco_mumford.yaml',
-                        overrides=["model=random_path_combiner"])
+    overrides = ["model=random_path_combiner"]
+    if GlobalHydra.instance().is_initialized():
+        cfg = compose(config_name='neural_bco_mumford.yaml',
+                      overrides=overrides)
+    else:
+        cfg_dir = Path(__file__).resolve().parent / "cfg"
+        with initialize_config_dir(config_dir=str(cfg_dir),
+                                   version_base=None):
+            cfg = compose(config_name='neural_bco_mumford.yaml',
+                          overrides=overrides)
     model = build_model_from_cfg(cfg.model, cfg.experiment)
     return model
 
@@ -203,9 +210,11 @@ def rewards_to_returns(rewards, discount_rate=1):
 
 
 @torch.no_grad()
-def test_method(method_fn, dataloader, eval_cfg, init_cfg, cost_obj, 
-                sum_writer=None, silent=False, return_routes=False, 
-                device=None, iter_num=0, routes_tensor=None, *method_args, **method_kwargs):
+def test_method(method_fn, dataloader, eval_cfg, init_cfg, cost_obj,
+                sum_writer=None, silent=False, return_routes=False,
+                device=None, iter_num=0, routes_tensor=None,
+                return_histories=False,
+                *method_args, **method_kwargs):
     if method_fn is not None:
         log.debug(f"evaluating {method_fn.__name__} on dataset")
     cost_histories = []
@@ -303,9 +312,10 @@ def test_method(method_fn, dataloader, eval_cfg, init_cfg, cost_obj,
     unserved_demand = cost_obj(state).unserved_demand_matrix
     out_stats = (final_costs.mean(), final_costs.std(), unserved_demand, all_metrics)
     if return_routes:
-        return out_stats + (state.routes,)
-    else:
-        return out_stats
+        out_stats = out_stats + (state.routes,)
+    if return_histories:
+        out_stats = out_stats + (cost_histories,)
+    return out_stats
 
 
 # -*- coding: utf-8 -*-

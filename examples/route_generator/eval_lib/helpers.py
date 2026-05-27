@@ -146,6 +146,42 @@ def build_lc_cfg(
     return _apply_disabled_components_to_cfg(cfg)
 
 
+def build_rpc_cfg(
+    run_name: str,
+    n_routes: int,
+    min_route_len: int,
+    max_route_len: int,
+    demand_time_weight: float = DEMAND_TIME_WEIGHT,
+    route_time_weight: float = ROUTE_TIME_WEIGHT,
+    median_connectivity_weight: float = MEDIAN_CONNECTIVITY_WEIGHT,
+):
+    """Build an LC-style eval cfg backed by RPC/pi_random instead of weights.
+
+    This mirrors the ``benchmark_init_visualize.ipynb`` RPC panel: reuse the
+    LC evaluation plumbing, but override the model with
+    ``random_path_combiner`` so routes are composed from random shortest paths
+    without trained construction weights.
+    """
+    run_name = safe_run_name(run_name)
+    overrides = [
+        "+eval=mumford0",
+        "++eval.dataset.type=tensor",
+        "++experiment.logdir=null",
+        f"++eval.n_routes={n_routes}",
+        f"++eval.min_route_len={min_route_len}",
+        f"++eval.max_route_len={max_route_len}",
+        f"++experiment.cost_function.kwargs.demand_time_weight={demand_time_weight}",
+        f"++experiment.cost_function.kwargs.route_time_weight={route_time_weight}",
+        f"++experiment.cost_function.kwargs.median_connectivity_weight={median_connectivity_weight}",
+        f"++run_name={run_name}",
+        "model=random_path_combiner",
+    ]
+    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
+        cfg = compose(config_name="eval_model_mumford", overrides=overrides)
+    cfg.batch_size = 1
+    return _apply_disabled_components_to_cfg(cfg)
+
+
 def build_bco_cfg(
     run_name: str,
     n_routes: int,
@@ -176,6 +212,8 @@ def build_bco_cfg(
     worse_selection_uniform_mix: float = BCO_WORSE_SELECTION_UNIFORM_MIX,
     worse_selection_elite_count: int = BCO_WORSE_SELECTION_ELITE_COUNT,
     trim_grace_period: int = 0,
+    early_stop_patience: int | None = None,
+    early_stop_min_delta: float = 0.0,
 ):
     """Build a BCO config.
 
@@ -228,7 +266,10 @@ def build_bco_cfg(
         f"++worse_selection_uniform_mix={worse_selection_uniform_mix}",
         f"++worse_selection_elite_count={worse_selection_elite_count}",
         f"++trim_grace_period={trim_grace_period}",
+        f"++early_stop_min_delta={float(early_stop_min_delta)}",
     ]
+    if early_stop_patience is not None:
+        overrides.append(f"++early_stop_patience={int(early_stop_patience)}")
     if use_neural_bees:
         overrides.append(f"+model.weights='{MODEL_WEIGHTS_PATH}'")
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
@@ -252,6 +293,24 @@ def as_route_tensor(routes):
     if isinstance(routes, torch.Tensor):
         return routes.detach().cpu()
     return get_batch_tensor_from_routes(routes).detach().cpu()
+
+
+def _pad_routes_to_spec(routes, n_routes, max_route_len):
+    routes = as_route_tensor(routes).long()
+    if routes.ndim == 2:
+        routes = routes[None]
+    if routes.shape[1] != n_routes:
+        raise ValueError(
+            f"Expected {n_routes} routes, got tensor shape {tuple(routes.shape)}")
+    current_len = routes.shape[-1]
+    if current_len > max_route_len:
+        raise ValueError(
+            f"RPC init produced route tensor length {current_len}, "
+            f"but max_route_len={max_route_len}")
+    if current_len < max_route_len:
+        routes = torch.nn.functional.pad(
+            routes, (0, max_route_len - current_len), value=-1)
+    return routes
 
 
 def metric_value(metrics, key, default=np.nan):
@@ -418,6 +477,25 @@ def run_lc(cfg, init_routes=None, revisit_routes=None, *,
     return run_name, metrics, unserved_demand, routes_tensor, list(step_counts)
 
 
+def build_rpc_routes(spec, tensors, run_name=None, n_samples=1):
+    """Generate benchmark initial routes with RPC/pi_random.
+
+    ``spec`` is one row from ``BENCHMARK_SPECS``. The returned tensor matches
+    the same ``[1, n_routes, max_route_len]`` contract as the old NX init.
+    """
+    run_name = run_name or f"rpc_init_{spec['city']}"
+    cfg = build_rpc_cfg(
+        run_name=run_name,
+        n_routes=spec["n_routes"],
+        min_route_len=spec["min_route_len"],
+        max_route_len=spec["max_route_len"],
+    )
+    _, _metrics, _unserved, routes, _step_counts = run_lc(
+        cfg, tensors=tensors, run_name_prefix="rpc_", n_samples=n_samples)
+    return _pad_routes_to_spec(
+        routes, spec["n_routes"], spec["max_route_len"])
+
+
 def build_edit_model(device):
     """Load the trim-capable edit model used by edit/trim BCO mutations."""
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
@@ -544,10 +622,10 @@ def run_rl_improvement(
 
 
 def run_bco(cfg, init_routes, mutation_counts_out=None, *,
-            tensors=None, run_name_scope=""):
+            tensors=None, run_name_scope="", cost_history_out=None):
     # tensors=None -> Mumford0 dataloader; tensors=<dict> -> explicit
     # tensor dataset. run_name_scope prefixes the run name so the
-    # NX paths can keep their "nx_dataset_" / "dataset_" labels.
+    # benchmark paths can keep their dataset/run-name labels.
     # Unifies the former run_bco / run_bco_on_nx_tensors /
     # run_bco_on_tensors trio.
     if tensors is None:
@@ -584,6 +662,7 @@ def run_bco(cfg, init_routes, mutation_counts_out=None, *,
         silent=True,
         device=device,
         return_routes=True,
+        return_histories=cost_history_out is not None,
         routes_tensor=init_routes,
         n_bees=cfg.n_bees,
         n_iterations=cfg.n_iterations,
@@ -615,9 +694,18 @@ def run_bco(cfg, init_routes, mutation_counts_out=None, *,
         worse_selection_uniform_mix=cfg.get("worse_selection_uniform_mix", 0.05),
         worse_selection_elite_count=cfg.get("worse_selection_elite_count", 1),
         trim_grace_period=cfg.get("trim_grace_period", 0),
+        early_stop_patience=cfg.get("early_stop_patience", None),
+        early_stop_min_delta=float(cfg.get("early_stop_min_delta", 0.0)),
         mutation_counts_out=mutation_counts_out,
     )
-    _, _, unserved_demand, metrics, routes = output
+    if cost_history_out is not None:
+        _, _, unserved_demand, metrics, routes, cost_histories = output
+        if cost_histories:
+            _h = cost_histories[0]
+            cost_history_out["history"] = (
+                _h.detach().cpu().clone() if hasattr(_h, "detach") else _h)
+    else:
+        _, _, unserved_demand, metrics, routes = output
     routes_tensor = as_route_tensor(routes)
     metrics = add_cost_breakdown_to_metrics(metrics, dataloader, cfg.eval, cost_obj, routes_tensor, device)
     return run_name, metrics, unserved_demand, routes_tensor, mutation_counts_out

@@ -397,7 +397,9 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                worse_selection_min_temperature=0.001,
                worse_selection_uniform_mix=0.05,
                worse_selection_elite_count=1,
-               trim_grace_period=0):
+               trim_grace_period=0,
+               early_stop_patience=None,
+               early_stop_min_delta=0.0):
     """Implementation of the method of  Nikolic and Teodorovic (2013).
     
     state -- A RouteGenBatchState object representing the initial state.
@@ -605,6 +607,13 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     use_worse_accept = worse_accept_temperature > 0
     use_worse_selection = worse_selection_temperature > 0
     use_trim_grace = trim_grace_period > 0
+    # Early-stopping bookkeeping. BCO's best_raw_costs is monotonic by
+    # construction (only the lowest cost ever seen replaces it), so a strict
+    # drop > `min_delta` resets the patience counter.
+    use_early_stop = (early_stop_patience is not None
+                      and early_stop_patience > 0)
+    iters_since_best_improved = 0
+    best_cost_tracker = float(best_raw_costs.min().item())
     # Per-bee countdown: > 0 means the bee was recently trimmed and is
     # protected from cost-based selection until the counter expires.
     trim_grace = torch.zeros((batch_size, n_bees), dtype=torch.long,
@@ -899,6 +908,23 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                 sum_writer.add_scalar('worse selection temperature',
                                       current_worse_selection_temperature,
                                       iteration + 1)
+
+        # Early-stopping check (post-iteration: cost_history[iteration+1] is
+        # the freshly written best_raw_costs).
+        new_best = float(best_raw_costs.min().item())
+        if best_cost_tracker - new_best > early_stop_min_delta:
+            best_cost_tracker = new_best
+            iters_since_best_improved = 0
+        else:
+            iters_since_best_improved += 1
+        if use_early_stop and iters_since_best_improved >= early_stop_patience:
+            cost_history = cost_history[:, :iteration + 2].clone()
+            if not silent:
+                log.info(
+                    f"[BCO] early stop at iter {iteration + 1}/{n_iterations}: "
+                    f"no >{early_stop_min_delta:g} best improvement in "
+                    f"{iters_since_best_improved} iters")
+            break
 
     # return the best solution
     state.replace_routes(best_networks)

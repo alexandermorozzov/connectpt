@@ -68,7 +68,8 @@ class HeuristicSequence:
 
 def hyperheuristic(state, cost_obj, f_0, delta_F=None, duration_s=None,
                    n_steps=None, init_network=None, model=None, silent=False,
-                   sum_writer=None):
+                   sum_writer=None,
+                   early_stop_patience=None, early_stop_min_delta=0.0):
     """
     state: The initial state of the system, not including the routes.
     cost_obj: The cost-function object.
@@ -164,6 +165,15 @@ def hyperheuristic(state, cost_obj, f_0, delta_F=None, duration_s=None,
         delta_F = max(best_cost - f_0, 0)
     cost_history = [best_cost]
 
+    # Early-stopping bookkeeping. HH proposes a candidate sometimes (only when
+    # a heuristic sequence completes), so we tick the patience counter on
+    # every loop iter regardless of whether is_seq_done was true.
+    use_early_stop = (early_stop_patience is not None
+                      and early_stop_patience > 0)
+    steps_since_best_improved = 0
+    # Track per-batch best-cost min as a Python float (cheapest reset check).
+    best_cost_tracker = float(best_cost.min().item())
+
     metric_names = cost_obj.get_metric_names()
 
     # initialize variables
@@ -247,6 +257,14 @@ def hyperheuristic(state, cost_obj, f_0, delta_F=None, duration_s=None,
 
             sum_writer.add_scalar('best cost', best_cost.mean(), step)
 
+        # Early-stopping: reset patience if min-best dropped by > min_delta.
+        new_best = float(best_cost.min().item())
+        if best_cost_tracker - new_best > early_stop_min_delta:
+            best_cost_tracker = new_best
+            steps_since_best_improved = 0
+        else:
+            steps_since_best_improved += 1
+
         if duration_s is not None:
             new_time_elapsed_s = time.process_time() - start_time_s
             delta_t = new_time_elapsed_s - time_elapsed_s
@@ -255,6 +273,14 @@ def hyperheuristic(state, cost_obj, f_0, delta_F=None, duration_s=None,
         else:
             step += 1
             pbar.update(1)
+
+        if use_early_stop and steps_since_best_improved >= early_stop_patience:
+            if not silent:
+                log.info(
+                    f"[HH] early stop at step {step}/{n_steps}: "
+                    f"no >{early_stop_min_delta:g} best improvement in "
+                    f"{steps_since_best_improved} steps")
+            break
 
     pbar.close()
     state.replace_routes(best_network)

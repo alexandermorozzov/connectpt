@@ -38,7 +38,8 @@ from .bee_colony import get_bee_1_variants
 def run(state, cost_obj, pop_size=10, shorten_prob=0.2, n_iterations=400,
         n_type1_mut=None, silent=False, init_network=None,
         force_linking_unlinked=False, mut_model=None, sum_writer=None,
-        mutate_parents=True):
+        mutate_parents=True,
+        early_stop_patience=None, early_stop_min_delta=0.0):
     """A genetic algorithm based on the BCO method of Nikolic and Teodorovic
         (2013), but modified and expanded.
 
@@ -143,6 +144,12 @@ def run(state, cost_obj, pop_size=10, shorten_prob=0.2, n_iterations=400,
 
     cost_history = torch.zeros((batch_size, n_iterations + 1), device=dev)
     cost_history[:, 0] = best_cost
+
+    # Early-stopping: track gens since a strict best-cost improvement.
+    use_early_stop = (early_stop_patience is not None
+                      and early_stop_patience > 0)
+    gens_since_best_improved = 0
+    best_cost_tracker = float(best_cost.item())
 
     for iteration in tqdm(range(n_iterations), disable=silent):
         set_population = [set(individual) for individual in population]
@@ -267,6 +274,24 @@ def run(state, cost_obj, pop_size=10, shorten_prob=0.2, n_iterations=400,
             # log the various metrics
             for name, val in zip(metric_names, best_metrics.unbind(-1)):
                 sum_writer.add_scalar(f'best {name}', val, iteration)
+
+        # Early-stopping bookkeeping. GA's elitist selection guarantees
+        # best_cost is monotonically non-increasing, so a strict drop by
+        # more than `min_delta` resets the patience counter.
+        new_best = float(best_cost.item())
+        if best_cost_tracker - new_best > early_stop_min_delta:
+            best_cost_tracker = new_best
+            gens_since_best_improved = 0
+        else:
+            gens_since_best_improved += 1
+        if use_early_stop and gens_since_best_improved >= early_stop_patience:
+            cost_history = cost_history[:, :iteration + 2].clone()
+            if not silent:
+                log.info(
+                    f"[GA] early stop at gen {iteration + 1}/{n_iterations}: "
+                    f"no >{early_stop_min_delta:g} best improvement in "
+                    f"{gens_since_best_improved} gens")
+            break
 
     # return the best solution
     state.replace_routes(best_scenario)

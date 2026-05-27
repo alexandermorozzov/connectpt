@@ -77,32 +77,55 @@ def _compose_baseline_cfg(config_name, overrides):
     return cfg
 
 
+def _early_stop_overrides(early_stop_patience, early_stop_min_delta):
+    """Emit ``++early_stop_*`` overrides shared by all baseline cfgs.
+
+    `early_stop_patience=None` disables early-stopping (the algorithm short-
+    circuits on `cfg.get("early_stop_patience", None)`); `min_delta` is always
+    written so the run_* helper picks it up without a default.
+    """
+    overrides = [f"++early_stop_min_delta={float(early_stop_min_delta)}"]
+    if early_stop_patience is not None:
+        overrides.append(f"++early_stop_patience={int(early_stop_patience)}")
+    return overrides
+
+
 def build_sa_cfg(run_name, n_routes, min_route_len, max_route_len,
-                 n_iterations=SA_N_ITERATIONS):
+                 n_iterations=SA_N_ITERATIONS,
+                 early_stop_patience=None, early_stop_min_delta=0.0):
     overrides = _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len)
     overrides.append(f"++alg_args.n_iterations={n_iterations}")
+    overrides += _early_stop_overrides(early_stop_patience, early_stop_min_delta)
     return _compose_baseline_cfg("sa_mumford", overrides)
 
 
 def build_ga_cfg(run_name, n_routes, min_route_len, max_route_len,
-                 n_iterations=GA_N_ITERATIONS, population_size=GA_POP_SIZE):
+                 n_iterations=GA_N_ITERATIONS, population_size=GA_POP_SIZE,
+                 early_stop_patience=None, early_stop_min_delta=0.0):
     overrides = _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len)
     overrides.append(f"++n_iterations={n_iterations}")
     overrides.append(f"++population_size={population_size}")
+    overrides += _early_stop_overrides(early_stop_patience, early_stop_min_delta)
     return _compose_baseline_cfg("ga_mumford", overrides)
 
 
 def build_hh_cfg(run_name, n_routes, min_route_len, max_route_len,
-                 n_iterations=HH_N_ITERATIONS):
+                 n_iterations=HH_N_ITERATIONS,
+                 early_stop_patience=None, early_stop_min_delta=0.0):
     overrides = _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len)
     overrides.append(f"++n_iterations={n_iterations}")
+    overrides += _early_stop_overrides(early_stop_patience, early_stop_min_delta)
     return _compose_baseline_cfg("hh_mumford", overrides)
 
 
-def _run_baseline(method_fn, cfg, init_routes, prefix, method_kwargs, *, tensors=None):
+def _run_baseline(method_fn, cfg, init_routes, prefix, method_kwargs, *,
+                  tensors=None, return_history=False):
     # tensors=None -> Mumford0 dataloader; tensors=<dict> -> explicit tensor
     # dataset (mirrors the run_bco signature). The initial routes are passed
     # through test_method's `routes_tensor` + a "tensor" init config.
+    # return_history=True also returns the cost_histories list from test_method
+    # as an extra element of the result tuple; default False keeps the legacy
+    # 4-tuple contract.
     if tensors is None:
         dataloader = make_test_dataloader(cfg.eval.dataset)
     else:
@@ -118,39 +141,75 @@ def _run_baseline(method_fn, cfg, init_routes, prefix, method_kwargs, *, tensors
         silent=True,
         device=device,
         return_routes=True,
+        return_histories=return_history,
         routes_tensor=init_routes,
         **method_kwargs,
     )
-    _, _, unserved_demand, metrics, routes = output
+    if return_history:
+        _, _, unserved_demand, metrics, routes, cost_histories = output
+    else:
+        _, _, unserved_demand, metrics, routes = output
+        cost_histories = None
     routes_tensor = as_route_tensor(routes)
     metrics = add_cost_breakdown_to_metrics(
         metrics, dataloader, cfg.eval, cost_obj, routes_tensor, device)
-    return run_name, metrics, unserved_demand, routes_tensor
+    result = (run_name, metrics, unserved_demand, routes_tensor)
+    if return_history:
+        result = result + (cost_histories,)
+    return result
 
 
-def run_sa(cfg, init_routes, *, tensors=None, run_name_scope=""):
+def _propagate_return_history(run_func):
+    """Decorator-like wrapper unused at the moment -- kept for future cleanup
+    if more sa/ga/hh-style runners get added; for now run_sa/ga/hh inline the
+    return_history kwarg."""
+    return run_func
+
+
+def _early_stop_kwargs(cfg):
+    """Pull ``early_stop_patience`` / ``early_stop_min_delta`` out of the cfg
+    if either was set as a Hydra ++override. Both default to None / 0.0, which
+    disables early-stopping inside the algorithm."""
+    return dict(
+        early_stop_patience=cfg.get("early_stop_patience", None),
+        early_stop_min_delta=float(cfg.get("early_stop_min_delta", 0.0)),
+    )
+
+
+def run_sa(cfg, init_routes, *, tensors=None, run_name_scope="",
+           return_history=False):
+    method_kwargs = OmegaConf.to_container(cfg.alg_args, resolve=True)
+    method_kwargs.update(_early_stop_kwargs(cfg))
     return _run_baseline(
         simulated_annealing_with_reheating, cfg, init_routes,
         f"{run_name_scope}sa_",
-        OmegaConf.to_container(cfg.alg_args, resolve=True),
-        tensors=tensors)
+        method_kwargs,
+        tensors=tensors, return_history=return_history)
 
 
-def run_ga(cfg, init_routes, *, tensors=None, run_name_scope=""):
+def run_ga(cfg, init_routes, *, tensors=None, run_name_scope="",
+           return_history=False):
+    method_kwargs = dict(
+        pop_size=int(cfg.population_size),
+        n_iterations=int(cfg.n_iterations),
+        shorten_prob=float(cfg.get("shorten_prob", 0.2)),
+        force_linking_unlinked=bool(cfg.get("force_linking_unlinked", False)),
+    )
+    method_kwargs.update(_early_stop_kwargs(cfg))
     return _run_baseline(
         genetic_algorithm, cfg, init_routes, f"{run_name_scope}ga_",
-        dict(pop_size=int(cfg.population_size),
-             n_iterations=int(cfg.n_iterations),
-             shorten_prob=float(cfg.get("shorten_prob", 0.2)),
-             force_linking_unlinked=bool(cfg.get("force_linking_unlinked", False))),
-        tensors=tensors)
+        method_kwargs,
+        tensors=tensors, return_history=return_history)
 
 
-def run_hh(cfg, init_routes, *, tensors=None, run_name_scope=""):
+def run_hh(cfg, init_routes, *, tensors=None, run_name_scope="",
+           return_history=False):
+    method_kwargs = dict(f_0=float(cfg.f_0), n_steps=int(cfg.n_iterations))
+    method_kwargs.update(_early_stop_kwargs(cfg))
     return _run_baseline(
         hyperheuristic, cfg, init_routes, f"{run_name_scope}hh_",
-        dict(f_0=float(cfg.f_0), n_steps=int(cfg.n_iterations)),
-        tensors=tensors)
+        method_kwargs,
+        tensors=tensors, return_history=return_history)
 
 
 # === from the notebook's section 9c (NSGA-II) ===
@@ -200,7 +259,7 @@ def run_nsgaii(cfg, *, tensors=None, init_routes=None, run_name_scope=""):
     ``init_routes`` (optional) is forwarded as the NSGA-II seed network: it is
     injected into the initial population as one explicit member, with the
     remaining ``pop_size - 1`` slots still filled via ``cfg.init_mode``
-    (default ``husselmann``). Pass the same NX-heuristic init the other
+    (default ``husselmann``). Pass the same benchmark init the other
     benchmark methods start from to make NSGA-II seeded comparably.
     """
     if tensors is None:
@@ -244,7 +303,7 @@ def reduce_pareto_front(output, demand_weight, route_weight):
 
 
 # === from the notebook's section 12 (Benchmark Sweep) ===
-# Benchmark sweep: NX-heuristic init -> BCO variants / RL / SA / GA / HH / NSGA-II.
+# Benchmark sweep: RPC init -> BCO variants / RL / SA / GA / HH / NSGA-II.
 import gc
 
 from connectpt.routes_generator import CityGraphData, build_nx_heuristic_routes
@@ -257,6 +316,11 @@ BENCHMARK_SPECS = [
     {"city": "Mumford3", "n_routes": 60, "min_route_len": 12, "max_route_len": 25},
 ]
 BENCHMARK_NX_SEED = 0
+BENCHMARK_INIT_MODE = "rpc"
+BENCHMARK_INIT_LABELS = {
+    "rpc": "RPC",
+    "nx": "NX-heuristic",
+}
 BENCHMARK_RUN_RL_IMPROVEMENT = RUN_RL_ONLY_BASELINE
 BENCHMARK_RUN_NSGAII = True            # NSGA-II is slow on Mumford2/3
 REUSE_EXISTING_BENCHMARK_SWEEP = True
@@ -280,15 +344,28 @@ def summarize_benchmark_run(benchmark, method, metrics):
     return row
 
 
-def load_benchmark_graph(spec):
-    """Load a benchmark city and build its NX-heuristic initial route set."""
+def benchmark_init_label(init_mode=None):
+    init_mode = BENCHMARK_INIT_MODE if init_mode is None else init_mode
+    return BENCHMARK_INIT_LABELS.get(init_mode, str(init_mode))
+
+
+def load_benchmark_graph(spec, init_mode=None):
+    """Load a benchmark city and build its benchmark initial route set."""
+    init_mode = BENCHMARK_INIT_MODE if init_mode is None else init_mode
     tensors = load_benchmark_tensors(spec["city"])
-    graph = CityGraphData.from_tensors(
-        tensors["node_locs"], tensors["street_adj"], tensors["demand"],
-        pos_only=False)
-    init_routes = build_nx_heuristic_routes(
-        graph, num_routes=spec["n_routes"], min_len=spec["min_route_len"],
-        max_len=spec["max_route_len"], seed=BENCHMARK_NX_SEED)
+    if init_mode == "rpc":
+        init_routes = build_rpc_routes(
+            spec, tensors, run_name=f"benchmark_rpc_init_{spec['city']}",
+            n_samples=1)
+    elif init_mode == "nx":
+        graph = CityGraphData.from_tensors(
+            tensors["node_locs"], tensors["street_adj"], tensors["demand"],
+            pos_only=False)
+        init_routes = build_nx_heuristic_routes(
+            graph, num_routes=spec["n_routes"], min_len=spec["min_route_len"],
+            max_len=spec["max_route_len"], seed=BENCHMARK_NX_SEED)
+    else:
+        raise ValueError(f"Unknown BENCHMARK_INIT_MODE: {init_mode!r}")
     return tensors, init_routes
 
 
@@ -339,17 +416,20 @@ def run_benchmark_sweep(specs=None):
         min_len = spec["min_route_len"]
         max_len = spec["max_route_len"]
         print(f"=== {city}: n_routes={n_routes} min={min_len} max={max_len} ===")
+        init_label = benchmark_init_label()
         try:
             tensors, init_routes = load_benchmark_graph(spec)
         except Exception as exc:
-            print(f"  [{city}] could not build NX-heuristic init: {exc}")
+            print(f"  [{city}] could not build {init_label} init: {exc}")
             continue
-        print(f"  NX-heuristic init routes: {tuple(init_routes.shape)}")
+        print(f"  {init_label} init routes: {tuple(init_routes.shape)}")
 
-        # NX-heuristic initial routes (reference baseline)
-        _record(rows, city, "NX-heuristic (initial)", lambda: _run_baseline(
-            None, build_sa_cfg(f"{city}_nxh_init", n_routes, min_len, max_len),
-            init_routes, f"{city}_nxh_init_", {}, tensors=tensors),
+        # Benchmark initial routes (reference baseline)
+        _record(rows, city, f"{init_label} (initial)", lambda: _run_baseline(
+            None, build_sa_cfg(f"{city}_{BENCHMARK_INIT_MODE}_init",
+                               n_routes, min_len, max_len),
+            init_routes, f"{city}_{BENCHMARK_INIT_MODE}_init_", {},
+            tensors=tensors),
             routes_by_method, metrics_by_method)
 
         # BCO variants
@@ -393,7 +473,7 @@ def run_benchmark_sweep(specs=None):
             init_routes, tensors=tensors, run_name_scope=f"{city}_"),
             routes_by_method, metrics_by_method)
 
-        # NSGA-II (multi-objective). Seeded with the same NX-heuristic init
+        # NSGA-II (multi-objective). Seeded with the same benchmark init
         # routes as every other benchmark method: the seed lands in the
         # initial population as one explicit member, the remaining pop_size-1
         # slots are still filled via cfg.init_mode (default 'husselmann') so

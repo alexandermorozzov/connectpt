@@ -55,7 +55,9 @@ def simulated_annealing_with_reheating(state, cost_obj, init_network,
                                        schedule, cooling_rate, shorten_prob,
                                        reheating_threshold=None,
                                        reheating_factor=None, sum_writer=None,
-                                       silent=False):
+                                       silent=False,
+                                       early_stop_patience=None,
+                                       early_stop_min_delta=0.0):
     """Performs the simulated annealing algorithm with reheating.
 
     Args:
@@ -102,6 +104,11 @@ def simulated_annealing_with_reheating(state, cost_obj, init_network,
     current_cost = best_cost.clone()
     current_temp = initial_temp
     no_improvement_iterations = 0
+    # Separate counter for early-stopping: never reset by reheating, only by
+    # an actual `min_delta`-strict improvement of the best-ever cost.
+    iters_since_best_improved = 0
+    use_early_stop = (early_stop_patience is not None
+                      and early_stop_patience > 0)
     if reheating_threshold is None:
         # we never reheat
         reheating_threshold = n_iterations
@@ -127,10 +134,14 @@ def simulated_annealing_with_reheating(state, cost_obj, init_network,
         cost_diff = new_cost - current_cost
 
         accept_worse_prob = math.exp(-cost_diff / (cost_norm * current_temp))
+        improved_best = False
         if cost_diff < 0 or torch.rand(1) < accept_worse_prob:
             current_network = new_network
             current_cost = new_cost
             if current_cost < best_cost:
+                # Mark a min_delta-strict best improvement.
+                improved_best = bool(
+                    (best_cost - current_cost).item() > early_stop_min_delta)
                 best_network = current_network
                 best_cost = current_cost
                 no_improvement_iterations = 0
@@ -138,6 +149,11 @@ def simulated_annealing_with_reheating(state, cost_obj, init_network,
                 no_improvement_iterations += 1
         else:
             no_improvement_iterations += 1
+
+        if improved_best:
+            iters_since_best_improved = 0
+        else:
+            iters_since_best_improved += 1
 
         current_temp = max(schedule(current_temp, cooling_rate),
                            final_temp)
@@ -154,6 +170,17 @@ def simulated_annealing_with_reheating(state, cost_obj, init_network,
             sum_writer.add_scalar('best cost', best_cost, ii + 1)
             sum_writer.add_scalar('temperature', current_temp, ii + 1)
             sum_writer.add_scalar('worsen prob', min(accept_worse_prob, 1), ii)
+
+        if use_early_stop and iters_since_best_improved >= early_stop_patience:
+            # Trim the right zero-padded tail so the viz curve ends at the
+            # last real iter rather than dropping to 0 afterwards.
+            cost_history = cost_history[:, :ii + 2].clone()
+            if not silent:
+                log.info(
+                    f"[SA] early stop at iter {ii + 1}/{n_iterations}: "
+                    f"no >{early_stop_min_delta:g} best improvement in "
+                    f"{iters_since_best_improved} iters")
+            break
 
     state.replace_routes(best_network)
     return state, cost_history
