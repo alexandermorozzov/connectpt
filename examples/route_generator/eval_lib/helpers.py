@@ -381,9 +381,11 @@ def format_absolute_metrics(metrics):
 
 
 def run_lc(cfg, init_routes=None, revisit_routes=None, *,
-           tensors=None, run_name_prefix="lc_"):
+           tensors=None, run_name_prefix="lc_", n_samples=None):
     # tensors=None -> Mumford0 dataloader; tensors=<dict> -> explicit
     # tensor dataset (unifies the former run_lc_on_tensors).
+    # n_samples=None -> use the default LC_SAMPLES; pass a smaller integer
+    # (e.g. 1) for a single-sample diagnostic run.
     if tensors is None:
         dataloader = make_test_dataloader(cfg.eval.dataset)
     else:
@@ -396,12 +398,13 @@ def run_lc(cfg, init_routes=None, revisit_routes=None, *,
     init_cfg = OmegaConf.create({"method": "tensor"}) if init_routes is not None else None
     if hasattr(model, "clear_step_counts_log"):
         model.clear_step_counts_log()
+    effective_n_samples = LC_SAMPLES if n_samples is None else int(n_samples)
     _, unserved_demand, metrics, routes = eval_model(
         model,
         dataloader,
         cfg.eval,
         cost_obj,
-        n_samples=LC_SAMPLES,
+        n_samples=effective_n_samples,
         return_routes=True,
         silent=True,
         device=device,
