@@ -31,9 +31,20 @@ def _safe_name(name: str) -> str:
                    for c in str(name)).strip("_") or "results"
 
 
-def save_table(df, name: str):
-    """Save a results DataFrame to ``artifacts/results/<name>.csv``."""
-    path = RESULTS_DIR / f"{_safe_name(name)}.csv"
+def save_table(df, name: str, *, subdir: str | None = None):
+    """Save a results DataFrame to ``artifacts/results/[<subdir>/]<name>.csv``.
+
+    ``subdir`` (optional) routes the CSV into a child folder beneath
+    ``RESULTS_DIR``; the folder is created if missing. Use this to keep a
+    self-contained experiment-series notebook's outputs grouped together
+    (e.g. ``subdir="final"`` for the consolidated experiment notebook).
+    """
+    if subdir:
+        out_dir = RESULTS_DIR / _safe_name(subdir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        out_dir = RESULTS_DIR
+    path = out_dir / f"{_safe_name(name)}.csv"
     df.to_csv(path, index=False)
     print(f"[results] table ({len(df)} rows) -> {path}")
     return path
