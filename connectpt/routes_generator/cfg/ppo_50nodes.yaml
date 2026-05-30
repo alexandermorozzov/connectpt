@@ -4,7 +4,7 @@ ppo:
   # n_epochs / minibatch_size baked in from the lc_improvement notebook;
   # gae_lambda lowered 1.0 -> 0.95 to trade a little bias for much lower
   # advantage variance (helps the policy fine-tune toward good edits).
-  n_epochs: 10
+  n_epochs: 1
   minibatch_size: 256
   horizon: 200
   epsilon: 0.2

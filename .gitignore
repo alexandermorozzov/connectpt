@@ -40,7 +40,7 @@ ENV/
 
 # datasets/ is tracked, except files over GitHub's 100 MB hard limit
 # (restore raw_graphs_1000.pkl locally or use git-lfs).
-datasets/raw_graphs_1000.pkl
+datasets
 
 # Generated run artifacts -- results CSV, route dumps, model weights,
 # training logs -- are kept local only; regenerate by running the notebooks.

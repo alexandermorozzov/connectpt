@@ -913,7 +913,7 @@ def _collect_lc_improvement_cfg_ppo_rollout(
         edit_step_penalty=0.0, forced_halt_penalty=0.0,
         incumbent_reward=False, return_best_routes=False,
         zero_trim_reward=False, max_trim_actions_per_route=1,
-        keep_rollout_on_device=False):
+        keep_rollout_on_device=False, adjustment_penalty_fn=None):
     states = []
     rewards = []
     value_estimates = []
@@ -1028,8 +1028,17 @@ def _collect_lc_improvement_cfg_ppo_rollout(
 
             done_after = state.is_done()
             result = cost_obj(state)
+            # Per-component breakdown (demand/route/connectivity) is snapshot
+            # from the *base* cost before any adjustment-degree shaping so the
+            # history's per-component delta columns stay pure. The optional
+            # adjustment penalty is then folded into result.cost only, so it
+            # shapes the diff reward without polluting the component report.
             result_components = cost_obj.get_cost_components(
                 state, result=result).detach()
+            if adjustment_penalty_fn is not None:
+                _adj_pen = adjustment_penalty_fn(state)
+                if _adj_pen is not None:
+                    result.cost = result.cost + _adj_pen.detach()
             if incumbent_reward:
                 new_best_cost = torch.minimum(best_cost, result.cost)
                 step_rewards = (best_cost - new_best_cost) * reward_scale
@@ -1971,6 +1980,24 @@ def train_lc_improvement_cfg_ppo(
     use_gae = bool(cfg.ppo.use_gae)
     gae_lambda = float(cfg.ppo.gae_lambda)
 
+    # Optional adjustment-degree reward shaping. When weight <= 0 (the default)
+    # every code path below is bypassed and training is bit-for-bit unchanged.
+    # When enabled, the diff reward also penalizes how far the full current
+    # network's per-route adjustment degree (alignment dissimilarity vs the
+    # seed routes) is from `adjustment_degree_target`, scaled by the weight.
+    adjustment_degree_weight = float(
+        _get_cfg_value(cfg, "adjustment_degree_weight", 0.0))
+    adjustment_degree_target = float(
+        _get_cfg_value(cfg, "adjustment_degree_target", 0.2))
+    adjustment_degree_gap = float(
+        _get_cfg_value(cfg, "adjustment_degree_gap", 0.1))
+    adjustment_degree_mode = str(
+        _get_cfg_value(cfg, "adjustment_degree_mode", "current"))
+    use_adjustment_penalty = adjustment_degree_weight > 0
+    if use_adjustment_penalty:
+        from .bee_colony import (get_adjustment_degrees,
+                                 get_adjustment_penalties)
+
     optimizer = _make_optimizer_from_cfg(model, cfg)
 
     # Reuse the original PPO value baseline.  The class relies on the module
@@ -2055,12 +2082,67 @@ def train_lc_improvement_cfg_ppo(
     cur_graph_batch = None
     cur_working_routes = None
     cur_cost_weights = None
+    cur_seed_routes = None
     prev_route_idx_holder = [None]
     prev_context_counts_holder = [None]
+    # Cached per-route penalties (|adj - target|, shape [batch, n_routes]) for
+    # the current episode. Only the slot being edited changes within an
+    # episode, so we compute the full vector once per episode (at start) and
+    # refresh only the edited route per step -- keeping the exact network-mean
+    # semantics while avoiding an n_routes-wide Needleman-Wunsch every step.
+    episode_route_pen_holder = [None]
+
+    def _route_penalties(full_routes):
+        adj = get_adjustment_degrees(
+            full_routes, cur_seed_routes, cost_obj.symmetric_routes,
+            gap=adjustment_degree_gap, mode=adjustment_degree_mode)
+        return get_adjustment_penalties(
+            adj, objective="target", target=adjustment_degree_target)
+
+    def _init_episode_adjustment():
+        """Compute the full per-route penalty vector once at episode start."""
+        if not use_adjustment_penalty or cur_seed_routes is None \
+                or cur_working_routes is None:
+            return
+        episode_route_pen_holder[0] = _route_penalties(cur_working_routes)
+
+    def adjustment_penalty_fn(state):
+        """Per-network adjustment-degree penalty (vs seed routes) for shaping.
+
+        Returns a ``[batch]`` tensor ``weight * mean_route |adj - target|`` for
+        the full current network (frozen context slots + the live in-progress
+        route), or ``None`` when shaping is disabled / not yet initialized.
+        Reuses the episode-cached per-route penalties and only recomputes the
+        single route currently being edited.
+        """
+        if not use_adjustment_penalty:
+            return None
+        route_idx = prev_route_idx_holder[0]
+        base_pen = episode_route_pen_holder[0]
+        if route_idx is None or cur_seed_routes is None \
+                or cur_working_routes is None or base_pen is None:
+            return None
+        # Recompute only the edited route's penalty (1 route vs n_routes).
+        cur_list = _get_current_routes_from_state(state)
+        cur_tensor = get_batch_tensor_from_routes(
+            [[cur_list[b]] for b in range(len(cur_list))],
+            cur_working_routes.device,
+            max_route_len=cur_working_routes.shape[-1])
+        adj_cur = get_adjustment_degrees(
+            cur_tensor,
+            cur_seed_routes[:, route_idx:route_idx + 1, :],
+            cost_obj.symmetric_routes,
+            gap=adjustment_degree_gap, mode=adjustment_degree_mode)
+        pen_cur = get_adjustment_penalties(
+            adj_cur, objective="target", target=adjustment_degree_target)
+        pens = base_pen.clone()
+        pens[:, route_idx] = pen_cur[:, 0]
+        return adjustment_degree_weight * pens.mean(dim=1)
 
     def make_next_state(prev_state=None):
         nonlocal epoch_indices, index_cursor, route_cursor
         nonlocal cur_graph_batch, cur_working_routes, cur_cost_weights
+        nonlocal cur_seed_routes
 
         # 1. Close out the previous slot: pull its finalized route out of
         # prev_state's _finished_routes and write it into working_routes so
@@ -2120,6 +2202,10 @@ def train_lc_improvement_cfg_ppo(
                  context_route_len),
                 -1, dtype=route_batch.dtype, device=route_batch.device)
             cur_working_routes[..., :route_batch.shape[-1]] = route_batch
+            # Freeze the seed network as the adjustment-degree reference for
+            # this batch (only used when adjustment shaping is enabled).
+            if use_adjustment_penalty:
+                cur_seed_routes = cur_working_routes.clone()
 
             route_cursor = 0
 
@@ -2142,9 +2228,18 @@ def train_lc_improvement_cfg_ppo(
 
         prev_route_idx_holder[0] = route_idx
         prev_context_counts_holder[0] = state.n_finished_routes.detach().clone()
+        # Refresh the per-route penalty cache for the new episode (context
+        # slots may have been finalized since the last episode).
+        _init_episode_adjustment()
 
         start_result = cost_obj(state)
-        return state, start_result.cost.detach()
+        start_cost = start_result.cost.detach()
+        # Keep the reward baseline consistent: the per-step result.cost in the
+        # collector also has this penalty added, so prev_cost must include it.
+        _adj_pen = adjustment_penalty_fn(state)
+        if _adj_pen is not None:
+            start_cost = start_cost + _adj_pen.detach()
+        return state, start_cost
 
     pbar = tqdm(range(int(n_iterations)), desc="cfg ppo improvement")
     for iteration in pbar:
@@ -2161,7 +2256,8 @@ def train_lc_improvement_cfg_ppo(
             return_best_routes=return_best_routes,
             zero_trim_reward=zero_trim_reward,
             max_trim_actions_per_route=max_trim_actions_per_route,
-            keep_rollout_on_device=keep_rollout_on_device)
+            keep_rollout_on_device=keep_rollout_on_device,
+            adjustment_penalty_fn=adjustment_penalty_fn)
         returns, advantages = _compute_ppo_returns_and_advantages(
             rollout["rewards"], rollout["value_estimates"],
             rollout["dones"], rollout["final_value_estimates"], gamma,

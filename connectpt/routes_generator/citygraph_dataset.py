@@ -967,6 +967,52 @@ def build_out4nn_graph(n_nodes, edge_keep_prob, directed):
                            directed)
 
 
+_USE_TORCH_KNN_FALLBACK = False
+
+
+def _torch_knn_graph(pos, knn, flow='target_to_source', directed=True):
+    """Build a k-NN edge index without torch-cluster."""
+    n_nodes = pos.shape[0]
+    k = min(knn, max(n_nodes - 1, 0))
+    if k == 0:
+        edge_index = torch.empty((2, 0), dtype=torch.long, device=pos.device)
+    else:
+        dists = torch.cdist(pos, pos)
+        dists.fill_diagonal_(float('inf'))
+        nearest = dists.topk(k, largest=False, dim=1).indices
+        center_nodes = torch.arange(n_nodes, device=pos.device).repeat_interleave(k)
+        neighbor_nodes = nearest.reshape(-1)
+
+        if flow == 'source_to_target':
+            edge_index = torch.stack((neighbor_nodes, center_nodes), dim=0)
+        elif flow == 'target_to_source':
+            edge_index = torch.stack((center_nodes, neighbor_nodes), dim=0)
+        else:
+            raise ValueError("flow must be 'source_to_target' or 'target_to_source'")
+
+    if not directed:
+        edge_index = pygu.to_undirected(edge_index, num_nodes=n_nodes)
+
+    return edge_index
+
+
+def _apply_knn_graph(street_graph, knn_graph, knn, flow, directed):
+    global _USE_TORCH_KNN_FALLBACK
+
+    if not _USE_TORCH_KNN_FALLBACK:
+        try:
+            return knn_graph(street_graph)
+        except ImportError as exc:
+            if 'torch-cluster' not in str(exc):
+                raise
+            _USE_TORCH_KNN_FALLBACK = True
+
+    street_graph.edge_index = _torch_knn_graph(
+        street_graph.pos, knn, flow=flow, directed=directed)
+    street_graph.edge_attr = None
+    return street_graph
+
+
 def build_knn_graph(n_nodes, knn, edge_keep_prob=1, flow='target_to_source',
                     directed=True):
     knn_graph = KNNGraph(k=knn, flow=flow, force_undirected=not directed)
@@ -977,7 +1023,7 @@ def build_knn_graph(n_nodes, knn, edge_keep_prob=1, flow='target_to_source',
         locs = torch.rand((n_nodes, 2)) * 2 - 1
         # determine the edges
         street_graph = Data(pos=locs)
-        pre_rmv = knn_graph(street_graph)
+        pre_rmv = _apply_knn_graph(street_graph, knn_graph, knn, flow, directed)
         street_graph = rmv_isolated_nodes(pre_rmv)
 
         # drop random edges
