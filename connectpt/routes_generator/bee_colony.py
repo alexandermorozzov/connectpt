@@ -179,9 +179,33 @@ def get_adjustment_penalties(adjustment_degrees, objective='raw', target=0.2):
             )
         target_tensor = adjustment_degrees.new_tensor(target)
         return (adjustment_degrees - target_tensor).abs()
+    if objective == 'cap':
+        # One-sided (hinge) penalty: penalize only EXCEEDING the target, i.e.
+        # treat `target` as an upper bound the routes should not pass. No
+        # penalty (and no pull) while adjustment <= target.
+        if not 0.0 <= target <= 1.0:
+            raise ValueError(
+                f"adjustment_degree_target must be in [0, 1], got {target}"
+            )
+        target_tensor = adjustment_degrees.new_tensor(target)
+        return (adjustment_degrees - target_tensor).clamp(min=0.0)
+    if objective == 'cap_sq':
+        # Quadratic one-sided penalty: max(0, adj - target)**2. Same upper-bound
+        # semantics as 'cap' (no penalty below target), but the gradient
+        # 2*(adj - target) GROWS with the overshoot -- gentle near the target
+        # (does not swamp the main objective / keeps return variance low) and
+        # firm on large excess. Unlike linear 'cap' (constant gradient = W),
+        # the optimal adjustment depends on the target, so target/W become real
+        # controllability levers under conditioning.
+        if not 0.0 <= target <= 1.0:
+            raise ValueError(
+                f"adjustment_degree_target must be in [0, 1], got {target}"
+            )
+        target_tensor = adjustment_degrees.new_tensor(target)
+        return (adjustment_degrees - target_tensor).clamp(min=0.0) ** 2
     raise ValueError(
         f"Unknown adjustment degree objective '{objective}'. "
-        "Expected 'raw' or 'target'."
+        "Expected 'raw', 'target', 'cap', or 'cap_sq'."
     )
 
 

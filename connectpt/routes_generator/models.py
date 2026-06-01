@@ -754,10 +754,12 @@ class NodepairDotScorer(nn.Module):
 
 class RouteScorer(nn.Module):
     def __init__(self, embed_dim, nonlin_type, dropout, n_mlp_layers=2,
-                 mlp_width=None):
+                 mlp_width=None, n_extra_feats=14):
         super().__init__()
         self.embed_dim = embed_dim
-        self.n_extra_feats = 14
+        # route_feats (2) + global_state_features. Default 14 = 2 + 12; the edit
+        # model with adjustment conditioning passes 16 = 2 + 14.
+        self.n_extra_feats = n_extra_feats
         self.dropout = dropout
         if mlp_width is None:
             mlp_width = self.in_dim * 2
@@ -1225,8 +1227,9 @@ class RouteGeneratorBase(nn.Module):
 class PathCombiningRouteGenerator(RouteGeneratorBase):
     def __init__(self, *args, n_pathscorer_layers=3, pathscorer_hidden_dim=16,
                  halt_scorer_type='endpoints', n_halt_layers=3, n_halt_heads=4,
-                 force_linking_unlinked=False, logit_clip=None, 
-                 serial_halting=True, max_act_len=None, **kwargs):
+                 force_linking_unlinked=False, logit_clip=None,
+                 serial_halting=True, max_act_len=None,
+                 n_adjustment_cond_feats=0, **kwargs):
         """Generates routes by combining shortest paths.
 
         n_pathscorer_layers -- number of layers in the MLP that updates path
@@ -1261,35 +1264,46 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         assert self.only_routes_with_demand_are_valid is False, 'not supported'
         self.force_linking_unlinked = force_linking_unlinked
 
-        path_scorer_indim = 17
-        # self.path_input_norm = FeatureNorm(FEAT_NORM_MOMENTUM, 
+        # Gated adjustment conditioning: when > 0, get_global_state_features
+        # appends this many extra features (target + normalized weight), so the
+        # scorers that consume global features must widen by the same amount.
+        # Default 0 keeps the construction-model dims (and frozen weights) intact.
+        self.n_adjustment_cond_feats = n_adjustment_cond_feats
+        _halt_n_extra = 14 + n_adjustment_cond_feats
+
+        path_scorer_indim = 17 + n_adjustment_cond_feats
+        # self.path_input_norm = FeatureNorm(FEAT_NORM_MOMENTUM,
         #                                    path_scorer_indim - 1)
         self.path_scorer = nn.Sequential(
             FeatureNorm(path_scorer_indim),
             get_mlp(n_pathscorer_layers, pathscorer_hidden_dim,
-                    self.nonlin_type, self.dropout, in_dim=path_scorer_indim, 
+                    self.nonlin_type, self.dropout, in_dim=path_scorer_indim,
                     out_dim=1)
         )
         if halt_scorer_type == "endpoints":
-            self.halt_scorer = RouteEndpointsScorer(self.embed_dim, 
-                                                    self.nonlin_type, 
+            self.halt_scorer = RouteEndpointsScorer(self.embed_dim,
+                                                    self.nonlin_type,
                                                     self.dropout,
-                                                    n_halt_layers)
+                                                    n_halt_layers,
+                                                    n_extra_feats=_halt_n_extra)
         elif halt_scorer_type == "mean":
-            self.halt_scorer = RouteMeanScorer(self.embed_dim, 
-                                               self.nonlin_type, 
-                                               self.dropout)
+            self.halt_scorer = RouteMeanScorer(self.embed_dim,
+                                               self.nonlin_type,
+                                               self.dropout,
+                                               n_extra_feats=_halt_n_extra)
         elif halt_scorer_type == "transformer":
-            self.halt_scorer = RouteTransformerScorer(n_halt_heads, 
+            self.halt_scorer = RouteTransformerScorer(n_halt_heads,
                                                       n_halt_layers,
-                                                      self.embed_dim, 
+                                                      self.embed_dim,
                                                       self.nonlin_type,
-                                                      self.dropout)
+                                                      self.dropout,
+                                                      n_extra_feats=_halt_n_extra)
         elif halt_scorer_type == "latent":
             self.halt_scorer = RouteLatentScorer(n_halt_heads, n_halt_layers,
-                                                 self.embed_dim, 
+                                                 self.embed_dim,
                                                  self.nonlin_type,
-                                                 self.dropout)
+                                                 self.dropout,
+                                                 n_extra_feats=_halt_n_extra)
         elif halt_scorer_type == "alpha":
             self.halt_scorer = RouteAlphaScorer()
 
@@ -1874,9 +1888,9 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         super().__init__(*args, **kwargs)
         self.trim_base_feat_dim = 6
         self.trim_overlap_feat_dim = 8
-        # Matches RouteGenBatchState.get_global_state_features() for the
-        # current 3-weight cost objective.
-        self.trim_global_feat_dim = 12
+        # Matches RouteGenBatchState.get_global_state_features(): 12 base, plus
+        # n_adjustment_cond_feats (0 or 2) when adjustment conditioning is on.
+        self.trim_global_feat_dim = 12 + self.n_adjustment_cond_feats
         self.trim_action_feat_dim = (
             self.trim_base_feat_dim +
             self.trim_overlap_feat_dim +

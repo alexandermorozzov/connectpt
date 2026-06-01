@@ -1,5 +1,6 @@
 import logging as log
 import copy
+import math
 from collections import deque
 from typing import Union
 from collections.abc import Sequence
@@ -146,7 +147,11 @@ class ExtraStateData(HeteroData):
                    'context_node_covered_mask',
                    'context_edge_covered_mask',
                    'fixed_routes',
-                   'node_coords']:
+                   'node_coords',
+                   'adjustment_target',
+                   'adjustment_weight',
+                   'adjustment_use_current',
+                   'adjustment_seed']:
             return None
         else:
             return super().__cat_dim__(key, value, *args, **kwargs)
@@ -262,6 +267,17 @@ class RouteGenBatchState:
             for key, val in cost_weights.items():
                 # expand the cost weights to match the batch
                 extra_data.cost_weights[key] = val[ii]
+
+            # Optional adjustment-degree conditioning (gated). Sentinel -1 means
+            # "not conditioned" -> get_global_state_features keeps the legacy
+            # 12-feature vector (so the frozen construction model is unaffected).
+            extra_data.adjustment_target = torch.tensor(-1.0, device=dev)
+            extra_data.adjustment_weight = torch.tensor(-1.0, device=dev)
+            # Optional "current adjustment degree vs seed" feature (closed-loop):
+            # adjustment_use_current >= 0 enables it; adjustment_seed holds the
+            # per-graph reference (seed) routes used to compute the live adj.
+            extra_data.adjustment_use_current = torch.tensor(-1.0, device=dev)
+            extra_data.adjustment_seed = torch.full((0, 0), -1.0, device=dev)
 
             extra_datas.append(extra_data)
             if hasattr(dd, 'fixed_routes') and dd.fixed_routes.numel() > 0:
@@ -999,11 +1015,51 @@ class RouteGenBatchState:
         mean_demand_time_frac = mean_demand_time / diameter
 
         global_features = torch.cat((
-            cost_weights, mean_route_time[:, None], n_routes_log_feats, 
+            cost_weights, mean_route_time[:, None], n_routes_log_feats,
             n_routes_frac_feats, uncovered_feats, curr_route_n_stops,
             mean_demand_time_frac[:, None],
         ), dim=-1)
+
+        # Gated adjustment conditioning: append conditioning features only when
+        # set (sentinel >= 0). Default keeps the legacy 12-feature vector so the
+        # frozen construction model is unaffected. The appended width is:
+        #   +1 (target only)      when target is set and weight is NOT,
+        #   +2 (target, weight)   when both are set.
+        # This must match the model's n_adjustment_cond_feats (1 or 2).
+        adj_target = self.adjustment_target.reshape(-1)
+        if bool((adj_target >= 0).any().item()):
+            feats = [adj_target.clamp(min=0.0)]
+            adj_weight = self.adjustment_weight.reshape(-1)
+            if bool((adj_weight >= 0).any().item()):
+                # log1p-normalize the weight to ~[0,1] over range [0, 8].
+                feats.append(torch.log1p(adj_weight.clamp(min=0.0)) /
+                             math.log1p(8.0))
+            adj_use_cur = self.adjustment_use_current.reshape(-1)
+            if bool((adj_use_cur >= 0).any().item()):
+                # closed-loop: live adjustment degree of the current network
+                # (incl. the in-progress route) vs the stored seed routes.
+                feats.append(self._compute_current_adjustment())
+            adj_feats = torch.stack(feats, dim=-1)
+            global_features = torch.cat((global_features, adj_feats), dim=-1)
         return global_features
+
+    def _compute_current_adjustment(self):
+        """Per-graph adjustment degree of the CURRENT network vs the stored
+        seed routes ([batch] in [0,1]). Used as a closed-loop conditioning
+        feature. gap/mode fixed to the training default (paper, gap=0.1)."""
+        from .bee_colony import get_adjustment_degrees
+        cur = tu.get_batch_tensor_from_routes(self.routes, self.device)
+        seed = self.adjustment_seed.to(self.device)
+        if seed.dim() == 2:           # unbatched [n_routes, L]
+            seed = seed.unsqueeze(0)
+        nr = min(cur.shape[1], seed.shape[1])
+        ll = min(cur.shape[-1], seed.shape[-1])
+        adj = get_adjustment_degrees(
+            cur[:, :nr, :ll], seed[:, :nr, :ll].long(),
+            self.symmetric_routes, gap=0.1, mode='paper')
+        # get_adjustment_degrees returns per-route [batch, n_routes]; the
+        # feature is the per-graph mean adjustment.
+        return adj.reshape(adj.shape[0], -1).mean(dim=1).float()
 
     def get_n_disconnected_demand_edges(self):
         # count the number of demand edges that are disconnected
@@ -1192,7 +1248,69 @@ class RouteGenBatchState:
     @property
     def cost_weights(self):
         return self.extra_data.cost_weights
-    
+
+    @property
+    def adjustment_target(self):
+        """Per-graph adjustment-degree target (-1 if not conditioned)."""
+        return self.extra_data.adjustment_target
+
+    @property
+    def adjustment_weight(self):
+        """Per-graph adjustment-penalty weight (-1 if not conditioned)."""
+        return self.extra_data.adjustment_weight
+
+    @property
+    def adjustment_use_current(self):
+        """Per-graph flag (>=0) enabling the live current-adj feature."""
+        return self.extra_data.adjustment_use_current
+
+    @property
+    def adjustment_seed(self):
+        """Per-graph seed routes used to compute the live current adj."""
+        return self.extra_data.adjustment_seed
+
+    @property
+    def is_adjustment_conditioned(self):
+        return bool((self.adjustment_target.reshape(-1)[0] >= 0).item())
+
+    def set_adjustment_conditioning(self, target, weight=None,
+                                    seed_routes=None):
+        """Enable adjustment conditioning: store per-graph target (always) and,
+        optionally, weight and seed routes, so they are appended to
+        get_global_state_features (gated).
+
+        - ``weight`` None  -> weight stays sentinel -1, NOT fed into features
+          (use for "target only"; the penalty weight is a fixed scalar outside).
+        - ``seed_routes`` given ([batch, n_routes, L]) -> enables the live
+          "current adjustment degree vs seed" feature (closed-loop): each
+          forward recomputes adj(current network, seed) and appends it.
+        """
+        bs = self.batch_size
+        dev = self.device
+        tt = torch.as_tensor(target, device=dev, dtype=torch.float32)
+        if tt.numel() == 1:
+            tt = tt.expand(bs)
+        self.extra_data.adjustment_target = tt.reshape(bs).clone()
+        if weight is None:
+            # leave weight at sentinel -1 -> excluded from global features
+            self.extra_data.adjustment_weight = torch.full(
+                (bs,), -1.0, device=dev)
+        else:
+            ww = torch.as_tensor(weight, device=dev, dtype=torch.float32)
+            if ww.numel() == 1:
+                ww = ww.expand(bs)
+            self.extra_data.adjustment_weight = ww.reshape(bs).clone()
+        if seed_routes is None:
+            self.extra_data.adjustment_use_current = torch.full(
+                (bs,), -1.0, device=dev)
+        else:
+            sr = torch.as_tensor(seed_routes, device=dev, dtype=torch.long)
+            if sr.dim() == 2:           # [n_routes, L] -> broadcast to batch
+                sr = sr.unsqueeze(0).expand(bs, -1, -1)
+            self.extra_data.adjustment_seed = sr.reshape(bs, sr.shape[-2],
+                                                         sr.shape[-1]).clone()
+            self.extra_data.adjustment_use_current = torch.ones(bs, device=dev)
+
     @property
     def directly_connected(self):
         return self.extra_data.directly_connected

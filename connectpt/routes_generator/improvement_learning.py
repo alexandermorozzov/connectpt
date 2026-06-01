@@ -1,4 +1,5 @@
 import pickle
+import math
 import random
 from pathlib import Path
 
@@ -391,7 +392,9 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
                            max_route_edit_steps=None,
                            max_trim_actions_per_route=1,
                            return_step_data=False,
-                           return_best_routes=False):
+                           return_best_routes=False,
+                           adjustment_target=None, adjustment_weight=None,
+                           adjustment_use_current=False):
     if cost_weights is None:
         cost_weights = cost_obj.sample_variable_weights(graph_batch.num_graphs,
                                                         graph_batch[STOP_KEY].x.device)
@@ -440,6 +443,15 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
             cost_obj, graph_batch, working_route_batch, route_idx,
             min_route_len, max_route_len, cost_weights,
             invalid_directly_connected=invalid_directly_connected)
+        # Gated adjustment conditioning at eval: a model built with
+        # n_adjustment_cond_feats>0 expects the target/weight features, so set
+        # them on every route state it sees (else 12-vs-14 dim mismatch).
+        if adjustment_target is not None:
+            # weight=None -> target-only conditioning (W excluded from features).
+            # seed_routes=route_batch -> enables the live current-adj feature.
+            route_state.set_adjustment_conditioning(
+                adjustment_target, adjustment_weight,
+                seed_routes=(route_batch if adjustment_use_current else None))
         context_route_counts = route_state.n_finished_routes.detach().clone()
         if return_best_routes:
             fallback_routes = _get_current_routes_from_state(route_state)
@@ -1812,7 +1824,10 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
                             max_trim_actions_per_route=1,
                             return_action_stats=False,
                             target_n_routes=None,
-                            return_best_routes=False):
+                            return_best_routes=False,
+                            adjustment_target=None,
+                            adjustment_weight=None,
+                            adjustment_use_current=False):
     """Evaluate the improvement model on ``indices``.
 
     Returned dict includes seed/final scalar cost, win rate, route-change
@@ -1844,6 +1859,10 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
             min_route_len, max_route_len,
             cost_weights=_clone_cost_weights(eval_weights))
         seed_state.add_new_routes(route_batch)
+        if adjustment_target is not None:
+            seed_state.set_adjustment_conditioning(
+                adjustment_target, adjustment_weight,
+                seed_routes=(route_batch if adjustment_use_current else None))
         seed_inline_result = cost_obj(seed_state)
         seed_components_list.append(
             cost_obj.get_cost_components(
@@ -1856,7 +1875,10 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
             force_nonhalt_first_step=force_nonhalt_first_step,
             max_route_edit_steps=max_route_edit_steps,
             max_trim_actions_per_route=max_trim_actions_per_route,
-            return_best_routes=return_best_routes)
+            return_best_routes=return_best_routes,
+            adjustment_target=adjustment_target,
+            adjustment_weight=adjustment_weight,
+            adjustment_use_current=adjustment_use_current)
         state, seed_result, final_result, _, _ = rollout_output[:5]
         if return_action_stats:
             _, _, _, _, _, route_actions, route_action_kinds = rollout_output
@@ -1993,10 +2015,47 @@ def train_lc_improvement_cfg_ppo(
         _get_cfg_value(cfg, "adjustment_degree_gap", 0.1))
     adjustment_degree_mode = str(
         _get_cfg_value(cfg, "adjustment_degree_mode", "current"))
-    use_adjustment_penalty = adjustment_degree_weight > 0
+    # Penalty shape: 'target' = |adj - target| (pull toward target);
+    # 'cap' = max(0, adj - target) (penalize only EXCEEDING target, no pull
+    # below it). 'raw' = adj itself.
+    adjustment_degree_objective = str(
+        _get_cfg_value(cfg, "adjustment_degree_objective", "target"))
+    # Conditioning: sample target/W per-graph each batch and feed them to the
+    # agent via state.set_adjustment_conditioning (so it adapts). Requires the
+    # model built with n_adjustment_cond_feats=2. target ~ U[t_min,t_max],
+    # W ~ log-U[w_min,w_max]. When off, the fixed scalars above are used.
+    adjustment_conditioning = bool(
+        _get_cfg_value(cfg, "adjustment_conditioning", False))
+    # Whether the penalty WEIGHT W is also conditioned (sampled per-graph and
+    # fed into the model features). Default False -> only TARGET is conditioned;
+    # W stays a fixed scalar (adjustment_degree_weight) applied as the penalty
+    # weight and is NOT part of the model features.
+    adjustment_condition_weight = bool(
+        _get_cfg_value(cfg, "adjustment_condition_weight", False))
+    # Whether the live "current adjustment degree vs seed" is fed as a feature
+    # (closed-loop). Requires the model built with the extra cond feature.
+    adjustment_condition_current = bool(
+        _get_cfg_value(cfg, "adjustment_condition_current", False))
+    adj_target_min = float(_get_cfg_value(cfg, "adjustment_target_min", 0.1))
+    adj_target_max = float(_get_cfg_value(cfg, "adjustment_target_max", 0.4))
+    adj_weight_min = float(_get_cfg_value(cfg, "adjustment_weight_min", 0.5))
+    adj_weight_max = float(_get_cfg_value(cfg, "adjustment_weight_max", 8.0))
+    use_adjustment_penalty = adjustment_conditioning or \
+        adjustment_degree_weight > 0
     if use_adjustment_penalty:
-        from .bee_colony import (get_adjustment_degrees,
-                                 get_adjustment_penalties)
+        from .bee_colony import get_adjustment_degrees
+    # When conditioning, the model is built with conditioning feats, so EVERY
+    # forward (warmup feature-norm, validation) must feed conditioning too.
+    # Use a fixed representative point: midpoint target, geometric-mean W.
+    # If weight is NOT conditioned, pass weight=None at eval (it stays out of
+    # the features; the fixed scalar weight is used for the penalty instead).
+    if adjustment_conditioning:
+        adj_eval_target = 0.5 * (adj_target_min + adj_target_max)
+        adj_eval_weight = (math.sqrt(adj_weight_min * adj_weight_max)
+                           if adjustment_condition_weight else None)
+    else:
+        adj_eval_target = None
+        adj_eval_weight = None
 
     optimizer = _make_optimizer_from_cfg(model, cfg)
 
@@ -2065,7 +2124,10 @@ def train_lc_improvement_cfg_ppo(
                 force_nonhalt_first_step=force_nonhalt_first_step,
                 max_route_edit_steps=max_route_edit_steps,
                 max_trim_actions_per_route=max_trim_actions_per_route,
-                return_best_routes=return_best_routes)
+                return_best_routes=return_best_routes,
+                adjustment_target=adj_eval_target,
+                adjustment_weight=adj_eval_weight,
+                adjustment_use_current=adjustment_condition_current)
     model.update_and_freeze_feature_norms()
 
     if best_model_path is None:
@@ -2085,35 +2147,55 @@ def train_lc_improvement_cfg_ppo(
     cur_seed_routes = None
     prev_route_idx_holder = [None]
     prev_context_counts_holder = [None]
-    # Cached per-route penalties (|adj - target|, shape [batch, n_routes]) for
-    # the current episode. Only the slot being edited changes within an
-    # episode, so we compute the full vector once per episode (at start) and
-    # refresh only the edited route per step -- keeping the exact network-mean
-    # semantics while avoiding an n_routes-wide Needleman-Wunsch every step.
+    # Per-batch sampled adjustment target/weight (when conditioning); else None
+    # and the fixed cfg scalars are used.
+    cur_adj_target = None    # [batch] tensor or None
+    cur_adj_weight = None    # [batch] tensor or None
+    # Cached per-route penalties (shape [batch, n_routes]) for the current
+    # episode. Only the slot being edited changes within an episode, so we
+    # compute the full vector once per episode and refresh only the edited route
+    # per step (avoids an n_routes-wide Needleman-Wunsch every step).
     episode_route_pen_holder = [None]
 
-    def _route_penalties(full_routes):
-        adj = get_adjustment_degrees(
-            full_routes, cur_seed_routes, cost_obj.symmetric_routes,
-            gap=adjustment_degree_gap, mode=adjustment_degree_mode)
-        return get_adjustment_penalties(
-            adj, objective="target", target=adjustment_degree_target)
+    def _pen_per_route(adj):
+        """Per-route penalty [.,n_routes] from adjustment degrees, using the
+        sampled per-graph target when conditioning, else the fixed scalar."""
+        if adjustment_conditioning and cur_adj_target is not None:
+            tgt = cur_adj_target.reshape(-1, 1)
+        else:
+            tgt = adjustment_degree_target
+        if adjustment_degree_objective == "cap":
+            return (adj - tgt).clamp(min=0.0)
+        if adjustment_degree_objective == "cap_sq":
+            # quadratic one-sided: gradient grows with overshoot (target-aware)
+            return (adj - tgt).clamp(min=0.0) ** 2
+        if adjustment_degree_objective == "target":
+            return (adj - tgt).abs()
+        return adj  # 'raw'
+
+    def _net_weight():
+        if adjustment_conditioning and cur_adj_weight is not None:
+            return cur_adj_weight.reshape(-1)
+        return adjustment_degree_weight
 
     def _init_episode_adjustment():
         """Compute the full per-route penalty vector once at episode start."""
         if not use_adjustment_penalty or cur_seed_routes is None \
                 or cur_working_routes is None:
             return
-        episode_route_pen_holder[0] = _route_penalties(cur_working_routes)
+        adj = get_adjustment_degrees(
+            cur_working_routes, cur_seed_routes, cost_obj.symmetric_routes,
+            gap=adjustment_degree_gap, mode=adjustment_degree_mode)
+        episode_route_pen_holder[0] = _pen_per_route(adj)
 
     def adjustment_penalty_fn(state):
         """Per-network adjustment-degree penalty (vs seed routes) for shaping.
 
-        Returns a ``[batch]`` tensor ``weight * mean_route |adj - target|`` for
-        the full current network (frozen context slots + the live in-progress
-        route), or ``None`` when shaping is disabled / not yet initialized.
-        Reuses the episode-cached per-route penalties and only recomputes the
-        single route currently being edited.
+        Returns ``[batch]`` = weight * mean_route penalty for the full current
+        network (frozen context slots + the live in-progress route), or None
+        when disabled / not yet initialized. Reuses the episode-cached per-route
+        penalties and recomputes only the edited route. With conditioning the
+        per-graph sampled target/weight (also fed to the agent) are used.
         """
         if not use_adjustment_penalty:
             return None
@@ -2122,7 +2204,6 @@ def train_lc_improvement_cfg_ppo(
         if route_idx is None or cur_seed_routes is None \
                 or cur_working_routes is None or base_pen is None:
             return None
-        # Recompute only the edited route's penalty (1 route vs n_routes).
         cur_list = _get_current_routes_from_state(state)
         cur_tensor = get_batch_tensor_from_routes(
             [[cur_list[b]] for b in range(len(cur_list))],
@@ -2133,16 +2214,15 @@ def train_lc_improvement_cfg_ppo(
             cur_seed_routes[:, route_idx:route_idx + 1, :],
             cost_obj.symmetric_routes,
             gap=adjustment_degree_gap, mode=adjustment_degree_mode)
-        pen_cur = get_adjustment_penalties(
-            adj_cur, objective="target", target=adjustment_degree_target)
+        pen_cur = _pen_per_route(adj_cur)
         pens = base_pen.clone()
         pens[:, route_idx] = pen_cur[:, 0]
-        return adjustment_degree_weight * pens.mean(dim=1)
+        return _net_weight() * pens.mean(dim=1)
 
     def make_next_state(prev_state=None):
         nonlocal epoch_indices, index_cursor, route_cursor
         nonlocal cur_graph_batch, cur_working_routes, cur_cost_weights
-        nonlocal cur_seed_routes
+        nonlocal cur_seed_routes, cur_adj_target, cur_adj_weight
 
         # 1. Close out the previous slot: pull its finalized route out of
         # prev_state's _finished_routes and write it into working_routes so
@@ -2206,6 +2286,22 @@ def train_lc_improvement_cfg_ppo(
             # this batch (only used when adjustment shaping is enabled).
             if use_adjustment_penalty:
                 cur_seed_routes = cur_working_routes.clone()
+            # Sample per-graph adjustment target for this batch when
+            # conditioning: target ~ U[t_min,t_max]. The weight W is sampled
+            # (and fed to the model) ONLY when adjustment_condition_weight;
+            # otherwise W stays a fixed scalar (cur_adj_weight=None -> the
+            # penalty uses adjustment_degree_weight and W is not a feature).
+            if adjustment_conditioning:
+                nbatch = cur_graph_batch.num_graphs
+                cur_adj_target = (adj_target_min + (adj_target_max - adj_target_min)
+                                  * torch.rand(nbatch, device=device))
+                if adjustment_condition_weight:
+                    log_lo, log_hi = math.log(adj_weight_min), math.log(adj_weight_max)
+                    cur_adj_weight = torch.exp(
+                        log_lo + (log_hi - log_lo)
+                        * torch.rand(nbatch, device=device))
+                else:
+                    cur_adj_weight = None
 
             route_cursor = 0
 
@@ -2224,6 +2320,13 @@ def train_lc_improvement_cfg_ppo(
             cost_obj, cur_graph_batch, cur_working_routes, route_idx,
             min_route_len, max_route_len, cur_cost_weights,
             invalid_directly_connected=invalid_directly_connected)
+        # Feed sampled per-graph adjustment target/weight to the agent (gated
+        # conditioning): appended to get_global_state_features.
+        if adjustment_conditioning and cur_adj_target is not None:
+            state.set_adjustment_conditioning(
+                cur_adj_target, cur_adj_weight,
+                seed_routes=(cur_seed_routes
+                             if adjustment_condition_current else None))
         state = model.setup_planning(state)
 
         prev_route_idx_holder[0] = route_idx
@@ -2300,7 +2403,10 @@ def train_lc_improvement_cfg_ppo(
                 max_route_edit_steps=max_route_edit_steps,
                 max_trim_actions_per_route=max_trim_actions_per_route,
                 target_n_routes=target_n_routes,
-                return_best_routes=return_best_routes)
+                return_best_routes=return_best_routes,
+                adjustment_target=adj_eval_target,
+                adjustment_weight=adj_eval_weight,
+                adjustment_use_current=adjustment_condition_current)
             if last_val["final_cost"] < best_val_cost:
                 best_val_cost = last_val["final_cost"]
                 torch.save(model.state_dict(), best_model_path)
@@ -2458,6 +2564,11 @@ def train_lc_improvement_cfg_d3po(
             "demand, route time, and connectivity."
         )
 
+    # D3PO path does not support adjustment conditioning; keep eval feeds off.
+    adj_eval_target = None
+    adj_eval_weight = None
+    adjustment_condition_current = False
+
     if min_route_len is None:
         min_route_len = int(cfg.eval.min_route_len)
     if max_route_len is None:
@@ -2582,7 +2693,10 @@ def train_lc_improvement_cfg_d3po(
                 force_nonhalt_first_step=force_nonhalt_first_step,
                 max_route_edit_steps=max_route_edit_steps,
                 max_trim_actions_per_route=max_trim_actions_per_route,
-                return_best_routes=return_best_routes)
+                return_best_routes=return_best_routes,
+                adjustment_target=adj_eval_target,
+                adjustment_weight=adj_eval_weight,
+                adjustment_use_current=adjustment_condition_current)
     model.update_and_freeze_feature_norms()
 
     if best_model_path is None:
@@ -2745,7 +2859,10 @@ def train_lc_improvement_cfg_d3po(
                 max_route_edit_steps=max_route_edit_steps,
                 max_trim_actions_per_route=max_trim_actions_per_route,
                 target_n_routes=target_n_routes,
-                return_best_routes=return_best_routes)
+                return_best_routes=return_best_routes,
+                adjustment_target=adj_eval_target,
+                adjustment_weight=adj_eval_weight,
+                adjustment_use_current=adjustment_condition_current)
             if last_val["final_cost"] < best_val_cost:
                 best_val_cost = last_val["final_cost"]
                 torch.save(model.state_dict(), best_model_path)
