@@ -96,7 +96,9 @@ class NNBaseline:
     21-feature input (unchanged for construction PPO).
     """
 
-    def __init__(self, learning_rate=0.0005, decay=0.01, actor_model=None):
+    def __init__(self, learning_rate=0.0005, decay=0.01, actor_model=None,
+                 normalize_returns=False, huber=False, huber_delta=1.0,
+                 value_clip=None, return_norm_momentum=0.05):
         self.learning_rate = learning_rate
         self.decay = decay
         self.optim = None
@@ -106,6 +108,23 @@ class NNBaseline:
         self.actor_model = actor_model
         self._shared_critic = actor_model is not None and \
             hasattr(actor_model, "get_critic_features")
+        # --- Optional improved-critic mode (default OFF -> legacy behaviour) ---
+        # normalize_returns: regress the value head against running-standardized
+        #   returns (PopArt-style value normalization) and de-normalize on
+        #   from_state so GAE keeps working in raw units. Stabilizes the critic
+        #   when the return scale/ tails shift (e.g. adjustment penalty in cost).
+        # huber: SmoothL1 instead of MSE -> robust to heavy-tailed returns.
+        # value_clip: PPO-style clipped value loss around the collection-time
+        #   value (in normalized units when normalize_returns, else raw).
+        self.normalize_returns = bool(normalize_returns)
+        self.huber = bool(huber)
+        self.huber_delta = float(huber_delta)
+        self.value_clip = None if value_clip is None else float(value_clip)
+        self._ret_momentum = float(return_norm_momentum)
+        self._ret_mean = torch.zeros((), device=DEVICE)
+        self._ret_var = torch.ones((), device=DEVICE)
+        self._ret_std = torch.ones((), device=DEVICE)
+        self._ret_initialized = False
         if not self._shared_critic:
             self._build_model(self.legacy_input_dim)
 
@@ -132,25 +151,72 @@ class NNBaseline:
         # Back-compat alias for the legacy hand-crafted feature dim.
         return self.legacy_input_dim
 
-    def update(self, costs):
+    def _value_loss(self, pred, target):
+        if self.huber:
+            return torch.nn.functional.smooth_l1_loss(
+                pred, target, beta=self.huber_delta, reduction='none')
+        return (pred - target) ** 2
+
+    def _update_return_stats(self, costs):
+        batch_mean = costs.mean()
+        batch_var = costs.var(unbiased=False)
+        if not self._ret_initialized:
+            self._ret_mean = batch_mean.detach().clone()
+            self._ret_var = batch_var.detach().clone()
+            self._ret_initialized = True
+        else:
+            m = self._ret_momentum
+            self._ret_mean = (1 - m) * self._ret_mean + m * batch_mean.detach()
+            self._ret_var = (1 - m) * self._ret_var + m * batch_var.detach()
+        self._ret_std = (self._ret_var + 1e-6).sqrt()
+
+    def update(self, costs, old_values=None):
         """Run a critic update step.
 
         Returns a dict with detached snapshots so the trainer can log
         critic-quality metrics (MSE, value-vs-return calibration, residuals)
-        without needing to re-run the model.
+        without needing to re-run the model. ``old_values`` (collection-time
+        value estimates, raw units) enables PPO value-clipping when
+        ``value_clip`` is set.
         """
         self.optim.zero_grad()
-        costs = costs.to(self._curr_estimate.dtype)
-        loss = self.loss_fn(self._curr_estimate, costs)
-        # Capture detached value/target snapshots BEFORE backward so that
-        # autograd intermediates can be freed by the backward pass.
-        values_snapshot = self._curr_estimate.detach().clone()
+        pred = self._curr_estimate
+        costs = costs.to(pred.dtype)
+
+        if self.normalize_returns:
+            mean, std = self._ret_mean, self._ret_std
+            target = (costs - mean) / std
+            old_n = None if old_values is None else \
+                (old_values.to(pred.dtype) - mean) / std
+        else:
+            target = costs
+            old_n = None if old_values is None else old_values.to(pred.dtype)
+
+        if self.value_clip is not None and old_n is not None:
+            pred_clipped = old_n + torch.clamp(
+                pred - old_n, -self.value_clip, self.value_clip)
+            loss = torch.maximum(self._value_loss(pred, target),
+                                 self._value_loss(pred_clipped, target)).mean()
+        else:
+            loss = self._value_loss(pred, target).mean()
+
+        # Snapshots in RAW units (de-normalized) so explained-variance / MSE
+        # diagnostics stay comparable across modes.
+        if self.normalize_returns:
+            raw_values = pred.detach() * self._ret_std + self._ret_mean
+        else:
+            raw_values = pred.detach()
+        values_snapshot = raw_values.clone()
         targets_snapshot = costs.detach().clone()
+
         loss.backward()
         self.optim.step()
         self._curr_estimate = None
         # update the feature normalization statistics
         self.model[0].update()
+        # update running return statistics AFTER using them for this step
+        if self.normalize_returns:
+            self._update_return_stats(costs.detach())
         return {
             "loss": float(loss.detach().item()),
             "values": values_snapshot,
@@ -211,8 +277,14 @@ class NNBaseline:
         input_data = self._features_from_state(state)
         if self.model is None:
             self._build_model(input_data.shape[-1])
-        baseline = self.model(input_data).squeeze(-1)
-        self._curr_estimate = baseline
+        pred = self.model(input_data).squeeze(-1)
+        # ``_curr_estimate`` is what update() regresses: the normalized
+        # prediction when return-normalization is on, else the raw value.
+        self._curr_estimate = pred
+        if self.normalize_returns:
+            baseline = pred * self._ret_std + self._ret_mean
+        else:
+            baseline = pred
 
         assert baseline.isfinite().all()
 

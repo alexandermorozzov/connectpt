@@ -166,7 +166,7 @@ class FakeValueModule:
         return torch.zeros(state.batch_size, dtype=torch.float32,
                            device=state.device)
 
-    def update(self, returns):
+    def update(self, returns, old_values=None):
         self.last_returns = returns.detach().clone()
 
 
@@ -175,7 +175,7 @@ class FakeVectorValueModule:
         return torch.zeros(state.batch_size, 3, dtype=torch.float32,
                            device=state.device)
 
-    def update(self, returns):
+    def update(self, returns, old_values=None):
         self.last_returns = returns.detach().clone()
 
 

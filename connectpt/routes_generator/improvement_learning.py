@@ -1239,7 +1239,10 @@ def _update_lc_improvement_cfg_ppo_from_rollout(
                 mb_trim_allowed = mb_trim_allowed[mb_score]
 
             value_module.from_state(mb_states)
-            critic_step = value_module.update(mb_returns)
+            # old (collection-time) values for optional PPO value-clipping:
+            # returns = advantages + value_estimates  ->  V_old = returns - adv.
+            critic_step = value_module.update(
+                mb_returns, old_values=(mb_returns - mb_advantages))
             if critic_step is not None:
                 critic_mse_values.append(float(critic_step["loss"]))
                 cv = critic_step["values"].detach().cpu()
@@ -2064,9 +2067,16 @@ def train_lc_improvement_cfg_ppo(
     from . import inductive_route_learning as il
     il.DEVICE = device
     use_shared_critic = bool(_get_cfg_value(cfg, "shared_critic", True))
+    # Optional improved-critic mode (default OFF -> identical to before).
+    _vc = _get_cfg_value(cfg, "critic_value_clip", None)
     value_module = il.NNBaseline(
         learning_rate=float(_get_cfg_value(cfg, "baseline_lr", 0.0005)),
         actor_model=model if use_shared_critic else None,
+        normalize_returns=bool(
+            _get_cfg_value(cfg, "critic_normalize_returns", False)),
+        huber=bool(_get_cfg_value(cfg, "critic_huber", False)),
+        huber_delta=float(_get_cfg_value(cfg, "critic_huber_delta", 1.0)),
+        value_clip=None if _vc is None else float(_vc),
     )
 
     if (train_indices is None) != (val_indices is None):
