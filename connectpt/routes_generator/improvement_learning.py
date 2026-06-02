@@ -2596,10 +2596,6 @@ def train_lc_improvement_cfg_ppo(
             "val_seed_cost": val["seed_cost"],
             "val_final_cost": val["final_cost"],
             "val_delta": val["delta"],
-            # Per-episode validation return (= reward_scale * val_delta), on the
-            # same scale as train_return_mean for a direct train/val comparison.
-            # NB: val_delta uses the plain cost (no adjustment penalty).
-            "val_reward": reward_scale * val["delta"],
             "val_win_rate": val["win_rate"],
             "val_changed_route_rate": val["changed_route_rate"],
             "val_changed_graph_rate": val["changed_graph_rate"],
@@ -2623,7 +2619,6 @@ def train_lc_improvement_cfg_ppo(
         pbar.set_postfix({
             "reward": f"{row['train_reward_mean']:.3f}",
             "t_ret": f"{row['train_return_mean']:.3f}",
-            "v_rew": f"{row['val_reward']:.3f}",
             "delta": f"{row['train_delta']:.3f}",
             "ratio": f"{row['train_ppo_ratio_mean']:.3f}",
             "clip": f"{row['train_ppo_clip_fraction']:.2%}",
@@ -2634,7 +2629,6 @@ def train_lc_improvement_cfg_ppo(
             f"reward_ep={row['train_reward_per_episode']:.4f} "
             f"reward_delta_err={row['train_reward_delta_residual']:.4f} "
             f"train_ret={row['train_return_mean']:.4f} "
-            f"val_reward={row['val_reward']:.4f} "
             f"train_delta={row['train_delta']:.4f} "
             f"val_delta={row['val_delta']:.4f} "
             f"ratio={row['train_ppo_ratio_mean']:.3f} "
@@ -3101,10 +3095,6 @@ def train_lc_improvement_cfg_d3po(
             "val_seed_cost": val["seed_cost"],
             "val_final_cost": val["final_cost"],
             "val_delta": val["delta"],
-            # Per-episode validation return (= reward_scale * val_delta), on the
-            # same scale as train_return_mean for a direct train/val comparison.
-            # NB: val_delta uses the plain cost (no adjustment penalty).
-            "val_reward": reward_scale * val["delta"],
             "val_win_rate": val["win_rate"],
             "val_changed_route_rate": val["changed_route_rate"],
             "val_changed_graph_rate": val["changed_graph_rate"],
