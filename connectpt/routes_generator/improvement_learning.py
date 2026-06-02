@@ -1949,8 +1949,15 @@ def train_lc_improvement_cfg_ppo(
         force_nonhalt_first_step=False, max_route_edit_steps=None,
         max_trim_actions_per_route=None, train_indices=None, val_indices=None,
         best_model_path=None,
-        max_rollout_samples=8192, target_n_routes=None):
+        max_rollout_samples=8192, target_n_routes=None,
+        curriculum_fn=None):
     """Train LC improvement with the construction PPO machinery adapted to edits.
+
+    ``curriculum_fn(iteration) -> (indices, stage_label)`` optionally restricts
+    which training graphs are sampled at each iteration (curriculum learning).
+    ``indices`` is a subset of train graph indices; ``stage_label`` (str) is
+    logged per-iteration as ``curriculum_stage`` so reward shifts can be
+    attributed to the active stage. When None, all train_indices are used.
 
     Unlike ``train_lc_improvement_ppo`` above, this function reads the PPO
     hyperparameters from the regular PPO config and uses the same core pieces:
@@ -2154,7 +2161,11 @@ def train_lc_improvement_cfg_ppo(
     best_val_cost = float("inf")
     last_val = None
     history = []
-    epoch_indices = train_indices[torch.randperm(len(train_indices))]
+    # Curriculum: active subset of train indices for the current iteration.
+    active_train_indices = train_indices
+    cur_stage_label = "all"
+    epoch_indices = active_train_indices[
+        torch.randperm(len(active_train_indices))]
     index_cursor = 0
     route_cursor = 0
     cur_graph_batch = None
@@ -2270,8 +2281,8 @@ def train_lc_improvement_cfg_ppo(
         cycled_through = route_cursor == 0
         if starting_fresh or cycled_through:
             if index_cursor + effective_batch_size > len(epoch_indices):
-                epoch_indices = train_indices[
-                    torch.randperm(len(train_indices))]
+                epoch_indices = active_train_indices[
+                    torch.randperm(len(active_train_indices))]
                 index_cursor = 0
 
             batch_indices = epoch_indices[
@@ -2367,6 +2378,17 @@ def train_lc_improvement_cfg_ppo(
         # `force_nonhalt_first_step_until_iter` iterations (anti-halt-collapse).
         _fnh = force_nonhalt_first_step and (
             force_nonhalt_until is None or iteration < force_nonhalt_until)
+        # Curriculum: switch the active training subset per schedule when the
+        # stage changes (reshuffle from the new subset).
+        if curriculum_fn is not None:
+            _stage_idx, _stage_label = curriculum_fn(iteration)
+            if _stage_label != cur_stage_label:
+                active_train_indices = torch.as_tensor(
+                    _stage_idx, dtype=torch.long)
+                epoch_indices = active_train_indices[
+                    torch.randperm(len(active_train_indices))]
+                index_cursor = 0
+                cur_stage_label = _stage_label
         rollout = _collect_lc_improvement_cfg_ppo_rollout(
             model, cost_obj, make_next_state, value_module, int(horizon),
             reward_scale, diff_reward,
@@ -2484,6 +2506,7 @@ def train_lc_improvement_cfg_ppo(
                 "critic_mse_mean", float("nan")),
             "train_critic_explained_variance": ppo_stats.get(
                 "critic_explained_variance", float("nan")),
+            "curriculum_stage": cur_stage_label,
             "is_eval_iteration": eval_due,
             "val_seed_cost": val["seed_cost"],
             "val_final_cost": val["final_cost"],
@@ -2727,7 +2750,11 @@ def train_lc_improvement_cfg_d3po(
     best_val_cost = float("inf")
     last_val = None
     history = []
-    epoch_indices = train_indices[torch.randperm(len(train_indices))]
+    # Curriculum: active subset of train indices for the current iteration.
+    active_train_indices = train_indices
+    cur_stage_label = "all"
+    epoch_indices = active_train_indices[
+        torch.randperm(len(active_train_indices))]
     index_cursor = 0
     route_cursor = 0
     cur_graph_batch = None
@@ -2759,8 +2786,8 @@ def train_lc_improvement_cfg_d3po(
         cycled_through = route_cursor == 0
         if starting_fresh or cycled_through:
             if index_cursor + effective_batch_size > len(epoch_indices):
-                epoch_indices = train_indices[
-                    torch.randperm(len(train_indices))]
+                epoch_indices = active_train_indices[
+                    torch.randperm(len(active_train_indices))]
                 index_cursor = 0
 
             batch_indices = epoch_indices[
