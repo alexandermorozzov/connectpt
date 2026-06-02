@@ -629,7 +629,10 @@ class FeatureNorm(nn.Module):
             old_shape = xx.shape
             xx = xx.reshape(-1, xx.shape[-1])
             x_mean = xx.mean(0).detach()
-            x_var = xx.var(0).detach()
+            # Feature normalization uses population statistics. With the
+            # default unbiased estimator a singleton input produces NaNs that
+            # can leak into the running variance during warmup.
+            x_var = xx.var(0, unbiased=False).detach()
             # we're done with the need for flattened x, so reshape it
             xx = xx.reshape(old_shape)
 

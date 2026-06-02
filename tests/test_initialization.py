@@ -13,6 +13,7 @@ from connectpt.routes_generator.improvement_learning import (
     _collect_lc_improvement_cfg_d3po_rollout,
     _collect_lc_improvement_cfg_ppo_rollout,
     _compute_ppo_returns_and_advantages,
+    _get_reward_delta_diagnostics,
     _make_route_context_state,
     _positive_only_trim_action_rewards,
     _update_lc_improvement_cfg_d3po_from_rollout,
@@ -28,6 +29,7 @@ from connectpt.routes_generator.initialization import (
     prepare_init_network,
 )
 from connectpt.routes_generator.models import (
+    FeatureNorm,
     PathCombiningRouteGenerator,
     TrimPathCombiningRouteGenerator,
 )
@@ -997,6 +999,37 @@ def test_positive_only_trim_reward_updates_posttrim_baseline():
         positive_only_trim_reward=True)
 
     assert updated.tolist() == [15.0, 18.0, 30.0]
+
+
+def test_reward_delta_diagnostics_match_telescoping_diff_rewards():
+    rewards = torch.tensor([
+        [1.0, -1.0],
+        [2.0, 0.0],
+    ])
+    active_masks = torch.ones_like(rewards, dtype=torch.bool)
+    start_costs = torch.tensor([10.0, 5.0])
+    final_costs = torch.tensor([7.0, 6.0])
+
+    diagnostics = _get_reward_delta_diagnostics(
+        rewards, active_masks, start_costs, final_costs, reward_scale=1.0)
+
+    assert diagnostics == {
+        "reward_sum": 2.0,
+        "scaled_delta_sum": 2.0,
+        "residual": 0.0,
+        "reward_per_episode": 1.0,
+        "episode_count": 2,
+    }
+
+
+def test_feature_norm_singleton_input_keeps_finite_running_variance():
+    norm = FeatureNorm(2)
+
+    output = norm(torch.tensor([[1.0, 2.0]]))
+    norm.update()
+
+    assert torch.isfinite(output).all()
+    assert torch.equal(norm.running_var, torch.zeros(2))
 
 
 def test_my_cost_components_reconstruct_scalar_cost_for_simplex_weights():

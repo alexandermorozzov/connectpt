@@ -851,6 +851,27 @@ def _update_reward_baseline_cost(prev_cost, new_cost, action_kinds, active,
     return torch.where(update_mask, new_cost, prev_cost)
 
 
+def _get_reward_delta_diagnostics(rewards, active_masks, start_costs,
+                                  final_costs, reward_scale):
+    """Compare collected step rewards with episode-level cost improvement.
+
+    For plain differential rewards their sums telescope. A non-zero residual
+    is still expected when reward shaping intentionally suppresses a trim
+    reward, an edit penalty is enabled, or the horizon ends on a deferred trim.
+    """
+    reward_sum = float(rewards[active_masks].sum().item())
+    scaled_delta_sum = float(
+        ((start_costs - final_costs).sum() * float(reward_scale)).item())
+    episode_count = int(len(start_costs))
+    return {
+        "reward_sum": reward_sum,
+        "scaled_delta_sum": scaled_delta_sum,
+        "residual": reward_sum - scaled_delta_sum,
+        "reward_per_episode": reward_sum / max(episode_count, 1),
+        "episode_count": episode_count,
+    }
+
+
 def _compute_ppo_returns_and_advantages(rewards, value_estimates, dones,
                                         final_value_estimates, gamma,
                                         use_gae, gae_lambda):
@@ -2468,6 +2489,9 @@ def train_lc_improvement_cfg_ppo(
         active_advantages = advantages[rollout["active_masks"]]
         start_costs = rollout["episode_start_costs"]
         final_costs = rollout["episode_final_costs"]
+        reward_delta_diag = _get_reward_delta_diagnostics(
+            rollout["rewards"], rollout["active_masks"],
+            start_costs, final_costs, reward_scale)
         start_components = rollout["episode_start_components"]
         final_components = rollout["episode_final_components"]
         if len(start_costs) > 0:
@@ -2546,6 +2570,14 @@ def train_lc_improvement_cfg_ppo(
             "train_component_connectivity_delta": float(component_delta[2]),
             "train_reward_mean": active_rewards.mean().item()
                 if active_rewards.numel() > 0 else 0.0,
+            "train_reward_sum": reward_delta_diag["reward_sum"],
+            "train_reward_per_episode":
+                reward_delta_diag["reward_per_episode"],
+            "train_scaled_delta_sum":
+                reward_delta_diag["scaled_delta_sum"],
+            "train_reward_delta_residual":
+                reward_delta_diag["residual"],
+            "train_episode_count": reward_delta_diag["episode_count"],
             "train_return_mean": active_returns.mean().item()
                 if active_returns.numel() > 0 else 0.0,
             "train_advantage_mean": active_advantages.mean().item()
@@ -2599,6 +2631,8 @@ def train_lc_improvement_cfg_ppo(
         print(
             f"cfg_ppo_iter={row['iteration']:03d} "
             f"reward={row['train_reward_mean']:.4f} "
+            f"reward_ep={row['train_reward_per_episode']:.4f} "
+            f"reward_delta_err={row['train_reward_delta_residual']:.4f} "
             f"train_ret={row['train_return_mean']:.4f} "
             f"val_reward={row['val_reward']:.4f} "
             f"train_delta={row['train_delta']:.4f} "
@@ -2618,7 +2652,7 @@ def train_lc_improvement_cfg_ppo(
         del rollout, returns, advantages
         del active_rewards, active_returns, active_advantages
         del start_costs, final_costs, start_components, final_components
-        del component_delta
+        del component_delta, reward_delta_diag
 
     # Capture last-iteration critic snapshot (values vs returns) for the
     # value-vs-target scatter in the notebook critic-analysis cell.
