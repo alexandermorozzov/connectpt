@@ -2613,6 +2613,12 @@ def train_lc_improvement_cfg_ppo(
             f"avg_steps={row['train_action_avg_actions_per_route']:.2f} "
             f"eval={row['is_eval_iteration']}"
         )
+        # Do not keep the previous rollout reachable while collecting the
+        # next one. This matters especially when rollout states stay on GPU.
+        del rollout, returns, advantages
+        del active_rewards, active_returns, active_advantages
+        del start_costs, final_costs, start_components, final_components
+        del component_delta
 
     # Capture last-iteration critic snapshot (values vs returns) for the
     # value-vs-target scatter in the notebook critic-analysis cell.
@@ -3105,6 +3111,13 @@ def train_lc_improvement_cfg_d3po(
             f"avg_steps={row['train_action_avg_actions_per_route']:.2f} "
             f"eval={row['is_eval_iteration']}"
         )
+        # Do not keep the previous rollout reachable while collecting the
+        # next one. This matters especially when rollout states stay on GPU.
+        del rollout, returns, advantages
+        del active_rewards, active_preferences, active_returns
+        del active_advantages, scalar_rewards, scalar_returns
+        del scalar_advantages, start_costs, final_costs
+        del start_components, final_components, component_delta
 
     # Capture last-iteration critic snapshot (values vs returns per objective)
     # for the value-vs-target scatter in the notebook critic-analysis cell.

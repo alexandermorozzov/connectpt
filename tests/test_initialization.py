@@ -558,6 +558,18 @@ def test_route_state_context_masks_track_finished_not_current_routes():
     assert not state.context_edge_covered_mask.any()
 
 
+def test_route_state_snapshot_for_buffer_omits_lazy_shortest_path_cache():
+    state = make_line_state(n_nodes=3, max_route_len=3)
+    cached_paths = torch.arange(27, dtype=torch.long).reshape(1, 3, 3, 3)
+    state.extra_data.shortest_path_sequences = cached_paths
+
+    snapshot = state.snapshot_for_buffer(device=state.device)
+
+    assert snapshot.extra_data.shortest_path_sequences.shape == (1, 0, 0, 0)
+    assert torch.equal(state.extra_data.shortest_path_sequences, cached_paths)
+    assert snapshot.graph_data is state.graph_data
+
+
 def test_route_state_context_masks_include_fixed_routes():
     graph = make_line_graph(n_nodes=4)
     graph.fixed_routes = torch.tensor([[0, 3, -1, -1]], dtype=torch.long)

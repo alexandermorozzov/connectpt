@@ -912,17 +912,28 @@ class RouteGenBatchState:
         Cross-device path deep-copies once on the source device and then
         moves the copy in place to the target device, replacing the
         previous ``clone() + to_device()`` pattern that did two deepcopies.
+
+        The shortest-path sequence tensor is a lazy cache. Buffer consumers
+        recompute it as needed, so omit it from the copy to avoid transferring
+        a large padded tensor only to clear it immediately afterward.
         """
         target = self.device if device is None else torch.device(device)
-        if target == self.device:
-            new = copy.copy(self)
-            new.graph_data = self.graph_data
-            new.extra_data = copy.deepcopy(self.extra_data)
-            new._finished_routes = [list(routes)
-                                    for routes in self._finished_routes]
-            return new
+        shortest_paths = self.extra_data.shortest_path_sequences
+        self.extra_data.shortest_path_sequences = shortest_paths.new_empty(
+            (self.batch_size, 0, 0, 0))
+        try:
+            if target == self.device:
+                new = copy.copy(self)
+                new.graph_data = self.graph_data
+                new.extra_data = copy.deepcopy(self.extra_data)
+                new._finished_routes = [list(routes)
+                                        for routes in self._finished_routes]
+                return new
 
-        new = copy.deepcopy(self)
+            new = copy.deepcopy(self)
+        finally:
+            self.extra_data.shortest_path_sequences = shortest_paths
+
         new.graph_data = new.graph_data.to(target)
         new.extra_data = new.extra_data.to(target)
         new._finished_routes = [
