@@ -816,10 +816,19 @@ def _zero_trim_action_rewards(step_rewards, action_kinds, active):
                        step_rewards)
 
 
+def _positive_only_trim_action_rewards(step_rewards, action_kinds, active):
+    """Keep immediate trim improvements while hiding negative setup moves."""
+    trim_action = _is_trim_action(action_kinds) & active
+    trim_action = _expand_mask_like(trim_action, step_rewards)
+    trim_rewards = step_rewards.clamp_min(0)
+    return torch.where(trim_action, trim_rewards, step_rewards)
+
+
 def _update_reward_baseline_cost(prev_cost, new_cost, action_kinds, active,
-                                 zero_trim_reward=False):
+                                 zero_trim_reward=False,
+                                 positive_only_trim_reward=False):
     update_mask = active
-    if zero_trim_reward:
+    if zero_trim_reward and not positive_only_trim_reward:
         update_mask = update_mask & ~_is_trim_action(action_kinds)
     update_mask = _expand_mask_like(update_mask, new_cost)
     return torch.where(update_mask, new_cost, prev_cost)
@@ -927,7 +936,8 @@ def _collect_lc_improvement_cfg_ppo_rollout(
         max_route_edit_steps=None, force_nonhalt_first_step=False,
         edit_step_penalty=0.0, forced_halt_penalty=0.0,
         incumbent_reward=False, return_best_routes=False,
-        zero_trim_reward=False, max_trim_actions_per_route=1,
+        zero_trim_reward=False, positive_only_trim_reward=False,
+        max_trim_actions_per_route=1,
         keep_rollout_on_device=False, adjustment_penalty_fn=None):
     states = []
     rewards = []
@@ -1080,7 +1090,10 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                         best_current_routes, candidate_routes, improved)
                 best_cost = torch.where(
                     improved, result.cost.detach(), best_cost)
-            if zero_trim_reward:
+            if positive_only_trim_reward:
+                step_rewards = _positive_only_trim_action_rewards(
+                    step_rewards, step_kinds, active)
+            elif zero_trim_reward:
                 step_rewards = _zero_trim_action_rewards(
                     step_rewards, step_kinds, active)
             if edit_step_penalty > 0:
@@ -1094,7 +1107,8 @@ def _collect_lc_improvement_cfg_ppo_rollout(
 
             prev_cost = _update_reward_baseline_cost(
                 prev_cost, result.cost, step_kinds, active,
-                zero_trim_reward=zero_trim_reward)
+                zero_trim_reward=zero_trim_reward,
+                positive_only_trim_reward=positive_only_trim_reward)
             last_cost = torch.where(active, result.cost, last_cost)
             last_components = torch.where(
                 active[:, None], result_components, last_components)
@@ -1160,6 +1174,7 @@ def _collect_lc_improvement_cfg_ppo_rollout(
         "final_value_estimates": final_value_estimates.detach(),
         "action_counts": action_counts,
         "zero_trim_reward": bool(zero_trim_reward),
+        "positive_only_trim_reward": bool(positive_only_trim_reward),
         "max_trim_actions_per_route": max_trim_actions_per_route,
         "keep_rollout_on_device": bool(keep_rollout_on_device),
     }
@@ -2009,6 +2024,12 @@ def train_lc_improvement_cfg_ppo(
     incumbent_reward = bool(_get_cfg_value(cfg, "incumbent_reward", False))
     return_best_routes = bool(_get_cfg_value(cfg, "return_best_routes", False))
     zero_trim_reward = bool(_get_cfg_value(cfg, "zero_trim_reward", False))
+    # Optional refinement of zero_trim_reward: pay an immediate positive
+    # cost-delta for a beneficial trim, clamp a harmful setup trim to zero,
+    # and advance the baseline so a following extend is judged from the
+    # trimmed state. Default OFF preserves the deferred legacy behaviour.
+    positive_only_trim_reward = bool(
+        _get_cfg_value(cfg, "positive_only_trim_reward", False))
     keep_rollout_on_device = bool(
         _get_cfg_value(cfg, "keep_rollout_on_device", False))
     gamma = float(_get_cfg_value(cfg, "discount_rate", 1.0))
@@ -2411,6 +2432,7 @@ def train_lc_improvement_cfg_ppo(
             incumbent_reward=incumbent_reward,
             return_best_routes=return_best_routes,
             zero_trim_reward=zero_trim_reward,
+            positive_only_trim_reward=positive_only_trim_reward,
             max_trim_actions_per_route=max_trim_actions_per_route,
             keep_rollout_on_device=keep_rollout_on_device,
             adjustment_penalty_fn=adjustment_penalty_fn)
@@ -2489,6 +2511,7 @@ def train_lc_improvement_cfg_ppo(
             "incumbent_reward": incumbent_reward,
             "return_best_routes": return_best_routes,
             "zero_trim_reward": zero_trim_reward,
+            "positive_only_trim_reward": positive_only_trim_reward,
             "keep_rollout_on_device": keep_rollout_on_device,
             "reward_scale": reward_scale,
             "discount_rate": gamma,

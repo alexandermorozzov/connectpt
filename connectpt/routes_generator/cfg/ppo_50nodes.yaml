@@ -17,6 +17,9 @@ diff_reward: true
 incumbent_reward: false
 return_best_routes: false
 zero_trim_reward: true
+# Optional refinement: reward only an immediately beneficial trim and advance
+# the diff baseline to the post-trim state. False keeps deferred trim rewards.
+positive_only_trim_reward: false
 keep_rollout_on_device: false
 max_trim_actions_per_route: 1
 # When true, the value baseline shares the actor's GNN encoder

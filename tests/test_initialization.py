@@ -11,6 +11,7 @@ from connectpt.routes_generator.improvement_learning import (
     _collect_lc_improvement_cfg_ppo_rollout,
     _compute_ppo_returns_and_advantages,
     _make_route_context_state,
+    _positive_only_trim_action_rewards,
     _update_lc_improvement_cfg_d3po_from_rollout,
     _update_lc_improvement_cfg_ppo_from_rollout,
     _update_reward_baseline_cost,
@@ -946,6 +947,40 @@ def test_zero_trim_reward_keeps_pretrim_reward_baseline():
         zero_trim_reward=True)
 
     assert updated.tolist() == [10.0, 18.0, 30.0]
+
+
+def test_positive_only_trim_reward_clamps_negative_trim_delta():
+    step_rewards = torch.tensor([-5.0, 2.0, -3.0, 4.0])
+    action_kinds = torch.tensor([
+        ROUTE_ACTION_TRIM_START,
+        ROUTE_ACTION_TRIM_END,
+        ROUTE_ACTION_EXTEND,
+        ROUTE_ACTION_TRIM_START,
+    ])
+    active = torch.tensor([True, True, True, False])
+
+    updated = _positive_only_trim_action_rewards(
+        step_rewards, action_kinds, active)
+
+    assert updated.tolist() == [0.0, 2.0, -3.0, 4.0]
+
+
+def test_positive_only_trim_reward_updates_posttrim_baseline():
+    prev_cost = torch.tensor([10.0, 20.0, 30.0])
+    new_cost = torch.tensor([15.0, 18.0, 25.0])
+    action_kinds = torch.tensor([
+        ROUTE_ACTION_TRIM_START,
+        ROUTE_ACTION_EXTEND,
+        ROUTE_ACTION_HALT,
+    ])
+    active = torch.tensor([True, True, False])
+
+    updated = _update_reward_baseline_cost(
+        prev_cost, new_cost, action_kinds, active,
+        zero_trim_reward=True,
+        positive_only_trim_reward=True)
+
+    assert updated.tolist() == [15.0, 18.0, 30.0]
 
 
 def test_my_cost_components_reconstruct_scalar_cost_for_simplex_weights():
