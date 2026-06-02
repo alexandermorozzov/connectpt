@@ -147,7 +147,7 @@ class FakeTrimPlanNewRouteModel:
                 dtype=torch.long,
                 device=state.device,
             )
-            actions = torch.tensor([[0, 1]], dtype=torch.long,
+            actions = torch.tensor([[1, -1]], dtype=torch.long,
                                    device=state.device)
         else:
             assert not bool(torch.as_tensor(allow_trim_start).any())
@@ -501,7 +501,7 @@ def test_route_state_trim_actions_rebuild_current_route_graph():
     state.set_current_routes([0, 1, 2, 3])
 
     action_kinds = torch.tensor([ROUTE_ACTION_TRIM_START], dtype=torch.long)
-    actions = torch.tensor([[0, 2]], dtype=torch.long)
+    actions = torch.tensor([[2, -1]], dtype=torch.long)
     state.apply_route_actions(action_kinds, actions)
 
     assert state.current_routes[0, :2].tolist() == [2, 3]
@@ -512,7 +512,7 @@ def test_route_state_trim_actions_rebuild_current_route_graph():
     state.set_current_routes([0, 1, 2, 3])
 
     action_kinds = torch.tensor([ROUTE_ACTION_TRIM_END], dtype=torch.long)
-    actions = torch.tensor([[1, 3]], dtype=torch.long)
+    actions = torch.tensor([[1, -1]], dtype=torch.long)
     state.apply_route_actions(action_kinds, actions)
 
     assert state.current_routes[0, :2].tolist() == [0, 1]
@@ -749,7 +749,7 @@ def test_untrained_trim_model_can_emit_and_apply_forced_trim_action():
     state = model.setup_planning(state)
 
     forced_kind = torch.tensor([ROUTE_ACTION_TRIM_START], dtype=torch.long)
-    forced_action = torch.tensor([[0, 2]], dtype=torch.long)
+    forced_action = torch.tensor([[2, -1]], dtype=torch.long)
     action_kinds, actions, logits, entropy = model.step_route_action(
         state,
         greedy=True,
@@ -758,7 +758,7 @@ def test_untrained_trim_model_can_emit_and_apply_forced_trim_action():
     )
 
     assert action_kinds.tolist() == [ROUTE_ACTION_TRIM_START]
-    assert actions.tolist() == [[0, 2]]
+    assert actions.tolist() == [[2, -1]]
     assert logits.shape == (1,)
     assert entropy.shape == (1,)
 
