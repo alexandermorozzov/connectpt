@@ -2001,6 +2001,12 @@ def train_lc_improvement_cfg_ppo(
     forced_halt_penalty = float(
         _get_cfg_value(cfg, "forced_halt_penalty", 0.0))
     entropy_weight = float(_get_cfg_value(cfg, "entropy_weight", 0.0))
+    # Optionally disable force_nonhalt_first_step after a given iteration so the
+    # agent is forced to edit early (anti-halt-collapse) then free to halt later.
+    force_nonhalt_until = _get_cfg_value(
+        cfg, "force_nonhalt_first_step_until_iter", None)
+    force_nonhalt_until = None if force_nonhalt_until is None \
+        else int(force_nonhalt_until)
     clip_epsilon = float(cfg.ppo.epsilon)
     use_gae = bool(cfg.ppo.use_gae)
     gae_lambda = float(cfg.ppo.gae_lambda)
@@ -2357,12 +2363,16 @@ def train_lc_improvement_cfg_ppo(
     pbar = tqdm(range(int(n_iterations)), desc="cfg ppo improvement")
     for iteration in pbar:
         model.train()
+        # Per-iteration force-nonhalt: optionally only for the first
+        # `force_nonhalt_first_step_until_iter` iterations (anti-halt-collapse).
+        _fnh = force_nonhalt_first_step and (
+            force_nonhalt_until is None or iteration < force_nonhalt_until)
         rollout = _collect_lc_improvement_cfg_ppo_rollout(
             model, cost_obj, make_next_state, value_module, int(horizon),
             reward_scale, diff_reward,
             getattr(model, "supports_trim_actions", False), device,
             max_route_edit_steps=max_route_edit_steps,
-            force_nonhalt_first_step=force_nonhalt_first_step,
+            force_nonhalt_first_step=_fnh,
             edit_step_penalty=edit_step_penalty,
             forced_halt_penalty=forced_halt_penalty,
             incumbent_reward=incumbent_reward,
