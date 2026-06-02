@@ -1,3 +1,6 @@
+import csv
+import io
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +18,7 @@ from connectpt.routes_generator.improvement_learning import (
     _update_lc_improvement_cfg_d3po_from_rollout,
     _update_lc_improvement_cfg_ppo_from_rollout,
     _update_reward_baseline_cost,
+    _write_history_checkpoint,
     rollout_lc_improvement,
     train_lc_improvement_cfg_d3po,
 )
@@ -1101,6 +1105,41 @@ def test_train_lc_improvement_cfg_dispatches_by_trainer(monkeypatch):
         None, None, None, None, None, SimpleNamespace(trainer="d3po")
     ) == "d3po-result"
     assert calls == ["ppo", "d3po"]
+
+
+def test_write_history_checkpoint_atomically_replaces_csv(monkeypatch):
+    writes = []
+    replacements = []
+
+    class CapturingStringIO(io.StringIO):
+        def close(self):
+            writes.append(self.getvalue())
+            super().close()
+
+    monkeypatch.setattr(Path, "mkdir", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        Path, "open",
+        lambda *args, **kwargs: CapturingStringIO())
+    monkeypatch.setattr(
+        Path, "replace",
+        lambda self, target: replacements.append((self, target)) or target)
+
+    checkpoint_path = Path("history.csv")
+    _write_history_checkpoint(
+        [{"epoch": 1, "reward": 0.5}], checkpoint_path)
+    _write_history_checkpoint(
+        [{"epoch": 1, "reward": 0.5}, {"epoch": 2, "reward": 1.0}],
+        checkpoint_path)
+
+    rows = list(csv.DictReader(io.StringIO(writes[-1])))
+    assert rows == [
+        {"epoch": "1", "reward": "0.5"},
+        {"epoch": "2", "reward": "1.0"},
+    ]
+    assert replacements == [
+        (Path("history.csv.tmp"), checkpoint_path),
+        (Path("history.csv.tmp"), checkpoint_path),
+    ]
 
 
 def test_train_lc_improvement_cfg_d3po_rejects_incumbent_reward():

@@ -1,3 +1,4 @@
+import csv
 import pickle
 import math
 import random
@@ -32,6 +33,22 @@ ROUTE_ACTION_NAMES = {
     ROUTE_ACTION_HALT: "halt",
 }
 ROUTE_ACTION_STAT_NAMES = tuple(ROUTE_ACTION_NAMES.values())
+
+
+def _write_history_checkpoint(history, checkpoint_path):
+    """Atomically persist completed training-history rows as CSV."""
+    if checkpoint_path is None or not history:
+        return None
+
+    checkpoint_path = Path(checkpoint_path)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
+    with temp_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=list(history[0]))
+        writer.writeheader()
+        writer.writerows(history)
+    temp_path.replace(checkpoint_path)
+    return checkpoint_path
 
 
 def _trim_route_padding(routes, max_route_len=None):
@@ -1973,7 +1990,7 @@ def train_lc_improvement_cfg_ppo(
         max_trim_actions_per_route=None, train_indices=None, val_indices=None,
         best_model_path=None,
         max_rollout_samples=8192, target_n_routes=None,
-        curriculum_fn=None):
+        curriculum_fn=None, history_checkpoint_path=None):
     """Train LC improvement with the construction PPO machinery adapted to edits.
 
     ``curriculum_fn(iteration) -> (indices, stage_label)`` optionally restricts
@@ -2565,6 +2582,7 @@ def train_lc_improvement_cfg_ppo(
         # per-iteration full-route-set change rate. Validation tracks it.
         row["train_changed_route_rate"] = float("nan")
         history.append(row)
+        _write_history_checkpoint(history, history_checkpoint_path)
 
         pbar.set_postfix({
             "reward": f"{row['train_reward_mean']:.3f}",
@@ -2618,7 +2636,8 @@ def train_lc_improvement_cfg_d3po(
         force_nonhalt_first_step=False, max_route_edit_steps=None,
         max_trim_actions_per_route=None, train_indices=None, val_indices=None,
         best_model_path=None,
-        max_rollout_samples=8192, target_n_routes=None):
+        max_rollout_samples=8192, target_n_routes=None,
+        history_checkpoint_path=None):
     """Train LC improvement with D3PO as a PPO alternative.
 
     Reads shared PPO-style hyperparameters from ``cfg.ppo`` (n_iterations,
@@ -3050,6 +3069,7 @@ def train_lc_improvement_cfg_d3po(
         })
         row["train_changed_route_rate"] = float("nan")
         history.append(row)
+        _write_history_checkpoint(history, history_checkpoint_path)
 
         pbar.set_postfix({
             "reward": f"{row['train_reward_mean']:.3f}",
