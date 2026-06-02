@@ -206,6 +206,10 @@ class IdentityGraphNet(torch.nn.Module):
         return data.x
 
 
+class RedundancyIdentityGraphNet(IdentityGraphNet):
+    in_edge_dim = 18
+
+
 def make_line_state(n_nodes=4, n_routes_to_plan=1, min_route_len=2,
                     max_route_len=4):
     graph = make_line_graph(n_nodes)
@@ -572,6 +576,153 @@ def test_route_state_context_masks_include_fixed_routes():
 
     assert torch.equal(state.context_node_covered_mask, node_mask_before)
     assert torch.equal(state.context_edge_covered_mask, edge_mask_before)
+
+
+def test_route_state_leg_use_counts_preserve_multiplicity():
+    state = make_line_state(n_nodes=5, n_routes_to_plan=3, max_route_len=5)
+    state.add_new_routes(torch.tensor([[
+        [0, 1, 2, -1, -1],
+        [0, 1, -1, -1, -1],
+    ]], dtype=torch.long))
+    state.set_current_routes([2, 1, 0, 1])
+
+    assert state.context_leg_use_count[0, 0, 1].item() == 2
+    assert state.context_leg_use_count[0, 1, 0].item() == 2
+    assert state.current_leg_use_count[0, 0, 1].item() == 2
+    assert state.total_leg_use_count[0, 0, 1].item() == 4
+    assert state.excess_leg_use_count[0, 0, 1].item() == 3
+    assert state.get_global_state_features().shape[-1] == 12
+
+    redundancy_features = state.get_redundancy_global_features()
+    assert torch.allclose(
+        redundancy_features,
+        torch.tensor([[2.0 / 3.0, 2.0, 2.0, 1.0 / 3.0, 1.0]]),
+    )
+
+    state.set_redundancy_feature_mode(True)
+    assert state.get_global_state_features().shape[-1] == 17
+
+
+def test_redundancy_features_are_opt_in_for_trim_model():
+    state = make_line_state(n_nodes=5, n_routes_to_plan=2, max_route_len=5)
+    state.add_new_routes(torch.tensor([[[0, 1, 2, -1, -1]]],
+                                      dtype=torch.long))
+    state.set_current_routes([0, 1, 2, 3, 4])
+    legacy_model = TrimPathCombiningRouteGenerator(
+        backbone_net=IdentityGraphNet(),
+        mean_stop_time_s=0,
+        embed_dim=2,
+        n_nodepair_layers=1,
+        n_pathscorer_layers=1,
+        pathscorer_hidden_dim=8,
+        n_trim_scorer_layers=1,
+        trim_scorer_hidden_dim=8,
+        n_halt_layers=1,
+        symmetric_routes=True,
+        serial_halting=True,
+    )
+    rich_model = TrimPathCombiningRouteGenerator(
+        backbone_net=RedundancyIdentityGraphNet(),
+        mean_stop_time_s=0,
+        embed_dim=2,
+        n_nodepair_layers=1,
+        n_pathscorer_layers=1,
+        pathscorer_hidden_dim=8,
+        n_trim_scorer_layers=1,
+        trim_scorer_hidden_dim=8,
+        n_halt_layers=1,
+        symmetric_routes=True,
+        serial_halting=True,
+        use_redundancy_features=True,
+    )
+
+    rich_model.setup_planning(state)
+    edge_features = rich_model._get_edge_features(state)
+    assert edge_features.shape[-1] == 18
+    assert rich_model.trim_action_feat_dim == 36
+    assert rich_model.path_scorer[0].running_mean.numel() == 27
+
+    global_features = state.get_global_state_features()
+    features, valid, _, _ = rich_model._get_trim_candidate_features(
+        state, global_features, torch.float32, trim_start=True)
+    assert valid[0, 2]
+    assert torch.allclose(
+        features[0, 2, 14:19],
+        torch.tensor([1.0, 0.5, 0.0, 0.0, 1.0 / 3.0]),
+    )
+
+    legacy_model.setup_planning(state)
+    assert state.get_global_state_features().shape[-1] == 12
+    assert legacy_model._get_edge_features(state).shape[-1] == 14
+    assert legacy_model.trim_action_feat_dim == 26
+
+
+def test_live_adjustment_feature_preserves_active_route_slot_order():
+    graph = make_line_graph(n_nodes=5)
+    cost_obj = MyCostModule()
+    seed_routes = torch.tensor([[
+        [0, 1, -1, -1],
+        [1, 2, 3, -1],
+        [3, 4, -1, -1],
+    ]], dtype=torch.long)
+    state = _make_route_context_state(
+        cost_obj,
+        graph,
+        seed_routes,
+        route_idx=1,
+        min_route_len=2,
+        max_route_len=4,
+        cost_weights=cost_obj.get_weights(torch.device("cpu")),
+    )
+    state.set_adjustment_conditioning(
+        target=0.15,
+        seed_routes=seed_routes,
+        gap=0.2,
+        mode="current",
+    )
+
+    assert state.active_route_idx.tolist() == [1]
+    assert torch.equal(state.route_slot_context, seed_routes)
+    assert torch.allclose(
+        state.get_global_state_features()[0, -2:],
+        torch.tensor([0.15, 0.0]),
+    )
+
+
+def test_extend_redundancy_features_describe_candidate_path_overlap():
+    state = make_line_state(n_nodes=5, n_routes_to_plan=2, max_route_len=5)
+    state.add_new_routes(torch.tensor([[[0, 1, -1, -1, -1]]],
+                                      dtype=torch.long))
+    model = TrimPathCombiningRouteGenerator(
+        backbone_net=RedundancyIdentityGraphNet(),
+        mean_stop_time_s=0,
+        embed_dim=2,
+        n_nodepair_layers=1,
+        n_pathscorer_layers=1,
+        pathscorer_hidden_dim=8,
+        n_trim_scorer_layers=1,
+        trim_scorer_hidden_dim=8,
+        n_halt_layers=1,
+        symmetric_routes=True,
+        serial_halting=True,
+        use_redundancy_features=True,
+    )
+    candidate_paths = torch.tensor([[
+        [0, 1, 2, -1, -1],
+        [2, 3, 4, -1, -1],
+    ]], dtype=torch.long)
+
+    features = model._get_added_redundancy_features(
+        state, candidate_paths, torch.float32)
+
+    assert torch.allclose(
+        features[0, 0],
+        torch.tensor([0.5, 1.0, 0.5, 0.5, 1.0 / 3.0]),
+    )
+    assert torch.allclose(
+        features[0, 1],
+        torch.tensor([0.0, 0.0, 0.0, 1.0, 0.0]),
+    )
 
 
 def test_untrained_trim_model_can_emit_and_apply_forced_trim_action():

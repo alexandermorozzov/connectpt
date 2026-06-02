@@ -146,6 +146,9 @@ class ExtraStateData(HeteroData):
                    'n_transfers',
                    'context_node_covered_mask',
                    'context_edge_covered_mask',
+                   'context_leg_use_count',
+                   'route_slot_context',
+                   'active_route_idx',
                    'fixed_routes',
                    'node_coords',
                    'adjustment_target',
@@ -171,6 +174,9 @@ class RouteGenBatchState:
         # right now this must have the same value for all scenarios
         self.symmetric_routes = cost_obj.symmetric_routes
         self._finished_routes = [[] for _ in range(graph_data.num_graphs)]
+        self._redundancy_features_enabled = False
+        self._adjustment_gap = 0.1
+        self._adjustment_mode = 'paper'
 
         # the object isn't ready to give this property yet, so find it here
         dev = graph_data[STOP_KEY].x.device
@@ -259,6 +265,12 @@ class RouteGenBatchState:
                 torch.zeros((max_n_nodes,), device=dev, dtype=torch.bool)
             extra_data.context_edge_covered_mask = torch.zeros(
                 (max_n_nodes, max_n_nodes), device=dev, dtype=torch.bool)
+            extra_data.context_leg_use_count = torch.zeros(
+                (max_n_nodes, max_n_nodes), device=dev, dtype=torch.long)
+            extra_data.route_slot_context = torch.full(
+                (0, 0), -1, device=dev, dtype=torch.long)
+            extra_data.active_route_idx = torch.tensor(
+                -1, device=dev, dtype=torch.long)
 
             extra_data.norm_node_features = torch.zeros(
                 (dd.num_nodes, 0,), device=dev)
@@ -591,6 +603,7 @@ class RouteGenBatchState:
         self.extra_data.n_transfers[batch_index] = 0
         self.extra_data.context_node_covered_mask[batch_index] = False
         self.extra_data.context_edge_covered_mask[batch_index] = False
+        self.extra_data.context_leg_use_count[batch_index] = 0
 
     def _add_routes_to_tensors(self, batch_new_routes,
                                only_routes_with_demand_are_valid=False, 
@@ -682,12 +695,31 @@ class RouteGenBatchState:
             safe_from[valid_edges],
             safe_to[valid_edges],
         ] = True
-        if self.symmetric_routes:
-            self.extra_data.context_edge_covered_mask[
+        self.extra_data.context_leg_use_count.index_put_(
+            (
                 edge_batch_idxs[valid_edges],
-                safe_to[valid_edges],
                 safe_from[valid_edges],
+                safe_to[valid_edges],
+            ),
+            torch.ones_like(safe_from[valid_edges]),
+            accumulate=True,
+        )
+        if self.symmetric_routes:
+            non_loop_edges = valid_edges & (safe_from != safe_to)
+            self.extra_data.context_edge_covered_mask[
+                edge_batch_idxs[non_loop_edges],
+                safe_to[non_loop_edges],
+                safe_from[non_loop_edges],
             ] = True
+            self.extra_data.context_leg_use_count.index_put_(
+                (
+                    edge_batch_idxs[non_loop_edges],
+                    safe_to[non_loop_edges],
+                    safe_from[non_loop_edges],
+                ),
+                torch.ones_like(safe_to[non_loop_edges]),
+                accumulate=True,
+            )
     
     def replace_routes(self, batch_new_routes, 
                 only_routes_with_demand_are_valid=False, 
@@ -985,7 +1017,7 @@ class RouteGenBatchState:
 
         return route_time
     
-    def get_global_state_features(self):
+    def get_global_state_features(self, include_redundancy=None):
         cost_weights = self.cost_weights_tensor
         diameter = self.drive_times.flatten(1,2).max(1).values
         mean_route_time = self.total_route_time / (
@@ -1020,6 +1052,13 @@ class RouteGenBatchState:
             mean_demand_time_frac[:, None],
         ), dim=-1)
 
+        if include_redundancy is None:
+            include_redundancy = self._redundancy_features_enabled
+        if include_redundancy:
+            redundancy_features = self.get_redundancy_global_features()
+            global_features = torch.cat(
+                (global_features, redundancy_features), dim=-1)
+
         # Gated adjustment conditioning: append conditioning features only when
         # set (sentinel >= 0). Default keeps the legacy 12-feature vector so the
         # frozen construction model is unaffected. The appended width is:
@@ -1043,12 +1082,112 @@ class RouteGenBatchState:
             global_features = torch.cat((global_features, adj_feats), dim=-1)
         return global_features
 
+    def set_redundancy_feature_mode(self, enabled):
+        """Select whether optional redundancy summaries join global features."""
+        self._redundancy_features_enabled = bool(enabled)
+
+    def _count_route_legs(self, batch_routes):
+        """Count adjacent stop-to-stop legs in a batch of route tensors."""
+        if batch_routes.ndim == 2:
+            batch_routes = batch_routes[:, None]
+        if batch_routes.shape[0] == 1 and self.batch_size > 1:
+            batch_routes = batch_routes.expand(self.batch_size, -1, -1)
+        elif batch_routes.shape[0] != self.batch_size:
+            raise ValueError(
+                "Route batch size does not match state batch size: "
+                f"{batch_routes.shape[0]} vs {self.batch_size}"
+            )
+
+        counts = torch.zeros(
+            (self.batch_size, self.max_n_nodes, self.max_n_nodes),
+            device=self.device,
+            dtype=torch.long,
+        )
+        if batch_routes.shape[-1] < 2:
+            return counts
+
+        routes = batch_routes.to(device=self.device, dtype=torch.long)
+        from_nodes = routes[..., :-1]
+        to_nodes = routes[..., 1:]
+        valid = (from_nodes >= 0) & (to_nodes >= 0)
+        if not valid.any():
+            return counts
+
+        batch_idxs = torch.arange(
+            self.batch_size, device=self.device)[:, None, None]
+        batch_idxs = batch_idxs.expand_as(from_nodes)
+        safe_from = from_nodes.clamp(min=0)
+        safe_to = to_nodes.clamp(min=0)
+        counts.index_put_(
+            (
+                batch_idxs[valid],
+                safe_from[valid],
+                safe_to[valid],
+            ),
+            torch.ones_like(safe_from[valid]),
+            accumulate=True,
+        )
+        if self.symmetric_routes:
+            non_loop_edges = valid & (safe_from != safe_to)
+            counts.index_put_(
+                (
+                    batch_idxs[non_loop_edges],
+                    safe_to[non_loop_edges],
+                    safe_from[non_loop_edges],
+                ),
+                torch.ones_like(safe_to[non_loop_edges]),
+                accumulate=True,
+            )
+        return counts
+
+    def get_redundancy_global_features(self):
+        """Return normalized network and active-route redundancy summaries."""
+        context_counts = self.context_leg_use_count.to(dtype=torch.float32)
+        current_counts = self.current_leg_use_count.to(dtype=torch.float32)
+        total_counts = context_counts + current_counts
+        excess_counts = (total_counts - 1).clamp_min(0)
+
+        total_traversals = total_counts.sum(dim=(1, 2))
+        network_redundancy = excess_counts.sum(dim=(1, 2)) / \
+            total_traversals.clamp_min(1)
+
+        n_used_legs = (total_counts > 0).sum(dim=(1, 2))
+        mean_excess_leg_use = excess_counts.sum(dim=(1, 2)) / \
+            n_used_legs.clamp_min(1)
+        max_context_leg_use = context_counts.amax(dim=(1, 2))
+
+        current_traversals = current_counts.sum(dim=(1, 2))
+        current_route_self_repeat = \
+            (current_counts - 1).clamp_min(0).sum(dim=(1, 2)) / \
+            current_traversals.clamp_min(1)
+        current_route_context_overlap = \
+            (current_counts * (context_counts > 0)).sum(dim=(1, 2)) / \
+            current_traversals.clamp_min(1)
+
+        return torch.stack((
+            network_redundancy,
+            mean_excess_leg_use,
+            max_context_leg_use,
+            current_route_self_repeat,
+            current_route_context_overlap,
+        ), dim=-1)
+
     def _compute_current_adjustment(self):
         """Per-graph adjustment degree of the CURRENT network vs the stored
         seed routes ([batch] in [0,1]). Used as a closed-loop conditioning
-        feature. gap/mode fixed to the training default (paper, gap=0.1)."""
+        feature."""
         from .bee_colony import get_adjustment_degrees
-        cur = tu.get_batch_tensor_from_routes(self.routes, self.device)
+        if self.route_slot_context.numel() > 0:
+            cur = self.route_slot_context.clone()
+            for bi, route_idx in enumerate(self.active_route_idx.tolist()):
+                if route_idx < 0:
+                    continue
+                cur[bi, route_idx] = -1
+                route = self.current_routes[bi]
+                copy_len = min(cur.shape[-1], route.shape[-1])
+                cur[bi, route_idx, :copy_len] = route[:copy_len]
+        else:
+            cur = tu.get_batch_tensor_from_routes(self.routes, self.device)
         seed = self.adjustment_seed.to(self.device)
         if seed.dim() == 2:           # unbatched [n_routes, L]
             seed = seed.unsqueeze(0)
@@ -1056,7 +1195,8 @@ class RouteGenBatchState:
         ll = min(cur.shape[-1], seed.shape[-1])
         adj = get_adjustment_degrees(
             cur[:, :nr, :ll], seed[:, :nr, :ll].long(),
-            self.symmetric_routes, gap=0.1, mode='paper')
+            self.symmetric_routes, gap=self._adjustment_gap,
+            mode=self._adjustment_mode)
         # get_adjustment_degrees returns per-route [batch, n_routes]; the
         # feature is the per-graph mean adjustment.
         return adj.reshape(adj.shape[0], -1).mean(dim=1).float()
@@ -1274,7 +1414,7 @@ class RouteGenBatchState:
         return bool((self.adjustment_target.reshape(-1)[0] >= 0).item())
 
     def set_adjustment_conditioning(self, target, weight=None,
-                                    seed_routes=None):
+                                    seed_routes=None, gap=0.1, mode='paper'):
         """Enable adjustment conditioning: store per-graph target (always) and,
         optionally, weight and seed routes, so they are appended to
         get_global_state_features (gated).
@@ -1287,6 +1427,8 @@ class RouteGenBatchState:
         """
         bs = self.batch_size
         dev = self.device
+        self._adjustment_gap = float(gap)
+        self._adjustment_mode = str(mode)
         tt = torch.as_tensor(target, device=dev, dtype=torch.float32)
         if tt.numel() == 1:
             tt = tt.expand(bs)
@@ -1310,6 +1452,28 @@ class RouteGenBatchState:
             self.extra_data.adjustment_seed = sr.reshape(bs, sr.shape[-2],
                                                          sr.shape[-1]).clone()
             self.extra_data.adjustment_use_current = torch.ones(bs, device=dev)
+
+    def set_route_slot_context(self, route_batch, active_route_idx):
+        """Keep route-slot ordering for closed-loop adjustment conditioning."""
+        routes = torch.as_tensor(
+            route_batch, device=self.device, dtype=torch.long)
+        if routes.ndim == 2:
+            routes = routes.unsqueeze(0)
+        if routes.shape[0] == 1 and self.batch_size > 1:
+            routes = routes.expand(self.batch_size, -1, -1)
+        elif routes.shape[0] != self.batch_size:
+            raise ValueError(
+                "Route-slot context batch size does not match state batch "
+                f"size: {routes.shape[0]} vs {self.batch_size}")
+        idx = torch.as_tensor(
+            active_route_idx, device=self.device, dtype=torch.long)
+        if idx.numel() == 1:
+            idx = idx.expand(self.batch_size)
+        elif idx.numel() != self.batch_size:
+            raise ValueError(
+                "active_route_idx must be scalar or have one value per batch")
+        self.extra_data.route_slot_context = routes.clone()
+        self.extra_data.active_route_idx = idx.reshape(self.batch_size).clone()
 
     @property
     def directly_connected(self):
@@ -1346,6 +1510,32 @@ class RouteGenBatchState:
     @property
     def context_edge_covered_mask(self):
         return self.extra_data.context_edge_covered_mask
+
+    @property
+    def context_leg_use_count(self):
+        if hasattr(self.extra_data, 'context_leg_use_count'):
+            return self.extra_data.context_leg_use_count
+        return self.context_edge_covered_mask.to(dtype=torch.long)
+
+    @property
+    def route_slot_context(self):
+        return self.extra_data.route_slot_context
+
+    @property
+    def active_route_idx(self):
+        return self.extra_data.active_route_idx
+
+    @property
+    def current_leg_use_count(self):
+        return self._count_route_legs(self.current_routes)
+
+    @property
+    def total_leg_use_count(self):
+        return self.context_leg_use_count + self.current_leg_use_count
+
+    @property
+    def excess_leg_use_count(self):
+        return (self.total_leg_use_count - 1).clamp_min(0)
 
     @property
     def street_adj(self):

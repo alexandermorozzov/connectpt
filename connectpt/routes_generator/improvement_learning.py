@@ -201,6 +201,7 @@ def _make_route_context_state(cost_obj, graph_batch, route_batch, route_idx,
         context_routes,
         invalid_directly_connected=invalid_directly_connected)
     state.set_current_routes(route_batch[:, route_idx])
+    state.set_route_slot_context(route_batch, route_idx)
     return state
 
 
@@ -394,7 +395,8 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
                            return_step_data=False,
                            return_best_routes=False,
                            adjustment_target=None, adjustment_weight=None,
-                           adjustment_use_current=False):
+                           adjustment_use_current=False,
+                           adjustment_gap=0.1, adjustment_mode='paper'):
     if cost_weights is None:
         cost_weights = cost_obj.sample_variable_weights(graph_batch.num_graphs,
                                                         graph_batch[STOP_KEY].x.device)
@@ -451,7 +453,8 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
             # seed_routes=route_batch -> enables the live current-adj feature.
             route_state.set_adjustment_conditioning(
                 adjustment_target, adjustment_weight,
-                seed_routes=(route_batch if adjustment_use_current else None))
+                seed_routes=(route_batch if adjustment_use_current else None),
+                gap=adjustment_gap, mode=adjustment_mode)
         context_route_counts = route_state.n_finished_routes.detach().clone()
         if return_best_routes:
             fallback_routes = _get_current_routes_from_state(route_state)
@@ -1830,7 +1833,9 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
                             return_best_routes=False,
                             adjustment_target=None,
                             adjustment_weight=None,
-                            adjustment_use_current=False):
+                            adjustment_use_current=False,
+                            adjustment_gap=0.1,
+                            adjustment_mode='paper'):
     """Evaluate the improvement model on ``indices``.
 
     Returned dict includes seed/final scalar cost, win rate, route-change
@@ -1865,7 +1870,8 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
         if adjustment_target is not None:
             seed_state.set_adjustment_conditioning(
                 adjustment_target, adjustment_weight,
-                seed_routes=(route_batch if adjustment_use_current else None))
+                seed_routes=(route_batch if adjustment_use_current else None),
+                gap=adjustment_gap, mode=adjustment_mode)
         seed_inline_result = cost_obj(seed_state)
         seed_components_list.append(
             cost_obj.get_cost_components(
@@ -1881,7 +1887,9 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
             return_best_routes=return_best_routes,
             adjustment_target=adjustment_target,
             adjustment_weight=adjustment_weight,
-            adjustment_use_current=adjustment_use_current)
+            adjustment_use_current=adjustment_use_current,
+            adjustment_gap=adjustment_gap,
+            adjustment_mode=adjustment_mode)
         state, seed_result, final_result, _, _ = rollout_output[:5]
         if return_action_stats:
             _, _, _, _, _, route_actions, route_action_kinds = rollout_output
@@ -2150,7 +2158,9 @@ def train_lc_improvement_cfg_ppo(
                 return_best_routes=return_best_routes,
                 adjustment_target=adj_eval_target,
                 adjustment_weight=adj_eval_weight,
-                adjustment_use_current=adjustment_condition_current)
+                adjustment_use_current=adjustment_condition_current,
+                adjustment_gap=adjustment_degree_gap,
+                adjustment_mode=adjustment_degree_mode)
     model.update_and_freeze_feature_norms()
 
     if best_model_path is None:
@@ -2353,7 +2363,8 @@ def train_lc_improvement_cfg_ppo(
             state.set_adjustment_conditioning(
                 cur_adj_target, cur_adj_weight,
                 seed_routes=(cur_seed_routes
-                             if adjustment_condition_current else None))
+                             if adjustment_condition_current else None),
+                gap=adjustment_degree_gap, mode=adjustment_degree_mode)
         state = model.setup_planning(state)
 
         prev_route_idx_holder[0] = route_idx
@@ -2448,7 +2459,9 @@ def train_lc_improvement_cfg_ppo(
                 return_best_routes=return_best_routes,
                 adjustment_target=adj_eval_target,
                 adjustment_weight=adj_eval_weight,
-                adjustment_use_current=adjustment_condition_current)
+                adjustment_use_current=adjustment_condition_current,
+                adjustment_gap=adjustment_degree_gap,
+                adjustment_mode=adjustment_degree_mode)
             if last_val["final_cost"] < best_val_cost:
                 best_val_cost = last_val["final_cost"]
                 torch.save(model.state_dict(), best_model_path)

@@ -988,6 +988,8 @@ class RouteGeneratorBase(nn.Module):
         return self.forward_oldenv(*args, **kwargs)        
 
     def setup_planning(self, state):         
+        state.set_redundancy_feature_mode(
+            getattr(self, 'use_redundancy_features', False))
         # apply normalization to input features
         norm_stops_x = self.node_norm(state.graph_data[STOP_KEY].x)
         state.set_normalized_features(norm_stops_x)
@@ -1071,6 +1073,16 @@ class RouteGeneratorBase(nn.Module):
         eye = torch.eye(state.max_n_nodes, device=state.device)
         eye = eye.expand(state.batch_size, -1, -1)
         edge_feature_parts.append(eye)
+        if getattr(self, 'use_redundancy_features', False):
+            context_counts = state.context_leg_use_count.to(torch.float32)
+            current_counts = state.current_leg_use_count.to(torch.float32)
+            total_counts = state.total_leg_use_count.to(torch.float32)
+            edge_feature_parts.extend((
+                torch.log1p(context_counts),
+                torch.log1p(current_counts),
+                torch.log1p(total_counts),
+                total_counts > 1,
+            ))
         edge_features = torch.stack(edge_feature_parts, dim=-1)
 
         # add planes with cost weights
@@ -1229,7 +1241,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
                  halt_scorer_type='endpoints', n_halt_layers=3, n_halt_heads=4,
                  force_linking_unlinked=False, logit_clip=None,
                  serial_halting=True, max_act_len=None,
-                 n_adjustment_cond_feats=0, **kwargs):
+                 n_adjustment_cond_feats=0,
+                 use_redundancy_features=False, **kwargs):
         """Generates routes by combining shortest paths.
 
         n_pathscorer_layers -- number of layers in the MLP that updates path
@@ -1253,6 +1266,13 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         super().__init__(*args, **kwargs)
         self.logit_clip = logit_clip
         self.serial_halting = serial_halting
+        self.use_redundancy_features = use_redundancy_features
+        self.n_redundancy_global_feats = 5 if use_redundancy_features else 0
+        self.n_redundancy_path_feats = 5 if use_redundancy_features else 0
+        if use_redundancy_features and self.edge_feat_dim != 18:
+            raise ValueError(
+                "Redundancy-aware path combining expects a backbone with "
+                f"in_edge_dim=18, got {self.edge_feat_dim}")
         # only paths shorter than this can be added to a route
         self.max_act_len = max_act_len
         self.nodepair_scorer = get_mlp(self.n_nodepair_layers, 
@@ -1269,9 +1289,11 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         # scorers that consume global features must widen by the same amount.
         # Default 0 keeps the construction-model dims (and frozen weights) intact.
         self.n_adjustment_cond_feats = n_adjustment_cond_feats
-        _halt_n_extra = 14 + n_adjustment_cond_feats
+        _halt_n_extra = 14 + n_adjustment_cond_feats + \
+            self.n_redundancy_global_feats
 
-        path_scorer_indim = 17 + n_adjustment_cond_feats
+        path_scorer_indim = 17 + n_adjustment_cond_feats + \
+            self.n_redundancy_global_feats + self.n_redundancy_path_feats
         # self.path_input_norm = FeatureNorm(FEAT_NORM_MOMENTUM,
         #                                    path_scorer_indim - 1)
         self.path_scorer = nn.Sequential(
@@ -1538,7 +1560,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         extending = ~starting & ~route_is_done
         xtnding_exp = extending[:, None, None]
         start_scores = self._update_path_scores(state, path_scores, path_lens,
-                                                state.drive_times)
+                                                state.drive_times,
+                                                candidate_paths=path_seqs)
         ppe_scores = start_scores * ~xtnding_exp + ext_scores * xtnding_exp
 
         # select an option
@@ -1598,6 +1621,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         return folded_idxs, logits, entropy
 
     def _encode_graph(self, state: RouteGenBatchState):
+        state.set_redundancy_feature_mode(self.use_redundancy_features)
         # assemble route data objects
         input_batch = copy.copy(state.graph_data)
         input_batch.x = state.norm_node_features
@@ -1766,7 +1790,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
         ext_scores = self._update_path_scores(state, ext_scores, new_path_lens, 
                                               added_drive_times, route_lens,
-                                              times_to_end.max(-1)[0])
+                                              times_to_end.max(-1)[0],
+                                              raw_extension_paths)
 
         assert ext_scores.isfinite().all()
 
@@ -1826,9 +1851,9 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
     #     return updated_path_scores
     
-    def _update_path_scores(self, state: RouteGenBatchState, base_path_scores, 
-                            new_path_lens, new_drive_times, prev_len=None, 
-                            prev_drive_time=None):
+    def _update_path_scores(self, state: RouteGenBatchState, base_path_scores,
+                            new_path_lens, new_drive_times, prev_len=None,
+                            prev_drive_time=None, candidate_paths=None):
         """Update the path scores based on the new path lengths and drive times.
         """
         is_valid = base_path_scores > TORCH_FMIN
@@ -1850,7 +1875,16 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
                                  new_path_lens, prev_drive_time, prev_len), 
                                  dim=-1)
 
-        global_feat = state.get_global_state_features()
+        if self.use_redundancy_features:
+            if candidate_paths is None:
+                raise ValueError(
+                    "Redundancy-aware path scoring requires candidate paths")
+            redundancy_feats = self._get_added_redundancy_features(
+                state, candidate_paths, update_in.dtype)
+            update_in = torch.cat((update_in, redundancy_feats), dim=-1)
+
+        global_feat = state.get_global_state_features(
+            include_redundancy=self.use_redundancy_features)
         update_in = nn.functional.pad(update_in, (0, global_feat.shape[-1]))
         for _ in range(update_in.ndim - global_feat.ndim):
             global_feat = global_feat.unsqueeze(1)
@@ -1868,6 +1902,70 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         updated_path_scores[is_valid] = updated_path_scores_wo_infs
 
         return updated_path_scores
+
+    def _get_added_redundancy_features(self, state, candidate_paths, dtype):
+        """Describe how each candidate shortest path changes leg reuse."""
+        paths = candidate_paths.to(device=state.device, dtype=torch.long)
+        from_nodes = paths[..., :-1]
+        to_nodes = paths[..., 1:]
+        valid = (from_nodes >= 0) & (to_nodes >= 0)
+        safe_from = from_nodes.clamp(min=0)
+        safe_to = to_nodes.clamp(min=0)
+
+        batch_idxs = torch.arange(
+            state.batch_size, device=state.device)
+        for _ in range(from_nodes.ndim - 1):
+            batch_idxs = batch_idxs.unsqueeze(-1)
+        batch_idxs = batch_idxs.expand_as(from_nodes)
+
+        context_counts = state.context_leg_use_count
+        total_counts = state.total_leg_use_count
+        path_context_counts = context_counts[
+            batch_idxs, safe_from, safe_to]
+        path_total_counts = total_counts[batch_idxs, safe_from, safe_to]
+        adds_context_overlap = valid & (path_context_counts > 0)
+        adds_excess = valid & (path_total_counts > 0)
+        adds_new_coverage = valid & (path_total_counts == 0)
+
+        valid_counts = valid.sum(dim=-1)
+        denom = valid_counts.clamp_min(1).to(dtype=dtype)
+        added_context_overlap_fraction = \
+            adds_context_overlap.to(dtype=dtype).sum(dim=-1) / denom
+        added_excess_count = adds_excess.to(dtype=dtype).sum(dim=-1)
+        added_new_coverage_fraction = \
+            adds_new_coverage.to(dtype=dtype).sum(dim=-1) / denom
+
+        leg_times = state.drive_times[batch_idxs, safe_from, safe_to]
+        mean_stop_time = state.mean_stop_time
+        for _ in range(leg_times.ndim - 1):
+            mean_stop_time = mean_stop_time.unsqueeze(-1)
+        leg_times = (leg_times + mean_stop_time) * valid
+        path_times = leg_times.sum(dim=-1)
+        excess_times = (leg_times * adds_excess).sum(dim=-1)
+        added_excess_time_fraction = excess_times / \
+            path_times.clamp_min(EPSILON)
+
+        mirror_factor = 2 if state.symmetric_routes else 1
+        all_total_counts = total_counts.to(dtype=dtype)
+        old_traversals = all_total_counts.sum(dim=(1, 2)) / mirror_factor
+        old_excess = (all_total_counts - 1).clamp_min(0).sum(
+            dim=(1, 2)) / mirror_factor
+        old_redundancy = old_excess / old_traversals.clamp_min(1)
+        for _ in range(valid_counts.ndim - 1):
+            old_traversals = old_traversals.unsqueeze(-1)
+            old_excess = old_excess.unsqueeze(-1)
+            old_redundancy = old_redundancy.unsqueeze(-1)
+        new_redundancy = (old_excess + added_excess_count) / \
+            (old_traversals + valid_counts).clamp_min(1)
+        redundancy_delta_if_extend = new_redundancy - old_redundancy
+
+        return torch.stack((
+            added_context_overlap_fraction,
+            added_excess_count,
+            added_excess_time_fraction,
+            added_new_coverage_fraction,
+            redundancy_delta_if_extend,
+        ), dim=-1)
     
 
 
@@ -1888,12 +1986,16 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         super().__init__(*args, **kwargs)
         self.trim_base_feat_dim = 6
         self.trim_overlap_feat_dim = 8
-        # Matches RouteGenBatchState.get_global_state_features(): 12 base, plus
-        # n_adjustment_cond_feats (0 or 2) when adjustment conditioning is on.
-        self.trim_global_feat_dim = 12 + self.n_adjustment_cond_feats
+        self.trim_redundancy_feat_dim = \
+            5 if self.use_redundancy_features else 0
+        # Matches RouteGenBatchState.get_global_state_features(): 12 base,
+        # optional redundancy summaries, plus adjustment conditioning.
+        self.trim_global_feat_dim = 12 + self.n_redundancy_global_feats + \
+            self.n_adjustment_cond_feats
         self.trim_action_feat_dim = (
             self.trim_base_feat_dim +
             self.trim_overlap_feat_dim +
+            self.trim_redundancy_feat_dim +
             self.trim_global_feat_dim
         )
         self.forbid_halt_when_overlong = forbid_halt_when_overlong
@@ -2137,7 +2239,8 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         ext_scores = prev_scores * prev_valid + next_scores * next_valid + \
             TORCH_FMIN * ~ext_valid
         start_scores = self._update_path_scores(state, path_scores, path_lens,
-                                                state.drive_times)
+                                                state.drive_times,
+                                                candidate_paths=path_seqs)
 
         trim_start_scores, trim_start_valid = self._get_trim_action_scores(
             state, trim_np_embeds, trim_start=True)
@@ -2336,7 +2439,8 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             device=state.device,
             dtype=nodepair_embeds.dtype,
         )
-        global_features = state.get_global_state_features()
+        global_features = state.get_global_state_features(
+            include_redundancy=self.use_redundancy_features)
         global_features = global_features.to(
             device=state.device,
             dtype=features.dtype,
@@ -2429,10 +2533,21 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         ), dim=-1)
         overlap_features = self._get_vectorized_trim_overlap_features(
             state, positions, trim_start, dtype)
+        if self.use_redundancy_features:
+            redundancy_features = \
+                self._get_vectorized_trim_redundancy_features(
+                    state, positions, trim_start, dtype)
+        else:
+            redundancy_features = torch.zeros(
+                (batch_size, route_capacity, 0),
+                device=state.device,
+                dtype=dtype,
+            )
         expanded_global = global_features[:, None].expand(
             -1, route_capacity, -1)
         features = torch.cat(
-            (base_features, overlap_features, expanded_global), dim=-1)
+            (base_features, overlap_features, redundancy_features,
+             expanded_global), dim=-1)
         return features, valid, from_nodes, to_nodes
 
     def _get_vectorized_trim_overlap_features(self, state, positions,
@@ -2521,6 +2636,99 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             frac,
             torch.zeros_like(frac),
         )
+
+    def _get_vectorized_trim_redundancy_features(
+            self, state, positions, trim_start, dtype):
+        """Describe which repeated legs each possible trim action removes."""
+        routes = state.current_routes.to(dtype=torch.long)
+        batch_size, route_capacity = routes.shape
+        route_lens = state.current_route_n_stops.to(dtype=torch.long)
+        edge_positions = positions[:-1]
+        edge_pos = edge_positions[None, None]
+        cand_pos = positions[None, :, None]
+
+        from_nodes = routes[..., :-1]
+        to_nodes = routes[..., 1:]
+        valid_edges = (from_nodes >= 0) & (to_nodes >= 0)
+        safe_from = from_nodes.clamp(min=0)
+        safe_to = to_nodes.clamp(min=0)
+        edge_batch_idxs = torch.arange(
+            batch_size, device=state.device)[:, None]
+
+        total_edge_counts = state.total_leg_use_count[
+            edge_batch_idxs, safe_from, safe_to]
+        current_edge_counts = state.current_leg_use_count[
+            edge_batch_idxs, safe_from, safe_to]
+        excess_edges = valid_edges & (total_edge_counts > 1)
+        self_repeat_edges = valid_edges & (current_edge_counts > 1)
+
+        if trim_start:
+            removed_edge_pos = edge_pos < cand_pos
+            kept_edge_pos = (edge_pos >= cand_pos) & \
+                (edge_pos < (route_lens - 1)[:, None, None])
+        else:
+            removed_edge_pos = (edge_pos >= cand_pos) & \
+                (edge_pos < (route_lens - 1)[:, None, None])
+            kept_edge_pos = edge_pos < cand_pos
+        removed_edge_pos = removed_edge_pos & valid_edges[:, None]
+        kept_edge_pos = kept_edge_pos & valid_edges[:, None]
+
+        removed_excess_fraction = self._masked_candidate_fraction(
+            excess_edges, removed_edge_pos, dtype)
+        removed_self_repeat_fraction = self._masked_candidate_fraction(
+            self_repeat_edges, removed_edge_pos, dtype)
+        kept_excess_fraction = self._masked_candidate_fraction(
+            excess_edges, kept_edge_pos, dtype)
+
+        leg_times = tu.get_route_leg_times(
+            state.current_routes, state.drive_times, state.mean_stop_time)
+        redundant_leg_times = leg_times * excess_edges
+        removed_excess_time = (
+            redundant_leg_times[:, None] *
+            removed_edge_pos.to(dtype=leg_times.dtype)
+        ).sum(dim=-1)
+        removed_excess_time_fraction = removed_excess_time / \
+            leg_times.sum(dim=-1)[:, None].clamp_min(EPSILON)
+
+        mirror_factor = 2 if state.symmetric_routes else 1
+        total_counts = state.total_leg_use_count.to(dtype=dtype)
+        old_traversals = total_counts.sum(dim=(1, 2)) / mirror_factor
+        old_excess = (total_counts - 1).clamp_min(0).sum(
+            dim=(1, 2)) / mirror_factor
+        old_redundancy = old_excess / old_traversals.clamp_min(1)
+
+        if state.symmetric_routes:
+            compare_from = torch.minimum(safe_from, safe_to)
+            compare_to = torch.maximum(safe_from, safe_to)
+        else:
+            compare_from = safe_from
+            compare_to = safe_to
+        same_edge = (compare_from[:, :, None] == compare_from[:, None]) & \
+            (compare_to[:, :, None] == compare_to[:, None])
+        earlier_edge = edge_positions[None, :, None] > \
+            edge_positions[None, None]
+        prior_removed_same = (
+            removed_edge_pos[:, :, :, None] &
+            same_edge[:, None] &
+            earlier_edge[:, None]
+        ).sum(dim=-1)
+        count_before_removal = \
+            total_edge_counts[:, None] - prior_removed_same
+        removed_excess = (
+            removed_edge_pos & (count_before_removal > 1)
+        ).sum(dim=-1).to(dtype=dtype)
+        removed_count = removed_edge_pos.sum(dim=-1).to(dtype=dtype)
+        new_redundancy = (old_excess[:, None] - removed_excess) / \
+            (old_traversals[:, None] - removed_count).clamp_min(1)
+        redundancy_delta_if_trim = old_redundancy[:, None] - new_redundancy
+
+        return torch.stack((
+            removed_excess_fraction,
+            removed_excess_time_fraction,
+            removed_self_repeat_fraction,
+            kept_excess_fraction,
+            redundancy_delta_if_trim,
+        ), dim=-1)
 
     def _write_trim_features(self, features, valid, batch_idx, from_node,
                              to_node, removed_len, remaining_len, route_len,

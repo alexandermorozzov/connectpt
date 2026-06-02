@@ -13,7 +13,7 @@ backbone_gn:
   kwargs:
     n_layers: 5
     in_node_dim: 4
-    in_edge_dim: 14
+    in_edge_dim: 18
     use_norm: false
     n_heads: 4
     dense: false
