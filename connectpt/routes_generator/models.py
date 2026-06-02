@@ -2397,53 +2397,67 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         return inferred
 
     def _encode_route_action_selection(self, state, actions, action_kinds):
+        # Flat layout: [extend (N*N), trim_start (route_capacity),
+        #               trim_end (route_capacity)]. extend candidates are node
+        # pairs; trim candidates are ROUTE POSITIONS (actions[:, 0] = position).
         n_nodes = state.max_n_nodes
         n_node_pairs = n_nodes * n_nodes
+        route_capacity = state.current_routes.shape[1]
         safe_actions = actions.clamp(min=0)
-        pair_idxs = safe_actions[:, 0] * n_nodes + safe_actions[:, 1]
-        selection = pair_idxs.clone()
-        selection[action_kinds == ROUTE_ACTION_TRIM_START] = \
-            n_node_pairs + pair_idxs[action_kinds == ROUTE_ACTION_TRIM_START]
-        selection[action_kinds == ROUTE_ACTION_TRIM_END] = \
-            2 * n_node_pairs + pair_idxs[action_kinds == ROUTE_ACTION_TRIM_END]
+        selection = safe_actions[:, 0] * n_nodes + safe_actions[:, 1]
+        ts = action_kinds == ROUTE_ACTION_TRIM_START
+        te = action_kinds == ROUTE_ACTION_TRIM_END
+        selection[ts] = n_node_pairs + safe_actions[ts, 0]
+        selection[te] = n_node_pairs + route_capacity + safe_actions[te, 0]
         return selection
 
     def _decode_route_action_selection(self, state, flat_idxs):
         n_nodes = state.max_n_nodes
         n_node_pairs = n_nodes * n_nodes
+        route_capacity = state.current_routes.shape[1]
         action_kinds = torch.full_like(flat_idxs, ROUTE_ACTION_EXTEND)
 
         trim_start = (flat_idxs >= n_node_pairs) & \
-            (flat_idxs < 2 * n_node_pairs)
-        trim_end = (flat_idxs >= 2 * n_node_pairs) & \
-            (flat_idxs < 3 * n_node_pairs)
+            (flat_idxs < n_node_pairs + route_capacity)
+        trim_end = (flat_idxs >= n_node_pairs + route_capacity) & \
+            (flat_idxs < n_node_pairs + 2 * route_capacity)
         action_kinds[trim_start] = ROUTE_ACTION_TRIM_START
         action_kinds[trim_end] = ROUTE_ACTION_TRIM_END
 
-        pair_idxs = flat_idxs % n_node_pairs
+        # extend -> (from_node, to_node); clamp keeps the divmod valid for the
+        # (overwritten) trim rows.
+        pair_idxs = flat_idxs.clamp(max=n_node_pairs - 1)
         from_idxs = torch.div(pair_idxs, n_nodes, rounding_mode='floor')
         to_idxs = pair_idxs % n_nodes
         folded_idxs = torch.stack((from_idxs, to_idxs), dim=-1)
+
+        # trim -> (position, -1)
+        pos_start = flat_idxs - n_node_pairs
+        pos_end = flat_idxs - n_node_pairs - route_capacity
+        folded_idxs[trim_start, 0] = pos_start[trim_start]
+        folded_idxs[trim_start, 1] = -1
+        folded_idxs[trim_end, 0] = pos_end[trim_end]
+        folded_idxs[trim_end, 1] = -1
         return action_kinds, folded_idxs
 
     def _get_trim_action_scores(self, state, nodepair_embeds,
                                 trim_start=True):
+        """Positional trim scores: one candidate per route position.
+
+        Returns ``scores`` and ``valid`` of shape ``[batch, route_capacity]``.
+        Each position's endpoint-pair embedding is GATHERED from
+        ``nodepair_embeds`` (instead of scattering candidates into an [N, N]
+        grid). Scattering collided whenever a node repeated on the route, which
+        made positional trims ambiguous / no-ops; gathering by position is
+        unambiguous and avoids the wasted N**2 action grid.
+        """
         batch_size = state.batch_size
-        scores = torch.full((batch_size, state.max_n_nodes, state.max_n_nodes),
-                            TORCH_FMIN, device=state.device,
-                            dtype=nodepair_embeds.dtype)
-        valid = torch.zeros_like(scores, dtype=torch.bool)
-        features = torch.zeros(
-            (batch_size, state.max_n_nodes, state.max_n_nodes,
-             self.trim_action_feat_dim),
-            device=state.device,
-            dtype=nodepair_embeds.dtype,
-        )
+        route_capacity = state.current_routes.shape[1]
         global_features = state.get_global_state_features(
             include_redundancy=self.use_redundancy_features)
         global_features = global_features.to(
             device=state.device,
-            dtype=features.dtype,
+            dtype=nodepair_embeds.dtype,
         )
         if global_features.shape[-1] != self.trim_global_feat_dim:
             raise ValueError(
@@ -2453,30 +2467,22 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             )
         candidate_features, candidate_valid, from_nodes, to_nodes = \
             self._get_trim_candidate_features(
-                state, global_features, features.dtype, trim_start)
+                state, global_features, nodepair_embeds.dtype, trim_start)
         candidate_valid = candidate_valid & (from_nodes >= 0) & (to_nodes >= 0)
+        scores = torch.full((batch_size, route_capacity), TORCH_FMIN,
+                            device=state.device, dtype=nodepair_embeds.dtype)
         if candidate_valid.any():
-            candidate_batch_idxs = torch.arange(
-                batch_size, device=state.device)[:, None]
-            candidate_batch_idxs = candidate_batch_idxs.expand_as(from_nodes)
+            batch_idxs = torch.arange(
+                batch_size, device=state.device)[:, None].expand(
+                    -1, route_capacity)
             safe_from = from_nodes.clamp(min=0)
             safe_to = to_nodes.clamp(min=0)
-            features[
-                candidate_batch_idxs[candidate_valid],
-                safe_from[candidate_valid],
-                safe_to[candidate_valid],
-            ] = candidate_features[candidate_valid]
-            valid[
-                candidate_batch_idxs[candidate_valid],
-                safe_from[candidate_valid],
-                safe_to[candidate_valid],
-            ] = True
-
-        if valid.any():
-            trim_inputs = torch.cat((nodepair_embeds, features), dim=-1)
-            scored = self.trim_scorer(trim_inputs[valid]).squeeze(-1)
-            scores[valid] = scored
-        return scores, valid
+            # [batch, route_capacity, embed_dim]
+            pair_embeds = nodepair_embeds[batch_idxs, safe_from, safe_to]
+            trim_inputs = torch.cat((pair_embeds, candidate_features), dim=-1)
+            scored = self.trim_scorer(trim_inputs[candidate_valid]).squeeze(-1)
+            scores[candidate_valid] = scored
+        return scores, candidate_valid
 
     def _get_trim_candidate_features(self, state, global_features, dtype,
                                      trim_start):

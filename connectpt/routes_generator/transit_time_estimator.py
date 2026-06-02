@@ -532,20 +532,14 @@ class RouteGenBatchState:
             if len(route) == 0:
                 raise ValueError("Cannot trim an empty current route")
 
+            # Positional trim: path_indices[bi, 0] is the route POSITION index
+            # (unambiguous even when a node repeats on the route).
+            pos = int(path_indices[bi, 0].item())
+            pos = max(0, min(pos, len(route) - 1))
             if trim_start_mask[bi]:
-                new_start = path_indices[bi, 1]
-                matches = torch.where(route == new_start)[0]
-                if len(matches) == 0:
-                    raise ValueError("trim_start terminal is not on route")
-                start_idx = int(matches[0].item())
-                trimmed = route[start_idx:]
+                trimmed = route[pos:]          # keep route[pos:]
             else:
-                new_end = path_indices[bi, 0]
-                matches = torch.where(route == new_end)[0]
-                if len(matches) == 0:
-                    raise ValueError("trim_end terminal is not on route")
-                end_idx = int(matches[-1].item())
-                trimmed = route[:end_idx + 1]
+                trimmed = route[:pos + 1]       # keep route[:pos+1]
 
             if len(trimmed) < self.min_route_len[bi]:
                 raise ValueError("Trim action would violate min_route_len")
