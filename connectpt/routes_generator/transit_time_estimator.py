@@ -541,8 +541,12 @@ class RouteGenBatchState:
             else:
                 trimmed = route[:pos + 1]       # keep route[:pos+1]
 
-            if len(trimmed) < self.min_route_len[bi]:
-                raise ValueError("Trim action would violate min_route_len")
+            # Absolute floor: a route needs >= 2 stops to be a path. The model's
+            # trim-candidate mask enforces min_route_len unless below-min trims
+            # are explicitly enabled, so this guard only trips on degenerate
+            # (<2 stop) trims.
+            if len(trimmed) < 2:
+                raise ValueError("Trim action would leave fewer than 2 stops")
 
             updated_routes[bi] = -1
             updated_routes[bi, :len(trimmed)] = trimmed

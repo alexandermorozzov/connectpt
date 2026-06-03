@@ -585,6 +585,56 @@ def test_trim_action_selection_encode_decode_roundtrip():
     assert te.item() - ts.item() == route_capacity
 
 
+def _make_trim_model(allow_trim_below_min=False):
+    return TrimPathCombiningRouteGenerator(
+        backbone_net=IdentityGraphNet(), mean_stop_time_s=0, embed_dim=2,
+        n_nodepair_layers=1, n_pathscorer_layers=1, pathscorer_hidden_dim=8,
+        n_trim_scorer_layers=1, trim_scorer_hidden_dim=8, n_halt_layers=1,
+        symmetric_routes=True, serial_halting=True,
+        allow_trim_below_min=allow_trim_below_min)
+
+
+def test_trim_below_min_opt_in_and_halt_masking():
+    # --- A: apply accepts a trim that leaves a route below min_route_len ---
+    state = make_line_state(n_nodes=8, max_route_len=8, min_route_len=5)
+    state.set_current_routes([0, 1, 2, 3, 4, 5])          # len 6 >= min 5
+    state.apply_route_actions(torch.tensor([ROUTE_ACTION_TRIM_START]),
+                              torch.tensor([[3, -1]]))     # keep [3, 4, 5]
+    assert state.current_route_n_stops.item() == 3         # sub-min route allowed
+
+    # --- B: model proposes sub-min trim positions ONLY when the flag is on ---
+    def valid_count(flag):
+        s = make_line_state(n_nodes=8, max_route_len=8, min_route_len=5)
+        s.set_current_routes([0, 1, 2, 3, 4, 5])           # len 6
+        m = _make_trim_model(allow_trim_below_min=flag)
+        m.setup_planning(s)
+        gf = s.get_global_state_features()
+        _, valid, _, _ = m._get_trim_candidate_features(
+            s, gf, torch.float32, trim_start=True)
+        return int(valid[0].sum().item())
+    off, on = valid_count(False), valid_count(True)
+    assert off == 1            # only pos keeping remaining>=min(5) is valid
+    assert on >= 4             # remaining>=2 -> several more positions valid
+    assert on > off
+
+    # --- C: halt is masked below min, available again at min ---
+    model = _make_trim_model(allow_trim_below_min=True)
+    below = make_line_state(n_nodes=8, max_route_len=8, min_route_len=5)
+    below.set_current_routes([0, 1, 2])                    # len 3 < min 5
+    model.setup_planning(below)
+    kinds, _, _, _ = model.step_route_action(
+        below, greedy=True, allow_halt=True)
+    assert kinds[0].item() != ROUTE_ACTION_HALT            # cannot halt below min
+
+    atmin = make_line_state(n_nodes=8, max_route_len=8, min_route_len=5)
+    atmin.set_current_routes([0, 1, 2, 3, 4])              # len 5 == min
+    model.setup_planning(atmin)
+    kinds2, _, _, _ = model.step_route_action(
+        atmin, actions=torch.tensor([[-1, -1]]),
+        action_kinds=torch.tensor([ROUTE_ACTION_HALT]), allow_halt=True)
+    assert kinds2[0].item() == ROUTE_ACTION_HALT           # halt allowed at min
+
+
 def test_route_state_context_masks_track_finished_not_current_routes():
     state = make_line_state(n_nodes=4, n_routes_to_plan=2, max_route_len=4)
 

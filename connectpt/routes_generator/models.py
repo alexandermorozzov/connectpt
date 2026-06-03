@@ -1985,8 +1985,13 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
 
     def __init__(self, *args, n_trim_scorer_layers=3,
                  trim_scorer_hidden_dim=16,
-                 forbid_halt_when_overlong=False, **kwargs):
+                 forbid_halt_when_overlong=False,
+                 allow_trim_below_min=False, **kwargs):
         super().__init__(*args, **kwargs)
+        # When True, trim candidates may shorten a route below min_route_len
+        # (down to an absolute floor of 2 stops). halt stays masked while the
+        # route is below min, so the agent must extend back up before halting.
+        self.allow_trim_below_min = allow_trim_below_min
         self.trim_base_feat_dim = 6
         self.trim_overlap_feat_dim = 8
         self.trim_redundancy_feat_dim = \
@@ -2497,6 +2502,11 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
 
         min_lens = state.min_route_len.to(device=state.device,
                                           dtype=torch.long)
+        # Absolute trim floor: normally min_route_len, but if below-min trims
+        # are allowed a route may be shortened down to 2 stops (still a path).
+        trim_floor = (torch.full_like(min_lens, 2)
+                      if getattr(self, 'allow_trim_below_min', False)
+                      else min_lens)
         max_lens = state.max_route_len.to(device=state.device,
                                           dtype=dtype).clamp_min(1)
         route_lens_f = route_lens.to(dtype=dtype).clamp_min(1)
@@ -2513,7 +2523,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             direction_flag = torch.zeros_like(route_lens_f)[:, None].expand_as(
                 times_from_start)
             valid = (pos >= 1) & (pos < route_lens[:, None]) & \
-                (remaining_len >= min_lens[:, None])
+                (remaining_len >= trim_floor[:, None])
         else:
             last_pos = (route_lens - 1).clamp_min(0)
             old_end = routes.gather(1, last_pos[:, None])
@@ -2526,9 +2536,9 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             direction_flag = torch.ones_like(route_lens_f)[:, None].expand_as(
                 times_from_start)
             valid = (pos < (route_lens - 1)[:, None]) & \
-                (remaining_len >= min_lens[:, None])
+                (remaining_len >= trim_floor[:, None])
 
-        valid = valid & (route_lens[:, None] > min_lens[:, None])
+        valid = valid & (route_lens[:, None] > trim_floor[:, None])
         route_len_frac = (
             route_lens.to(dtype=dtype)[:, None] / max_lens[:, None]
         ).expand_as(pos)

@@ -11,3 +11,6 @@ kwargs:
   serial_halting: true
   forbid_halt_when_overlong: false
   use_redundancy_features: true
+  # allow trimming a route below min_route_len (down to 2 stops); halt stays
+  # masked until extend restores min. Default off preserves the length contract.
+  allow_trim_below_min: false
