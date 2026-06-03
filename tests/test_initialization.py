@@ -522,6 +522,69 @@ def test_route_state_trim_actions_rebuild_current_route_graph():
     assert torch.isfinite(state.route_mat[0, 0, 1])
 
 
+def test_trim_action_selection_encode_decode_roundtrip():
+    # Teacher-forcing path used in the PPO update: an action that was sampled in
+    # the rollout must encode to a flat index and decode back to the SAME typed
+    # action. A mismatch silently corrupts the recomputed log-probs / gradient.
+    state = make_line_state(n_nodes=6, max_route_len=6)
+    state.set_current_routes([0, 1, 2, 3, 4])
+    model = TrimPathCombiningRouteGenerator(
+        backbone_net=IdentityGraphNet(),
+        mean_stop_time_s=0,
+        embed_dim=2,
+        n_nodepair_layers=1,
+        n_pathscorer_layers=1,
+        pathscorer_hidden_dim=8,
+        n_trim_scorer_layers=1,
+        trim_scorer_hidden_dim=8,
+        n_halt_layers=1,
+        symmetric_routes=True,
+        serial_halting=True,
+    )
+    model.setup_planning(state)
+
+    n_nodes = state.max_n_nodes
+    route_capacity = state.current_routes.shape[1]
+
+    # batch of representative actions: extend(2->4), trim_start@1, trim_end@3,
+    # extend(0->5), trim_start@3, trim_end@1.
+    actions = torch.tensor(
+        [[2, 4], [1, -1], [3, -1], [0, 5], [3, -1], [1, -1]], dtype=torch.long)
+    kinds = torch.tensor([
+        ROUTE_ACTION_EXTEND, ROUTE_ACTION_TRIM_START, ROUTE_ACTION_TRIM_END,
+        ROUTE_ACTION_EXTEND, ROUTE_ACTION_TRIM_START, ROUTE_ACTION_TRIM_END,
+    ], dtype=torch.long)
+
+    flat = model._encode_route_action_selection(state, actions, kinds)
+
+    # flat indices land in the expected contiguous ranges per action kind
+    n_node_pairs = n_nodes * n_nodes
+    assert flat[0].item() == 2 * n_nodes + 4            # extend(2->4)
+    assert flat[1].item() == n_node_pairs + 1           # trim_start@1
+    assert flat[2].item() == n_node_pairs + route_capacity + 3  # trim_end@3
+    assert flat[3].item() == 0 * n_nodes + 5            # extend(0->5)
+
+    dec_kinds, dec_folded = model._decode_route_action_selection(state, flat)
+    assert dec_kinds.tolist() == kinds.tolist()
+    # extend rows recover (from, to); trim rows recover (position, -1)
+    assert dec_folded[0].tolist() == [2, 4]
+    assert dec_folded[1].tolist() == [1, -1]
+    assert dec_folded[2].tolist() == [3, -1]
+    assert dec_folded[3].tolist() == [0, 5]
+    assert dec_folded[4].tolist() == [3, -1]
+    assert dec_folded[5].tolist() == [1, -1]
+
+    # trim_start and trim_end at the same position map to DISTINCT flat indices
+    ts = model._encode_route_action_selection(
+        state, torch.tensor([[2, -1]]),
+        torch.tensor([ROUTE_ACTION_TRIM_START]))
+    te = model._encode_route_action_selection(
+        state, torch.tensor([[2, -1]]),
+        torch.tensor([ROUTE_ACTION_TRIM_END]))
+    assert ts.item() != te.item()
+    assert te.item() - ts.item() == route_capacity
+
+
 def test_route_state_context_masks_track_finished_not_current_routes():
     state = make_line_state(n_nodes=4, n_routes_to_plan=2, max_route_len=4)
 
