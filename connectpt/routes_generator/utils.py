@@ -310,7 +310,10 @@ def test_method(method_fn, dataloader, eval_cfg, init_cfg, cost_obj,
                 print(f"{name}: {stat_value:.3f}")
 
     unserved_demand = cost_obj(state).unserved_demand_matrix
-    out_stats = (final_costs.mean(), final_costs.std(), unserved_demand, all_metrics)
+    # unbiased=False avoids the "degrees of freedom <= 0" warning when a single
+    # network is evaluated (batch_size 1); population std of one sample is 0.
+    out_stats = (final_costs.mean(), final_costs.std(unbiased=False),
+                 unserved_demand, all_metrics)
     if return_routes:
         out_stats = out_stats + (state.routes,)
     if return_histories:

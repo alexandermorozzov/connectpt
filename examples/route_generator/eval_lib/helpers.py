@@ -496,23 +496,31 @@ def build_rpc_routes(spec, tensors, run_name=None, n_samples=1):
         routes, spec["n_routes"], spec["max_route_len"])
 
 
-def build_edit_model(device):
-    """Load the trim-capable edit model used by edit/trim BCO mutations."""
+def build_edit_model(device, weights_path=None, load_weights=True):
+    """Load the trim-capable edit model used by edit/trim BCO mutations.
+
+    ``weights_path`` defaults to ``EDIT_MODEL_WEIGHTS_PATH`` but can be pointed
+    at any compatible trim-model checkpoint (e.g. a freshly trained
+    route+conn(+adj) model from the lc_redundancy notebook).
+
+    ``load_weights=False`` returns a randomly-initialised model of the same
+    architecture (untrained policy) -- used for the RL-ablation baseline that
+    isolates the value of training vs the structure alone.
+    """
+    weights_path = weights_path or EDIT_MODEL_WEIGHTS_PATH
+    overrides = [
+        "model=bestsofar_feb2023_trim",
+        "model.route_generator.kwargs.serial_halting=True",
+        "++run_name=eval_seeded_edit_model",
+        "++experiment.logdir=null",
+    ]
+    if load_weights:
+        overrides.append(f"+model.weights='{weights_path}'")
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        edit_cfg = compose(
-            config_name="ppo_50nodes.yaml",
-            overrides=[
-                "model=bestsofar_feb2023_trim",
-                "model.route_generator.kwargs.serial_halting=True",
-                "++run_name=eval_seeded_edit_model",
-                "++experiment.logdir=null",
-                f"+model.weights='{EDIT_MODEL_WEIGHTS_PATH}'",
-            ],
-        )
+        edit_cfg = compose(config_name="ppo_50nodes.yaml", overrides=overrides)
     edit_model = lrnu.build_model_from_cfg(edit_cfg.model, edit_cfg.experiment)
-    edit_model.load_state_dict(
-        torch.load(EDIT_MODEL_WEIGHTS_PATH, map_location=device)
-    )
+    if load_weights:
+        edit_model.load_state_dict(torch.load(weights_path, map_location=device))
     edit_model.to(device).eval()
     return edit_model
 
@@ -530,6 +538,7 @@ def run_rl_improvement(
     *,
     tensors=None,
     weights=None,
+    edit_weights_path=None,
 ):
     """Run the trained edit/RL agent once over all seeded routes, without BCO.
 
@@ -563,7 +572,7 @@ def run_rl_improvement(
         run_name_prefix="rl_improvement_",
         weights_required=False,
     )
-    edit_model = build_edit_model(device)
+    edit_model = build_edit_model(device, weights_path=edit_weights_path)
     graph_batch = next(iter(dataloader))
     if device is not None and device.type != "cpu":
         graph_batch = graph_batch.cuda()

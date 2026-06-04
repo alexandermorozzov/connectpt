@@ -110,7 +110,8 @@ def run_method(method, *, init_routes, n_routes=N_ROUTES,
                 init_routes, run_name=f"{run_name_scope}rl_only",
                 n_routes=n_routes, min_route_len=min_route_len,
                 max_route_len=max_route_len, tensors=tensors,
-                weights=weights))
+                weights=weights,
+                edit_weights_path=method.get("edit_weights_path")))
         return RunResult(
             label=label, kind="rl_only", dataset=dataset, metrics=metrics,
             routes=routes, seed_routes=as_route_tensor(init_routes),
