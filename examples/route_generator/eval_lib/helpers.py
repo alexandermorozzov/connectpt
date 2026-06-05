@@ -214,8 +214,17 @@ def build_bco_cfg(
     trim_grace_period: int = 0,
     early_stop_patience: int | None = None,
     early_stop_min_delta: float = 0.0,
+    bee_model_arch: str | None = None,
+    bee_model_weights=None,
 ):
     """Build a BCO config.
+
+    ``bee_model_arch`` / ``bee_model_weights`` (optional) override the neural
+    *rebuild/construction* bee model. By default the type-1 rebuild bee uses the
+    construction model (``bestsofar_feb2023``); set
+    ``bee_model_arch="bestsofar_feb2023_trim"`` + ``bee_model_weights=<edit ckpt>``
+    to drive the rebuild bee with the trim/edit model instead (rebuild via the
+    edit model's RL rollout).
 
     User-facing mutation names:
       heuristic_rebuild      - rebuild the chosen route
@@ -268,10 +277,16 @@ def build_bco_cfg(
         f"++trim_grace_period={trim_grace_period}",
         f"++early_stop_min_delta={float(early_stop_min_delta)}",
     ]
+    if bee_model_arch is not None:
+        # rebuild/construction bee uses a custom model arch (e.g. our trim edit
+        # model) -- compose-time defaults-group override + serial halting.
+        overrides = [f"model={bee_model_arch}",
+                     "model.route_generator.kwargs.serial_halting=True"] + overrides
     if early_stop_patience is not None:
         overrides.append(f"++early_stop_patience={int(early_stop_patience)}")
     if use_neural_bees:
-        overrides.append(f"+model.weights='{MODEL_WEIGHTS_PATH}'")
+        _bee_w = bee_model_weights if bee_model_weights is not None else MODEL_WEIGHTS_PATH
+        overrides.append(f"+model.weights='{_bee_w}'")
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
         cfg = compose(config_name=base_cfg_name, overrides=overrides)
     cfg.batch_size = 1
