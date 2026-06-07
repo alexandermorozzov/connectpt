@@ -221,7 +221,13 @@ def test_method(method_fn, dataloader, eval_cfg, init_cfg, cost_obj,
     final_costs = []
     all_metrics = None
 
-    for data in tqdm(dataloader, disable=silent):
+    try:
+        _single_sample = len(dataloader) <= 1
+    except TypeError:
+        _single_sample = False
+    # Hide the per-sample outer bar when there is only one graph (the useless
+    # "0/1"); the algorithm's own per-iteration tqdm shows real progress.
+    for data in tqdm(dataloader, disable=silent or _single_sample):
         if device is not None and device.type != 'cpu':
             data = data.cuda()
         

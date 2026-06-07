@@ -293,9 +293,10 @@ def build_bco_cfg(
     n_type3 = (n_bees - n_type1_bees - effective_type2 - n_type4_bees -
                n_type5_bees - n_type6_bees - n_type7_bees)
     route_selection_label = "weighted" if use_demand_weighted_route_selection else "uniform-random"
+    _rebuild_name = "neural_rebuild" if use_neural_bees else "heuristic_rebuild"
     print(
         f"[{run_name}] route_selection={route_selection_label} | "
-        f"bee split: heuristic_rebuild={n_type1_bees} "
+        f"bee split: {_rebuild_name}={n_type1_bees} "
         f"local_endpoint_edit={effective_type2} path_mix_rebuild={n_type3} "
         f"construction_extend={n_type4_bees} extend_trim_edit={n_type5_bees} "
         f"trim_only={n_type6_bees} trim_then_extend={n_type7_bees} "
@@ -683,7 +684,7 @@ def run_bco(cfg, init_routes, mutation_counts_out=None, *,
         cfg.eval,
         OmegaConf.create({"method": "tensor"}),
         cost_obj,
-        silent=True,
+        silent=False,   # show bee_colony's per-iteration tqdm (outer 1-sample bar is auto-hidden)
         device=device,
         return_routes=True,
         return_histories=cost_history_out is not None,

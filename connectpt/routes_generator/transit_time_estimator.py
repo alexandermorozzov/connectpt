@@ -608,13 +608,7 @@ class RouteGenBatchState:
                                invalid_directly_connected=False):
         """Takes a tensor of new routes. The first dimension is the batch"""
         # incorporate new routes into the route graphs
-        if type(batch_new_routes) is list:
-            batch_new_routes = tu.get_batch_tensor_from_routes(batch_new_routes,
-                                                               self.device)
-        if batch_new_routes.device != self.device:
-            batch_new_routes = batch_new_routes.to(self.device)
-        if batch_new_routes.ndim == 2:
-            batch_new_routes = batch_new_routes[:, None]
+        batch_new_routes = self._prepare_batch_route_tensor(batch_new_routes)
         # add new routes to the route matrix.
         new_route_mat = tu.get_route_edge_matrix(batch_new_routes, 
             self.drive_times, self.mean_stop_time, self.symmetric_routes)
@@ -645,23 +639,9 @@ class RouteGenBatchState:
 
     def _add_routes_to_context_masks(self, batch_routes):
         """Track nodes/edges covered by finished or fixed context routes."""
-        if type(batch_routes) is list:
-            batch_routes = tu.get_batch_tensor_from_routes(batch_routes,
-                                                           self.device)
-        if batch_routes.device != self.device:
-            batch_routes = batch_routes.to(self.device)
-        batch_routes = batch_routes.to(dtype=torch.long)
-        if batch_routes.ndim == 2:
-            batch_routes = batch_routes[:, None]
+        batch_routes = self._prepare_batch_route_tensor(batch_routes)
         if batch_routes.numel() == 0:
             return
-        if batch_routes.shape[0] == 1 and self.batch_size > 1:
-            batch_routes = batch_routes.expand(self.batch_size, -1, -1)
-        elif batch_routes.shape[0] != self.batch_size:
-            raise ValueError(
-                "Context route batch size does not match state batch size: "
-                f"{batch_routes.shape[0]} vs {self.batch_size}"
-            )
 
         valid_nodes = batch_routes >= 0
         if valid_nodes.any():
@@ -821,13 +801,7 @@ class RouteGenBatchState:
     def add_new_routes(self, batch_new_routes,
                        only_routes_with_demand_are_valid=False, 
                        invalid_directly_connected=False):
-        if type(batch_new_routes) is list:
-            batch_new_routes = tu.get_batch_tensor_from_routes(batch_new_routes,
-                                                               self.device)
-        if batch_new_routes.device != self.device:
-            batch_new_routes = batch_new_routes.to(self.device)
-        if batch_new_routes.ndim == 2:
-            batch_new_routes = batch_new_routes[:, None]
+        batch_new_routes = self._prepare_batch_route_tensor(batch_new_routes)
 
         self._add_routes_to_tensors(batch_new_routes, 
                                     only_routes_with_demand_are_valid, 
@@ -849,6 +823,35 @@ class RouteGenBatchState:
             total_new_time += return_leg_times.sum(dim=(1,2))
 
         self.extra_data.total_route_time += total_new_time        
+
+    def _prepare_batch_route_tensor(self, batch_routes):
+        if type(batch_routes) is list:
+            batch_routes = tu.get_batch_tensor_from_routes(batch_routes,
+                                                           self.device)
+        if batch_routes.device != self.device:
+            batch_routes = batch_routes.to(self.device)
+        batch_routes = batch_routes.to(dtype=torch.long)
+        if batch_routes.ndim == 1:
+            batch_routes = batch_routes[None, None]
+        elif batch_routes.ndim == 2:
+            if self.batch_size == 1:
+                batch_routes = batch_routes[None]
+            else:
+                batch_routes = batch_routes[:, None]
+        elif batch_routes.ndim != 3:
+            raise ValueError(
+                "Expected route tensor with shape (route_len), "
+                "(batch, route_len), (n_routes, route_len), or "
+                f"(batch, n_routes, route_len), got {batch_routes.shape}"
+            )
+        if batch_routes.shape[0] == 1 and self.batch_size > 1:
+            batch_routes = batch_routes.expand(self.batch_size, -1, -1)
+        elif batch_routes.shape[0] != self.batch_size:
+            raise ValueError(
+                "Route batch size does not match state batch size: "
+                f"{batch_routes.shape[0]} vs {self.batch_size}"
+            )
+        return batch_routes
 
     def _add_routes_to_list(self, batch_routes):
         for bi in range(self.batch_size):
@@ -1008,9 +1011,7 @@ class RouteGenBatchState:
         return self.n_routes_left_to_plan == 0
 
     def get_total_route_time(self, batch_routes):
-        if batch_routes.ndim == 2:
-            # add a routes dimension
-            batch_routes = batch_routes[:, None]
+        batch_routes = self._prepare_batch_route_tensor(batch_routes)
 
         leg_times = tu.get_route_leg_times(batch_routes, 
                                            self.graph_data.drive_times,
@@ -1097,15 +1098,7 @@ class RouteGenBatchState:
 
     def _count_route_legs(self, batch_routes):
         """Count adjacent stop-to-stop legs in a batch of route tensors."""
-        if batch_routes.ndim == 2:
-            batch_routes = batch_routes[:, None]
-        if batch_routes.shape[0] == 1 and self.batch_size > 1:
-            batch_routes = batch_routes.expand(self.batch_size, -1, -1)
-        elif batch_routes.shape[0] != self.batch_size:
-            raise ValueError(
-                "Route batch size does not match state batch size: "
-                f"{batch_routes.shape[0]} vs {self.batch_size}"
-            )
+        batch_routes = self._prepare_batch_route_tensor(batch_routes)
 
         counts = torch.zeros(
             (self.batch_size, self.max_n_nodes, self.max_n_nodes),

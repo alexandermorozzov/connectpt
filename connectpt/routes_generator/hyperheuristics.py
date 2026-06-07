@@ -132,7 +132,7 @@ def hyperheuristic(state, cost_obj, f_0, delta_F=None, duration_s=None,
         init_network = tmp
 
     network = build_init_network(shortest_paths, state, init_network,
-                                 sum_writer)
+                                 sum_writer, show_pbar=not silent)
     network = network.cpu()
     best_network = network.clone()
     sp_lens = (shortest_paths > -1).sum(dim=-1).cpu()
@@ -288,7 +288,7 @@ def hyperheuristic(state, cost_obj, f_0, delta_F=None, duration_s=None,
 
 
 def build_init_network(shortest_paths, state, init_network=None,
-                       sum_writer=None):
+                       sum_writer=None, show_pbar=True):
     batch_size = shortest_paths.shape[0]
     networks = []
     for bi in range(batch_size):
@@ -297,12 +297,14 @@ def build_init_network(shortest_paths, state, init_network=None,
         else:
             bis = None
         network = _build_init_network_helper(shortest_paths[bi], state, bis,
-                                             sum_writer)
+                                             sum_writer,
+                                             show_pbar=show_pbar)
         networks.append(network)
     return torch.stack(networks, dim=0)
 
 
-def _build_init_network_helper(shortest_paths, state, init_network, sum_writer):
+def _build_init_network_helper(shortest_paths, state, init_network, sum_writer,
+                               show_pbar=True):
     n_nodes = shortest_paths.shape[0]
     n_nodes = state.max_n_nodes
     min_stops = state.min_route_len[0]
@@ -336,7 +338,8 @@ def _build_init_network_helper(shortest_paths, state, init_network, sum_writer):
                               state.demand[0], min_stops, max_stops,
                               symmetric_routes)[0]
         log.info(f'Building initial network')
-        for route_idx in tqdm(range(n_routes)):
+        for route_idx in tqdm(range(n_routes), disable=not show_pbar,
+                              desc="HH init build"):
             # try possible routes
             new_nv_chunks = []
             for path_chunk in torch.split(shortest_paths, 100):
@@ -379,22 +382,30 @@ def _build_init_network_helper(shortest_paths, state, init_network, sum_writer):
     log.info('Repairing initial networks')
     ii = 0
     # using "simple random" and "improve or equal", search for a valid network
-    while nv > 0:
-        # select a heuristic randomly
-        heur_idx = torch.randint(len(heuristics), (1,))
-        heuristic = heuristics[heur_idx]
-        # apply it
-        modified_scen = heuristic(network.clone(), state)
-        new_nv = count_violations(modified_scen[None], n_nodes, n_routes,
-                                  square_pathlens, state.demand[0], min_stops,
-                                  max_stops, symmetric_routes)
-        if new_nv <= nv:
-            # accept the change if it doesn't make things worse
-            network = modified_scen
-            nv = new_nv
-        ii += 1
-        if ii % 1000 == 0:
-            log.info(f'Iteration {ii}, violations: {nv.item()}')
+    repair_pbar = tqdm(desc="HH init repair", unit="it",
+                       disable=not show_pbar)
+    try:
+        while nv > 0:
+            # select a heuristic randomly
+            heur_idx = torch.randint(len(heuristics), (1,))
+            heuristic = heuristics[heur_idx]
+            # apply it
+            modified_scen = heuristic(network.clone(), state)
+            new_nv = count_violations(modified_scen[None], n_nodes, n_routes,
+                                      square_pathlens, state.demand[0],
+                                      min_stops, max_stops, symmetric_routes)
+            if new_nv <= nv:
+                # accept the change if it doesn't make things worse
+                network = modified_scen
+                nv = new_nv
+            ii += 1
+            repair_pbar.update(1)
+            if ii == 1 or ii % 100 == 0:
+                repair_pbar.set_postfix(violations=float(nv.item()))
+            if ii % 1000 == 0:
+                log.info(f'Iteration {ii}, violations: {nv.item()}')
+    finally:
+        repair_pbar.close()
 
     if sum_writer is not None:
         sum_writer.add_scalar('# init repair iterations', float(ii), 0)

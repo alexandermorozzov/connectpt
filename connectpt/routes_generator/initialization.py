@@ -12,13 +12,16 @@ from .transit_time_estimator import RouteGenBatchState
 
 
 def prepare_init_network(init_network, batch_size, n_routes, device=None):
-    """Validate and broadcast an initial network tensor if needed."""
+    """Validate, batch, and broadcast an initial network tensor if needed."""
     if init_network is None:
         return None
 
-    if init_network.ndim != 3:
+    if init_network.ndim == 2:
+        init_network = init_network.unsqueeze(0)
+    elif init_network.ndim != 3:
         raise ValueError(
-            "Expected 3D tensor with shape "
+            "Expected 2D or 3D tensor with shape "
+            "(n_routes, max_route_len) or "
             f"(batch, n_routes, max_route_len), got {init_network.shape}"
         )
 

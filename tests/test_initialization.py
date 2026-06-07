@@ -263,6 +263,22 @@ def test_prepare_init_network_broadcasts_single_batch():
     assert torch.equal(prepared[2], init_network[0])
 
 
+def test_prepare_init_network_accepts_unbatched_route_tensor():
+    init_network = torch.tensor([[0, 1, -1], [2, 3, -1]], dtype=torch.long)
+
+    prepared = prepare_init_network(
+        init_network,
+        batch_size=3,
+        n_routes=3,
+        device=torch.device("cpu"),
+    )
+
+    assert prepared.shape == (3, 2, 3)
+    assert torch.equal(prepared[0], init_network)
+    assert torch.equal(prepared[1], init_network)
+    assert torch.equal(prepared[2], init_network)
+
+
 def test_prepare_init_network_rejects_too_many_routes():
     init_network = torch.tensor([[[0, 1, -1], [2, 3, -1]]], dtype=torch.long)
 
@@ -671,6 +687,29 @@ def test_route_state_context_masks_track_finished_not_current_routes():
 
     assert not state.context_node_covered_mask.any()
     assert not state.context_edge_covered_mask.any()
+
+
+def test_route_state_add_new_routes_accepts_unbatched_route_set():
+    state = make_line_state(n_nodes=5, n_routes_to_plan=3, max_route_len=5)
+    routes = torch.tensor(
+        [
+            [0, 1, 2, -1, -1],
+            [2, 3, 4, -1, -1],
+        ],
+        dtype=torch.long,
+    )
+
+    state.add_new_routes(routes)
+
+    assert state.n_finished_routes.item() == 2
+    assert [route.tolist() for route in state.routes[0]] == [
+        [0, 1, 2],
+        [2, 3, 4],
+    ]
+    assert state.context_node_covered_mask[0].tolist() == [
+        True, True, True, True, True]
+    assert state.total_route_time.shape == (1,)
+    assert state.total_route_time.item() > 0
 
 
 def test_route_state_snapshot_for_buffer_omits_lazy_shortest_path_cache():
