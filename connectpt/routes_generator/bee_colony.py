@@ -562,6 +562,17 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     best_networks[:, :n_init_routes, :init_network.shape[-1]] = init_network
     reference_networks = best_networks.clone()
     use_adjustment_penalty = adjustment_degree_weight > 0
+    # Unified adjustment-degree penalty: the cost module owns the adj term
+    # (single source of truth). Configure it with this run's seed + params so
+    # cost_obj(...) already includes the penalty; bee_colony no longer adds it
+    # separately. Reset to disabled at the end so the cost_obj does not leak.
+    if use_adjustment_penalty:
+        cost_obj.adjustment_degree_weight = adjustment_degree_weight
+        cost_obj.adjustment_degree_target = adjustment_degree_target
+        cost_obj.adjustment_degree_objective = adjustment_degree_objective
+        cost_obj.adjustment_degree_gap = adjustment_degree_gap
+        cost_obj.adjustment_degree_mode = adjustment_degree_mode
+        cost_obj.adjustment_seed = reference_networks
     route_count = max(float(n_routes.item()), 1.0)
 
     # expand state to networks
@@ -608,8 +619,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         objective=adjustment_degree_objective,
         target=adjustment_degree_target,
     )
-    bee_objective_costs = bee_raw_costs + \
-        adjustment_degree_weight * bee_adjustment_penalties
+    # adj already included in bee_raw_costs via cost_obj (unified penalty)
+    bee_objective_costs = bee_raw_costs
     best_objective_costs, best_idxs = bee_objective_costs.min(1)
     best_raw_costs = bee_raw_costs[batch_idxs, best_idxs]
     best_metrics = bee_metrics[batch_idxs, best_idxs]
@@ -746,8 +757,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                     objective=adjustment_degree_objective,
                     target=adjustment_degree_target,
                 )
-                new_bee_objective_costs = new_bee_raw_costs + \
-                    adjustment_degree_weight * new_bee_adjustment_penalties
+                # adj already included in new_bee_raw_costs via cost_obj
+                new_bee_objective_costs = new_bee_raw_costs
 
                 objective_delta = new_bee_objective_costs - bee_objective_costs
                 better_idxs = objective_delta < 0
@@ -952,6 +963,11 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
 
     # return the best solution
     state.replace_routes(best_networks)
+    # reset the unified adjustment-degree penalty so the shared cost_obj does
+    # not carry this run's seed into any later evaluation.
+    if use_adjustment_penalty:
+        cost_obj.adjustment_seed = None
+        cost_obj.adjustment_degree_weight = 0.0
     return state, cost_history
 
 

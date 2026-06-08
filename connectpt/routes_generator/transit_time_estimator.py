@@ -1825,9 +1825,23 @@ class MyCostModule(CostModule):
                  constraint_violation_weight=5, variable_weights=False,
                  ignore_stops_oob=False, pp_fraction=0.33,
                  op_fraction=0.33, mcw_fraction=0.33,
-                 enabled_components=None, disabled_components=None):
+                 enabled_components=None, disabled_components=None,
+                 adjustment_degree_weight=0.0, adjustment_degree_target=0.2,
+                 adjustment_degree_objective='raw', adjustment_degree_gap=0.1,
+                 adjustment_degree_mode='paper'):
         super().__init__(mean_stop_time_s, avg_transfer_wait_time_s,
                          symmetric_routes, low_memory_mode)
+        # Unified adjustment-degree penalty (single source of truth, shared by
+        # BCO / metaheuristics / training). Gated: with weight 0 OR no seed set
+        # the term is skipped entirely and cost is bit-for-bit unchanged.
+        self.adjustment_degree_weight = float(adjustment_degree_weight)
+        self.adjustment_degree_target = float(adjustment_degree_target)
+        self.adjustment_degree_objective = adjustment_degree_objective
+        self.adjustment_degree_gap = float(adjustment_degree_gap)
+        self.adjustment_degree_mode = adjustment_degree_mode
+        # Per-graph seed (reference) routes vs which deviation is measured;
+        # set at runtime (test_method / bee_colony). None -> penalty disabled.
+        self.adjustment_seed = None
         self.use_weighted_connectivity = use_weighted_connectivity
         self.demand_time_weight = demand_time_weight
         self.route_time_weight = route_time_weight
@@ -2141,7 +2155,33 @@ class MyCostModule(CostModule):
             components = components + constraint_cost[:, None]
         return components
 
-    def forward(self, state, constraint_weight=None, no_norm=False, 
+    def _adjustment_penalty(self, state, cost):
+        """Gated adjustment-degree penalty (mean route-wise deviation from the
+        seed). Returns 0 unless ``adjustment_degree_weight > 0`` AND a seed
+        reference is set, so default runs are bit-for-bit unchanged."""
+        if self.adjustment_degree_weight <= 0 or self.adjustment_seed is None:
+            return cost.new_zeros(())
+        from connectpt.routes_generator.bee_colony import (
+            get_adjustment_degrees, get_adjustment_penalties)
+        cur = tu.get_batch_tensor_from_routes(state.routes, cost.device)
+        seed = self.adjustment_seed.to(cost.device)
+        if seed.dim() == 2:
+            seed = seed[None]
+        if seed.shape[0] == 1 and cur.shape[0] > 1:
+            seed = seed.expand(cur.shape[0], -1, -1)
+        nr = min(cur.shape[1], seed.shape[1])
+        nl = min(cur.shape[-1], seed.shape[-1])
+        degrees = get_adjustment_degrees(
+            cur[:, :nr, :nl], seed[:, :nr, :nl], self.symmetric_routes,
+            gap=self.adjustment_degree_gap, mode=self.adjustment_degree_mode)
+        route_count = max(float(cur.shape[1]), 1.0)
+        network_degree = degrees.sum(-1) / route_count if degrees.dim() >= 2 else degrees
+        penalty = get_adjustment_penalties(
+            network_degree, objective=self.adjustment_degree_objective,
+            target=self.adjustment_degree_target)
+        return self.adjustment_degree_weight * penalty
+
+    def forward(self, state, constraint_weight=None, no_norm=False,
                 return_per_route_riders=False):
         cho = self._cost_helper(state, return_per_route_riders)
         components, weights, constraint_cost = \
@@ -2149,6 +2189,9 @@ class MyCostModule(CostModule):
                 state, cho, constraint_weight=constraint_weight,
                 no_norm=no_norm)
         cost = (components * weights).sum(dim=-1) + constraint_cost
+        adj_pen = self._adjustment_penalty(state, cost)
+        cost = cost + adj_pen
+        cho.adjustment_penalty = adj_pen   # exposed for multi-objective get_cost
         cho.cost = cost
 
         assert cost.isfinite().all(), "invalid cost was computed!"
@@ -2188,12 +2231,24 @@ class MultiObjectiveCostModule(MyCostModule):
         return cho
     
     def get_cost(self, cho):
-        if self.use_weighted_connectivity ==True:
-            costs = torch.stack((cho.mean_demand_time, cho.total_route_time, cho.median_connectivity_weighted), 
+        if self.use_weighted_connectivity == True:
+            # Unified-objective regime: trade off total route time vs weighted
+            # mean connectivity (RTT vs WMC). Demand/ATT is dropped because the
+            # unified objective is route_time + connectivity + adj (demand=0),
+            # so NSGA-II's Pareto front matches the scalar-cost methods.
+            costs = torch.stack((cho.total_route_time, cho.median_connectivity_weighted),
                                 dim=-1)
         else:
-            costs = torch.stack((cho.mean_demand_time, cho.total_route_time), 
+            # Legacy paper baseline: (mean demand time, total route time).
+            costs = torch.stack((cho.mean_demand_time, cho.total_route_time),
                                 dim=-1)
+        # Unified adjustment-degree penalty also shifts the multi-objective
+        # costs (NSGA-II), so deviation from the seed is balanced like in the
+        # scalar-cost methods. Gated: no-op unless weight>0 and a seed is set.
+        adj = getattr(cho, 'adjustment_penalty', None)
+        if (adj is not None and getattr(self, 'adjustment_degree_weight', 0) > 0
+                and getattr(self, 'adjustment_seed', None) is not None):
+            costs = costs + adj.reshape(-1, 1)
         any_violations = cho.are_constraints_violated()
         return costs, any_violations
 

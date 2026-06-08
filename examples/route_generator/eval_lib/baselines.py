@@ -119,7 +119,10 @@ def build_hh_cfg(run_name, n_routes, min_route_len, max_route_len,
 
 
 def _run_baseline(method_fn, cfg, init_routes, prefix, method_kwargs, *,
-                  tensors=None, return_history=False):
+                  tensors=None, return_history=False, use_weighted_connectivity=None,
+                  adjustment_degree_weight=0.0, adjustment_degree_target=0.2,
+                  adjustment_degree_objective='raw', adjustment_degree_gap=0.1,
+                  adjustment_degree_mode='paper'):
     # tensors=None -> Mumford0 dataloader; tensors=<dict> -> explicit tensor
     # dataset (mirrors the run_bco signature). The initial routes are passed
     # through test_method's `routes_tensor` + a "tensor" init config.
@@ -132,6 +135,23 @@ def _run_baseline(method_fn, cfg, init_routes, prefix, method_kwargs, *,
         dataloader = make_tensor_dataloader(cfg.eval.dataset, tensors)
     device, run_name, _, cost_obj, _ = lrnu.process_standard_experiment_cfg(
         cfg, run_name_prefix=prefix, weights_required=False)
+    # Optional: optimize the WEIGHTED mean connectivity (WMC) instead of plain
+    # median connectivity, so SA/GA/HH match the unified RTT+WMC+adj objective.
+    if use_weighted_connectivity is not None:
+        cost_obj.use_weighted_connectivity = bool(use_weighted_connectivity)
+    # Unified adjustment-degree penalty for metaheuristics (SA/GA/HH): the
+    # cost module penalizes deviation of the candidate routes from the initial
+    # network (same term BCO uses). Gated; off unless weight>0 + a seed.
+    _adj_on = bool(adjustment_degree_weight) and adjustment_degree_weight > 0 \
+        and init_routes is not None
+    if _adj_on:
+        cost_obj.adjustment_degree_weight = float(adjustment_degree_weight)
+        cost_obj.adjustment_degree_target = float(adjustment_degree_target)
+        cost_obj.adjustment_degree_objective = adjustment_degree_objective
+        cost_obj.adjustment_degree_gap = float(adjustment_degree_gap)
+        cost_obj.adjustment_degree_mode = adjustment_degree_mode
+        _seed = as_route_tensor(init_routes)
+        cost_obj.adjustment_seed = (_seed[None] if _seed.dim() == 2 else _seed).to(device)
     output = lrnu.test_method(
         method_fn,
         dataloader,
@@ -145,6 +165,9 @@ def _run_baseline(method_fn, cfg, init_routes, prefix, method_kwargs, *,
         routes_tensor=init_routes,
         **method_kwargs,
     )
+    if _adj_on:
+        cost_obj.adjustment_seed = None
+        cost_obj.adjustment_degree_weight = 0.0
     if return_history:
         _, _, unserved_demand, metrics, routes, cost_histories = output
     else:
@@ -177,18 +200,18 @@ def _early_stop_kwargs(cfg):
 
 
 def run_sa(cfg, init_routes, *, tensors=None, run_name_scope="",
-           return_history=False):
+           return_history=False, **adj):
     method_kwargs = OmegaConf.to_container(cfg.alg_args, resolve=True)
     method_kwargs.update(_early_stop_kwargs(cfg))
     return _run_baseline(
         simulated_annealing_with_reheating, cfg, init_routes,
         f"{run_name_scope}sa_",
         method_kwargs,
-        tensors=tensors, return_history=return_history)
+        tensors=tensors, return_history=return_history, **adj)
 
 
 def run_ga(cfg, init_routes, *, tensors=None, run_name_scope="",
-           return_history=False):
+           return_history=False, **adj):
     method_kwargs = dict(
         pop_size=int(cfg.population_size),
         n_iterations=int(cfg.n_iterations),
@@ -199,17 +222,17 @@ def run_ga(cfg, init_routes, *, tensors=None, run_name_scope="",
     return _run_baseline(
         genetic_algorithm, cfg, init_routes, f"{run_name_scope}ga_",
         method_kwargs,
-        tensors=tensors, return_history=return_history)
+        tensors=tensors, return_history=return_history, **adj)
 
 
 def run_hh(cfg, init_routes, *, tensors=None, run_name_scope="",
-           return_history=False):
+           return_history=False, **adj):
     method_kwargs = dict(f_0=float(cfg.f_0), n_steps=int(cfg.n_iterations))
     method_kwargs.update(_early_stop_kwargs(cfg))
     return _run_baseline(
         hyperheuristic, cfg, init_routes, f"{run_name_scope}hh_",
         method_kwargs,
-        tensors=tensors, return_history=return_history)
+        tensors=tensors, return_history=return_history, **adj)
 
 
 # === from the notebook's section 9c (NSGA-II) ===
@@ -253,7 +276,11 @@ def build_nsgaii_cfg(run_name, n_routes, min_route_len, max_route_len,
     return cfg
 
 
-def run_nsgaii(cfg, *, tensors=None, init_routes=None, run_name_scope=""):
+def run_nsgaii(cfg, *, tensors=None, init_routes=None, run_name_scope="",
+               use_weighted_connectivity=False,
+               adjustment_degree_weight=0.0, adjustment_degree_target=0.2,
+               adjustment_degree_objective='raw', adjustment_degree_gap=0.1,
+               adjustment_degree_mode='paper'):
     """Run NSGA-II and return ``(run_name, output)``.
 
     ``init_routes`` (optional) is forwarded as the NSGA-II seed network: it is
@@ -261,6 +288,12 @@ def run_nsgaii(cfg, *, tensors=None, init_routes=None, run_name_scope=""):
     remaining ``pop_size - 1`` slots still filled via ``cfg.init_mode``
     (default ``husselmann``). Pass the same benchmark init the other
     benchmark methods start from to make NSGA-II seeded comparably.
+
+    ``use_weighted_connectivity`` selects the Pareto objectives: ``False``
+    (legacy paper baseline) optimizes (mean demand time / ATT, total route time
+    / RTT); ``True`` (unified regime) optimizes (RTT, weighted mean
+    connectivity / WMC) so the front matches the unified
+    route_time + connectivity + adj objective used by the other methods.
     """
     if tensors is None:
         dataloader = make_test_dataloader(cfg.eval.dataset)
@@ -268,6 +301,21 @@ def run_nsgaii(cfg, *, tensors=None, init_routes=None, run_name_scope=""):
         dataloader = make_tensor_dataloader(cfg.eval.dataset, tensors)
     device, run_name, _, cost_obj, _ = lrnu.process_standard_experiment_cfg(
         cfg, run_name_prefix=f"{run_name_scope}nsgaii_", weights_required=False)
+    # Objective set: legacy (ATT, RTT) vs unified (RTT, WMC). The cost module
+    # computes median_connectivity_weighted unconditionally, so toggling this
+    # only changes which components get_cost stacks into the Pareto objectives.
+    cost_obj.use_weighted_connectivity = bool(use_weighted_connectivity)
+    # Unified adjustment-degree penalty: NSGA-II uses MultiObjectiveCostModule
+    # (a MyCostModule subclass), so setting the seed + params makes the adj term
+    # shift both objectives -> NSGA-II balances deviation like the other methods.
+    if adjustment_degree_weight and adjustment_degree_weight > 0 and init_routes is not None:
+        cost_obj.adjustment_degree_weight = float(adjustment_degree_weight)
+        cost_obj.adjustment_degree_target = float(adjustment_degree_target)
+        cost_obj.adjustment_degree_objective = adjustment_degree_objective
+        cost_obj.adjustment_degree_gap = float(adjustment_degree_gap)
+        cost_obj.adjustment_degree_mode = adjustment_degree_mode
+        _seed = as_route_tensor(init_routes)
+        cost_obj.adjustment_seed = (_seed[None] if _seed.dim() == 2 else _seed).to(device)
     # NSGA-II reads its device from a module global (the ancestor set it in
     # the Hydra main()); point it at the device we just resolved.
     _nsgaii_mod.DEVICE = device
