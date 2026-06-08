@@ -332,6 +332,60 @@ def plot_plain_route_set(ax, routes, graph_or_coords, street_adj=None,
     ax.axis("off")
 
 
+def plot_demand_graph(ax, demand, graph_or_coords, street_adj=None,
+                      title=None, subtitle=None, *, cmap="plasma", top_frac=None):
+    """Draw OD demand as edges colored / weighted by demand volume.
+
+    Each node pair ``(i, j)`` with positive total demand is drawn as a straight
+    segment over the faint street graph; both its color and width scale with the
+    symmetric demand ``demand[i, j] + demand[j, i]``. ``top_frac`` (0..1)
+    optionally keeps only the busiest fraction of pairs to de-clutter dense
+    matrices. Same positional conventions as ``plot_plain_route_set`` (a string
+    in the ``street_adj`` slot is treated as the title).
+    """
+    from matplotlib.collections import LineCollection
+    if isinstance(street_adj, str):
+        street_adj, title = None, street_adj
+    coords, street_adj_arr = extract_coords_street_adj(graph_or_coords, street_adj)
+    if isinstance(demand, torch.Tensor):
+        demand = demand.detach().cpu().numpy()
+    demand = np.asarray(demand, dtype=float)
+    draw_street_graph(ax, coords, street_adj_arr)
+
+    n_nodes = coords.shape[0]
+    segments, values = [], []
+    for i in range(n_nodes):
+        for j in range(i + 1, n_nodes):
+            total = float(demand[i, j]) + float(demand[j, i])
+            if total <= 0:
+                continue
+            segments.append([(coords[i, 0], coords[i, 1]),
+                             (coords[j, 0], coords[j, 1])])
+            values.append(total)
+    if segments:
+        values = np.asarray(values)
+        if top_frac is not None and 0.0 < top_frac < 1.0:
+            keep = values >= np.quantile(values, 1.0 - top_frac)
+            segments = [s for s, k in zip(segments, keep) if k]
+            values = values[keep]
+        vmax = float(values.max()) or 1.0
+        line_coll = LineCollection(
+            segments, cmap=cmap, norm=plt.Normalize(0.0, vmax),
+            linewidths=0.5 + 3.5 * (values / vmax), alpha=0.85, zorder=2)
+        line_coll.set_array(values)
+        ax.add_collection(line_coll)
+        ax.figure.colorbar(line_coll, ax=ax, fraction=0.046, pad=0.04, label="demand")
+
+    ax.scatter(coords[:, 0], coords[:, 1], c="black", s=55, zorder=5)
+    for node_idx, (x_coord, y_coord) in enumerate(coords):
+        ax.text(x_coord, y_coord, str(node_idx), fontsize=7, color="white",
+                ha="center", va="center", zorder=6)
+    ax.set_title(f"{title}\n{subtitle}" if subtitle else (title or ""),
+                 fontsize=12, fontweight="bold")
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+
 def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
                     street_adj=None, title=None, subtitle=None, *,
                     palette="tab20", with_overlap_curves=True):
