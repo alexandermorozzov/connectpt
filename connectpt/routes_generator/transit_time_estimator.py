@@ -1611,6 +1611,9 @@ class CostHelperOutput:
     cost: Optional[Tensor] = None
     median_connectivity: Optional[Tensor] = None
     median_connectivity_weighted: Optional[Tensor] = None
+    # mean (instead of median) connectivity -- reported only, NOT optimized.
+    mean_connectivity: Optional[Tensor] = None
+    mean_connectivity_weighted: Optional[Tensor] = None
 
     @property
     def mean_demand_time(self):
@@ -1780,16 +1783,27 @@ class CostModule(torch.nn.Module):
         tmp_w = torch.nanmean(node_medians_w, dim=1)
         median_connectivity_weighted = torch.where(torch.isnan(tmp_w), torch.tensor(0., device=tmp_w.device), tmp_w)
 
+        # === 3. Mean variants (REPORTED ONLY -- not used in the cost). Same
+        #        drop-unreachable masking as the medians (inf -> nan, ignored). ===
+        node_means = torch.nanmean(masked, dim=2)                         # [B, N]
+        _tmp_m = torch.nanmean(node_means, dim=1)
+        mean_connectivity = torch.where(torch.isnan(_tmp_m), torch.tensor(0., device=_tmp_m.device), _tmp_m)
+        node_means_w = torch.nanmean(weighted_masked, dim=2)              # [B, N]
+        _tmp_mw = torch.nanmean(node_means_w, dim=1)
+        mean_connectivity_weighted = torch.where(torch.isnan(_tmp_mw), torch.tensor(0., device=_tmp_mw.device), _tmp_mw)
+
         unserved_demand_matrix = demand_matrix * nopath
 
         output = CostHelperOutput(
-            total_dmd_time, state.total_route_time, trips_at_transfers, 
+            total_dmd_time, state.total_route_time, trips_at_transfers,
             total_demand, unserved_demand, total_transfers, trip_times,
-            state.get_n_disconnected_demand_edges(), n_stops_oob, 
+            state.get_n_disconnected_demand_edges(), n_stops_oob,
             n_duplicate_stops, batch_routes,
-            unserved_demand_matrix, 
+            unserved_demand_matrix,
             median_connectivity=median_connectivity,
-            median_connectivity_weighted=median_connectivity_weighted
+            median_connectivity_weighted=median_connectivity_weighted,
+            mean_connectivity=mean_connectivity,
+            mean_connectivity_weighted=mean_connectivity_weighted,
         )
 
         if return_per_route_riders:

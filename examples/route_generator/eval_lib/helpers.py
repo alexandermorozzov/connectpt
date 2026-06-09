@@ -412,7 +412,12 @@ def compute_cost_breakdown(dataloader, eval_cfg, cost_obj, routes_tensor, device
     def mean_cpu(x):
         return x.float().mean().detach().cpu()
 
+    # mean-based connectivity (reported only; /60 to match the WMC/MC columns).
+    _mcw = getattr(cho, "mean_connectivity_weighted", None)
+    _mc = getattr(cho, "mean_connectivity", None)
     return {
+        "WMC_mean": mean_cpu(_mcw / 60) if _mcw is not None else float("nan"),
+        "MC_mean": mean_cpu(_mc / 60) if _mc is not None else float("nan"),
         "cost_demand_component": mean_cpu(demand_component),
         "cost_route_component": mean_cpu(route_component),
         "cost_connectivity_component": mean_cpu(connectivity_component),
