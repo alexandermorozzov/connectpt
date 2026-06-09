@@ -110,10 +110,12 @@ def build_ga_cfg(run_name, n_routes, min_route_len, max_route_len,
 
 
 def build_hh_cfg(run_name, n_routes, min_route_len, max_route_len,
-                 n_iterations=HH_N_ITERATIONS,
+                 n_iterations=HH_N_ITERATIONS, max_repair_iters=None,
                  early_stop_patience=None, early_stop_min_delta=0.0):
     overrides = _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len)
     overrides.append(f"++n_iterations={n_iterations}")
+    if max_repair_iters is not None:
+        overrides.append(f"++max_repair_iters={int(max_repair_iters)}")
     overrides += _early_stop_overrides(early_stop_patience, early_stop_min_delta)
     return _compose_baseline_cfg("hh_mumford", overrides)
 
@@ -234,6 +236,9 @@ def run_ga(cfg, init_routes, *, tensors=None, run_name_scope="",
 def run_hh(cfg, init_routes, *, tensors=None, run_name_scope="",
            return_history=False, **adj):
     method_kwargs = dict(f_0=float(cfg.f_0), n_steps=int(cfg.n_iterations))
+    _mri = cfg.get("max_repair_iters", None)
+    if _mri is not None:
+        method_kwargs["max_repair_iters"] = int(_mri)
     method_kwargs.update(_early_stop_kwargs(cfg))
     return _run_baseline(
         hyperheuristic, cfg, init_routes, f"{run_name_scope}hh_",
