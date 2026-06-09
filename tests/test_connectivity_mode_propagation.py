@@ -16,16 +16,16 @@ import eval_lib.baselines as baselines  # noqa: E402
 import eval_lib.helpers as helpers  # noqa: E402
 
 
-WEIGHTED_MEDIAN = "weighted_median"
+MEAN_WEIGHTED = "mean_weighted"
 
 
 def _cost_kwargs(cfg):
     return cfg.experiment.cost_function.kwargs
 
 
-def test_eval_lib_builders_propagate_weighted_median():
+def test_eval_lib_builders_propagate_mean_weighted():
     lc_cfg = helpers.build_lc_cfg(
-        "conn_mode_lc", 2, 2, 5, connectivity_mode=WEIGHTED_MEDIAN
+        "conn_mode_lc", 2, 2, 5, connectivity_mode=MEAN_WEIGHTED
     )
     bco_cfg = helpers.build_bco_cfg(
         "conn_mode_bco",
@@ -35,7 +35,7 @@ def test_eval_lib_builders_propagate_weighted_median():
         n_bees=2,
         n_type1_bees=1,
         n_type2_bees=1,
-        connectivity_mode=WEIGHTED_MEDIAN,
+        connectivity_mode=MEAN_WEIGHTED,
     )
     sa_cfg = baselines.build_sa_cfg(
         "conn_mode_sa",
@@ -43,7 +43,7 @@ def test_eval_lib_builders_propagate_weighted_median():
         2,
         5,
         n_iterations=1,
-        connectivity_mode=WEIGHTED_MEDIAN,
+        connectivity_mode=MEAN_WEIGHTED,
     )
     ga_cfg = baselines.build_ga_cfg(
         "conn_mode_ga",
@@ -52,7 +52,7 @@ def test_eval_lib_builders_propagate_weighted_median():
         5,
         n_iterations=1,
         population_size=2,
-        connectivity_mode=WEIGHTED_MEDIAN,
+        connectivity_mode=MEAN_WEIGHTED,
     )
     hh_cfg = baselines.build_hh_cfg(
         "conn_mode_hh",
@@ -60,7 +60,7 @@ def test_eval_lib_builders_propagate_weighted_median():
         2,
         5,
         n_iterations=1,
-        connectivity_mode=WEIGHTED_MEDIAN,
+        connectivity_mode=MEAN_WEIGHTED,
     )
     nsgaii_cfg = baselines.build_nsgaii_cfg(
         "conn_mode_nsga",
@@ -69,13 +69,33 @@ def test_eval_lib_builders_propagate_weighted_median():
         5,
         n_iterations=1,
         pop_size=2,
-        connectivity_mode=WEIGHTED_MEDIAN,
+        connectivity_mode=MEAN_WEIGHTED,
     )
 
     cfgs = [lc_cfg, bco_cfg, sa_cfg, ga_cfg, hh_cfg, nsgaii_cfg]
     assert all(
-        _cost_kwargs(cfg).connectivity_mode == WEIGHTED_MEDIAN for cfg in cfgs
+        _cost_kwargs(cfg).connectivity_mode == MEAN_WEIGHTED for cfg in cfgs
     )
+
+
+def test_eval_lib_builders_use_runtime_disabled_components(monkeypatch):
+    monkeypatch.setattr(helpers, "DISABLED_COST_COMPONENTS", ["demand"])
+
+    cfg = helpers.build_bco_cfg(
+        "runtime_disabled_components",
+        2,
+        2,
+        5,
+        n_bees=2,
+        n_type1_bees=1,
+        n_type2_bees=1,
+        demand_time_weight=0.0,
+        route_time_weight=0.25,
+        median_connectivity_weight=0.75,
+        connectivity_mode=MEAN_WEIGHTED,
+    )
+
+    assert list(_cost_kwargs(cfg).disabled_components) == ["demand"]
 
 
 def test_run_nsgaii_applies_runtime_connectivity_mode(monkeypatch):
@@ -131,12 +151,12 @@ def test_run_nsgaii_applies_runtime_connectivity_mode(monkeypatch):
         cfg,
         tensors={"dummy": object()},
         use_weighted_connectivity=True,
-        connectivity_mode=WEIGHTED_MEDIAN,
+        connectivity_mode=MEAN_WEIGHTED,
     )
 
     assert output == {"pareto_pop": []}
     assert cost_obj.use_weighted_connectivity is True
-    assert cost_obj.connectivity_mode == WEIGHTED_MEDIAN
+    assert cost_obj.connectivity_mode == MEAN_WEIGHTED
     assert seen["state_cost_obj"] is cost_obj
     assert seen["optimizer_cost_obj"] is cost_obj
 
@@ -149,7 +169,19 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
         "".join(cell.get("source", [])) for cell in notebook["cells"]
     )
 
-    assert 'CONNECTIVITY_MODE = "weighted_median"' in text
+    assert 'CONNECTIVITY_MODE = "mean_weighted"' in text
+    assert 'DISABLED_COST_COMPONENTS = ["demand"]' in text
+    assert "_eh.DISABLED_COST_COMPONENTS = list(DISABLED_COST_COMPONENTS)" in text
+    assert "RUN_NSGAII_BASELINES = False" in text
+    assert "if RUN_NSGAII_BASELINES:" in text
+    assert (
+        'main_df = main_df[main_df["method"] != "NSGA-II"].reset_index(drop=True)'
+        in text
+    )
+    assert (
+        'unified_df = unified_df[unified_df["method"] != "NSGA-II"].reset_index(drop=True)'
+        in text
+    )
     assert "connectivity_mode=CONNECTIVITY_MODE" in text
     assert (
         'f"++experiment.cost_function.kwargs.connectivity_mode='
