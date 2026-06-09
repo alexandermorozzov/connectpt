@@ -1655,15 +1655,31 @@ class CostHelperOutput:
                # (self.n_skipped_stops > 0)
     
 
+CONNECTIVITY_MODES = ('legacy', 'weighted_median')
+
+
 class CostModule(torch.nn.Module):
-    def __init__(self, mean_stop_time_s=MEAN_STOP_TIME_S, 
+    def __init__(self, mean_stop_time_s=MEAN_STOP_TIME_S,
                  avg_transfer_wait_time_s=AVG_TRANSFER_WAIT_TIME_S,
-                 symmetric_routes=True, low_memory_mode=False):
+                 symmetric_routes=True, low_memory_mode=False,
+                 connectivity_mode='legacy'):
         super().__init__()
         self.mean_stop_time_s = mean_stop_time_s
         self.avg_transfer_wait_time_s = avg_transfer_wait_time_s
         self.symmetric_routes = symmetric_routes
         self.low_memory_mode = low_memory_mode
+        # How the *weighted* connectivity (WMC) is aggregated:
+        #   'legacy'          -- median_j( tau_ij * (D_ij / max_l D_lj) ), the
+        #                        original demand-attenuated median (kept
+        #                        bit-for-bit for reproducing past runs).
+        #   'weighted_median' -- demand-weighted median of the trip times tau_ij
+        #                        (weights = D_ij), averaged over nodes. Returns a
+        #                        genuine travel time on the same scale as ATT.
+        if connectivity_mode not in CONNECTIVITY_MODES:
+            raise ValueError(
+                f"connectivity_mode={connectivity_mode!r}; expected one of "
+                f"{CONNECTIVITY_MODES}")
+        self.connectivity_mode = connectivity_mode
 
     def get_metric_names(self):
         dummy_obj = CostHelperOutput(
@@ -1683,6 +1699,29 @@ class CostModule(torch.nn.Module):
             dist = torch.minimum(dist, dist[:, :, k].unsqueeze(2) + dist[:, k, :].unsqueeze(1))
 
         return dist  # [B, N, N]
+
+    @staticmethod
+    def _weighted_median(values, weights, dim=-1, eps=1e-9):
+        """Weighted median of ``values`` along ``dim`` with non-negative
+        ``weights``. Entries where ``values`` is non-finite (e.g. the
+        NaN-masked diagonal / unreachable pairs) are dropped (weight 0).
+        Rows whose total weight is ~0 return NaN so the caller's nan-aware
+        reduction skips them. Returns the value at which the cumulative
+        weight first reaches half of the row total."""
+        valid = torch.isfinite(values)
+        w = torch.where(valid, weights, torch.zeros_like(weights))
+        v = torch.where(valid, values, torch.full_like(values, float('inf')))
+        v_sorted, idx = torch.sort(v, dim=dim)
+        w_sorted = torch.gather(w, dim, idx)
+        cw = torch.cumsum(w_sorted, dim=dim)
+        # weights >= 0 => cumsum is non-decreasing, so its max along dim is the
+        # row total. Avoids index_select gymnastics and works for any dim.
+        total = cw.max(dim=dim, keepdim=True).values
+        first = (cw >= 0.5 * total.clamp(min=eps)).to(torch.float32) \
+            .argmax(dim=dim, keepdim=True)
+        med = v_sorted.gather(dim, first).squeeze(dim)
+        total = total.squeeze(dim)
+        return torch.where(total > eps, med, torch.full_like(med, float('nan')))
 
 
     def _cost_helper(self, state, return_per_route_riders=False):
@@ -1783,6 +1822,17 @@ class CostModule(torch.nn.Module):
         tmp_w = torch.nanmean(node_medians_w, dim=1)
         median_connectivity_weighted = torch.where(torch.isnan(tmp_w), torch.tensor(0., device=tmp_w.device), tmp_w)
 
+        # Variant B: demand-weighted median of the trip times themselves
+        # (weights = D_ij), averaged over nodes -> a genuine travel time on the
+        # same scale as ATT. Overrides the WMC used by both the cost term
+        # (when use_weighted_connectivity) and the reported metric. Legacy mode
+        # leaves median_connectivity_weighted untouched (bit-for-bit).
+        if getattr(self, 'connectivity_mode', 'legacy') == 'weighted_median':
+            node_wmed = self._weighted_median(masked, demand_matrix, dim=2)  # [B, N]
+            tmp_wm = torch.nanmean(node_wmed, dim=1)
+            median_connectivity_weighted = torch.where(
+                torch.isnan(tmp_wm), torch.tensor(0., device=tmp_wm.device), tmp_wm)
+
         # === 3. Mean variants (REPORTED ONLY -- not used in the cost). Same
         #        drop-unreachable masking as the medians (inf -> nan, ignored). ===
         node_means = torch.nanmean(masked, dim=2)                         # [B, N]
@@ -1842,9 +1892,10 @@ class MyCostModule(CostModule):
                  enabled_components=None, disabled_components=None,
                  adjustment_degree_weight=0.0, adjustment_degree_target=0.2,
                  adjustment_degree_objective='raw', adjustment_degree_gap=0.1,
-                 adjustment_degree_mode='paper'):
+                 adjustment_degree_mode='paper', connectivity_mode='legacy'):
         super().__init__(mean_stop_time_s, avg_transfer_wait_time_s,
-                         symmetric_routes, low_memory_mode)
+                         symmetric_routes, low_memory_mode,
+                         connectivity_mode=connectivity_mode)
         # Unified adjustment-degree penalty (single source of truth, shared by
         # BCO / metaheuristics / training). Gated: with weight 0 OR no seed set
         # the term is skipped entirely and cost is bit-for-bit unchanged.
