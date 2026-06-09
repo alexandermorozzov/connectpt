@@ -2192,6 +2192,11 @@ class MyCostModule(CostModule):
         adj_pen = self._adjustment_penalty(state, cost)
         cost = cost + adj_pen
         cho.adjustment_penalty = adj_pen   # exposed for multi-objective get_cost
+        # Normalized components (demand, route, connectivity) -- same scaling the
+        # scalar cost uses. Stashed so MultiObjectiveCostModule.get_cost (NSGA-II)
+        # can build O(1) Pareto objectives instead of raw total_route_time (~1e4),
+        # which otherwise swamps WMC (~1e2) and the adj penalty (~1).
+        cho.norm_components = components
         cho.cost = cost
 
         assert cost.isfinite().all(), "invalid cost was computed!"
@@ -2231,15 +2236,22 @@ class MultiObjectiveCostModule(MyCostModule):
         return cho
     
     def get_cost(self, cho):
-        if self.use_weighted_connectivity == True:
-            # Unified-objective regime: trade off total route time vs weighted
-            # mean connectivity (RTT vs WMC). Demand/ATT is dropped because the
-            # unified objective is route_time + connectivity + adj (demand=0),
-            # so NSGA-II's Pareto front matches the scalar-cost methods.
+        # Use the NORMALIZED cost components (same scaling as the scalar cost) so
+        # the Pareto axes are O(1) -- otherwise raw total_route_time (~1e4) swamps
+        # WMC (~1e2) and the adj penalty (~1), collapsing NSGA-II to argmin(RTT).
+        nc = getattr(cho, "norm_components", None)   # [B, 3] = (demand, route, conn)
+        if nc is not None:
+            if self.use_weighted_connectivity == True:
+                # Unified regime: (RTT_norm, WMC_norm). conn component already
+                # carries the weighted mean connectivity when uwc is on.
+                costs = torch.stack((nc[..., 1], nc[..., 2]), dim=-1)
+            else:
+                # Legacy paper baseline: (ATT_norm, RTT_norm).
+                costs = torch.stack((nc[..., 0], nc[..., 1]), dim=-1)
+        elif self.use_weighted_connectivity == True:   # fallback (no stashed norm)
             costs = torch.stack((cho.total_route_time, cho.median_connectivity_weighted),
                                 dim=-1)
         else:
-            # Legacy paper baseline: (mean demand time, total route time).
             costs = torch.stack((cho.mean_demand_time, cho.total_route_time),
                                 dim=-1)
         # Unified adjustment-degree penalty also shifts the multi-objective

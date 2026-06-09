@@ -120,6 +120,7 @@ def build_hh_cfg(run_name, n_routes, min_route_len, max_route_len,
 
 def _run_baseline(method_fn, cfg, init_routes, prefix, method_kwargs, *,
                   tensors=None, return_history=False, use_weighted_connectivity=None,
+                  adjustment_seed_routes=None,
                   adjustment_degree_weight=0.0, adjustment_degree_target=0.2,
                   adjustment_degree_objective='raw', adjustment_degree_gap=0.1,
                   adjustment_degree_mode='paper'):
@@ -142,15 +143,20 @@ def _run_baseline(method_fn, cfg, init_routes, prefix, method_kwargs, *,
     # Unified adjustment-degree penalty for metaheuristics (SA/GA/HH): the
     # cost module penalizes deviation of the candidate routes from the initial
     # network (same term BCO uses). Gated; off unless weight>0 + a seed.
+    # ``adjustment_seed_routes`` decouples the adj reference from the evaluated
+    # routes: for an evaluate-only pass (method_fn=None on an external solution,
+    # e.g. NSGA-II's chosen front member) ``init_routes`` is the routes being
+    # scored, so pass the real seed network here to score adj-vs-seed correctly.
+    _adj_seed_src = adjustment_seed_routes if adjustment_seed_routes is not None else init_routes
     _adj_on = bool(adjustment_degree_weight) and adjustment_degree_weight > 0 \
-        and init_routes is not None
+        and _adj_seed_src is not None
     if _adj_on:
         cost_obj.adjustment_degree_weight = float(adjustment_degree_weight)
         cost_obj.adjustment_degree_target = float(adjustment_degree_target)
         cost_obj.adjustment_degree_objective = adjustment_degree_objective
         cost_obj.adjustment_degree_gap = float(adjustment_degree_gap)
         cost_obj.adjustment_degree_mode = adjustment_degree_mode
-        _seed = as_route_tensor(init_routes)
+        _seed = as_route_tensor(_adj_seed_src)
         cost_obj.adjustment_seed = (_seed[None] if _seed.dim() == 2 else _seed).to(device)
     output = lrnu.test_method(
         method_fn,
