@@ -158,3 +158,26 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
     assert text.count("run_nsgaii(build_nsgaii_cfg") == 2
     assert text.count("connectivity_mode=CONNECTIVITY_MODE),") >= 2
     assert "connectivity_mode=CONNECTIVITY_MODE, **UNIFIED_ADJ)" in text
+
+
+def test_paper_combined_streams_csv_rows_with_duration():
+    notebook = json.loads(
+        (ROUTE_EXAMPLES / "paper_combined.ipynb").read_text(encoding="utf-8")
+    )
+    text = "\n".join(
+        "".join(cell.get("source", [])) for cell in notebook["cells"]
+    )
+
+    assert "def append_paper_row(row, name, ndigits=3):" in text
+    assert 'to_csv(path, mode="a", header=header, index=False)' in text
+    assert "def _row(city, method, source, m, rt, seed, duration_s=None):" in text
+    assert "def _e2_row(ctx, series_col, label, alpha, target, routes, metrics, duration_s=None):" in text
+    assert '"duration_s": (round(float(duration_s), 1)' in text
+
+    assert "append_paper_row(row, _e2_our_table, ndigits=4)" in text
+    assert "append_paper_row(row, _e2_abl_table, ndigits=4)" in text
+    assert "append_paper_row(row, table_name, ndigits=3)" in text
+    assert "append_paper_row(row, comparison_table_name, ndigits=3)" in text
+
+    assert "r, m, dt = _run_rttwmc" in text
+    assert text.count('r, dt = run_one(f"Initial (LC+{EXP_INIT_TIER})"') == 2
