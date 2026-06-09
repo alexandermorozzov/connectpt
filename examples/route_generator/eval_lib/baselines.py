@@ -55,7 +55,8 @@ GA_POP_SIZE = 10
 HH_N_ITERATIONS = 20000
 
 
-def _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len):
+def _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len,
+                            connectivity_mode="legacy"):
     return [
         "+eval=mumford0",
         "++eval.dataset.type=tensor",
@@ -66,6 +67,7 @@ def _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len):
         f"++experiment.cost_function.kwargs.demand_time_weight={DEMAND_TIME_WEIGHT}",
         f"++experiment.cost_function.kwargs.route_time_weight={ROUTE_TIME_WEIGHT}",
         f"++experiment.cost_function.kwargs.median_connectivity_weight={MEDIAN_CONNECTIVITY_WEIGHT}",
+        f"++experiment.cost_function.kwargs.connectivity_mode={connectivity_mode}",
         f"++run_name={safe_run_name(run_name)}",
     ]
 
@@ -92,8 +94,10 @@ def _early_stop_overrides(early_stop_patience, early_stop_min_delta):
 
 def build_sa_cfg(run_name, n_routes, min_route_len, max_route_len,
                  n_iterations=SA_N_ITERATIONS,
-                 early_stop_patience=None, early_stop_min_delta=0.0):
-    overrides = _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len)
+                 early_stop_patience=None, early_stop_min_delta=0.0,
+                 connectivity_mode="legacy"):
+    overrides = _baseline_cfg_overrides(
+        run_name, n_routes, min_route_len, max_route_len, connectivity_mode)
     overrides.append(f"++alg_args.n_iterations={n_iterations}")
     overrides += _early_stop_overrides(early_stop_patience, early_stop_min_delta)
     return _compose_baseline_cfg("sa_mumford", overrides)
@@ -101,8 +105,10 @@ def build_sa_cfg(run_name, n_routes, min_route_len, max_route_len,
 
 def build_ga_cfg(run_name, n_routes, min_route_len, max_route_len,
                  n_iterations=GA_N_ITERATIONS, population_size=GA_POP_SIZE,
-                 early_stop_patience=None, early_stop_min_delta=0.0):
-    overrides = _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len)
+                 early_stop_patience=None, early_stop_min_delta=0.0,
+                 connectivity_mode="legacy"):
+    overrides = _baseline_cfg_overrides(
+        run_name, n_routes, min_route_len, max_route_len, connectivity_mode)
     overrides.append(f"++n_iterations={n_iterations}")
     overrides.append(f"++population_size={population_size}")
     overrides += _early_stop_overrides(early_stop_patience, early_stop_min_delta)
@@ -111,8 +117,10 @@ def build_ga_cfg(run_name, n_routes, min_route_len, max_route_len,
 
 def build_hh_cfg(run_name, n_routes, min_route_len, max_route_len,
                  n_iterations=HH_N_ITERATIONS, max_repair_iters=None,
-                 early_stop_patience=None, early_stop_min_delta=0.0):
-    overrides = _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len)
+                 early_stop_patience=None, early_stop_min_delta=0.0,
+                 connectivity_mode="legacy"):
+    overrides = _baseline_cfg_overrides(
+        run_name, n_routes, min_route_len, max_route_len, connectivity_mode)
     overrides.append(f"++n_iterations={n_iterations}")
     if max_repair_iters is not None:
         overrides.append(f"++max_repair_iters={int(max_repair_iters)}")
@@ -122,6 +130,7 @@ def build_hh_cfg(run_name, n_routes, min_route_len, max_route_len,
 
 def _run_baseline(method_fn, cfg, init_routes, prefix, method_kwargs, *,
                   tensors=None, return_history=False, use_weighted_connectivity=None,
+                  connectivity_mode=None,
                   adjustment_seed_routes=None,
                   adjustment_degree_weight=0.0, adjustment_degree_target=0.2,
                   adjustment_degree_objective='raw', adjustment_degree_gap=0.1,
@@ -142,6 +151,8 @@ def _run_baseline(method_fn, cfg, init_routes, prefix, method_kwargs, *,
     # median connectivity, so SA/GA/HH match the unified RTT+WMC+adj objective.
     if use_weighted_connectivity is not None:
         cost_obj.use_weighted_connectivity = bool(use_weighted_connectivity)
+    if connectivity_mode is not None:
+        cost_obj.connectivity_mode = connectivity_mode
     # Unified adjustment-degree penalty for metaheuristics (SA/GA/HH): the
     # cost module penalizes deviation of the candidate routes from the initial
     # network (same term BCO uses). Gated; off unless weight>0 + a seed.
@@ -269,7 +280,8 @@ NSGAII_POP_SIZE = 200
 
 
 def build_nsgaii_cfg(run_name, n_routes, min_route_len, max_route_len,
-                     n_iterations=NSGAII_N_ITERATIONS, pop_size=NSGAII_POP_SIZE):
+                     n_iterations=NSGAII_N_ITERATIONS, pop_size=NSGAII_POP_SIZE,
+                     connectivity_mode="legacy"):
     overrides = [
         "+eval=mumford0",
         "++eval.dataset.type=tensor",
@@ -277,6 +289,7 @@ def build_nsgaii_cfg(run_name, n_routes, min_route_len, max_route_len,
         f"++eval.n_routes={n_routes}",
         f"++eval.min_route_len={min_route_len}",
         f"++eval.max_route_len={max_route_len}",
+        f"++experiment.cost_function.kwargs.connectivity_mode={connectivity_mode}",
         f"++run_name={safe_run_name(run_name)}",
         f"++n_iterations={n_iterations}",
         f"++pop_size={pop_size}",
@@ -289,6 +302,7 @@ def build_nsgaii_cfg(run_name, n_routes, min_route_len, max_route_len,
 
 def run_nsgaii(cfg, *, tensors=None, init_routes=None, run_name_scope="",
                use_weighted_connectivity=False,
+               connectivity_mode=None,
                adjustment_degree_weight=0.0, adjustment_degree_target=0.2,
                adjustment_degree_objective='raw', adjustment_degree_gap=0.1,
                adjustment_degree_mode='paper'):
@@ -316,6 +330,8 @@ def run_nsgaii(cfg, *, tensors=None, init_routes=None, run_name_scope="",
     # computes median_connectivity_weighted unconditionally, so toggling this
     # only changes which components get_cost stacks into the Pareto objectives.
     cost_obj.use_weighted_connectivity = bool(use_weighted_connectivity)
+    if connectivity_mode is not None:
+        cost_obj.connectivity_mode = connectivity_mode
     # Unified adjustment-degree penalty: NSGA-II uses MultiObjectiveCostModule
     # (a MyCostModule subclass), so setting the seed + params makes the adj term
     # shift both objectives -> NSGA-II balances deviation like the other methods.

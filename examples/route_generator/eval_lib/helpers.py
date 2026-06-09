@@ -128,6 +128,7 @@ def build_lc_cfg(
     demand_time_weight: float = DEMAND_TIME_WEIGHT,
     route_time_weight: float = ROUTE_TIME_WEIGHT,
     median_connectivity_weight: float = MEDIAN_CONNECTIVITY_WEIGHT,
+    connectivity_mode: str = "legacy",
 ):
     run_name = safe_run_name(run_name)
     params = {
@@ -138,6 +139,7 @@ def build_lc_cfg(
         "demand_time_weight": demand_time_weight,
         "route_time_weight": route_time_weight,
         "median_connectivity_weight": median_connectivity_weight,
+        "connectivity_mode": connectivity_mode,
         "run_name": run_name,
         "model_weights": str(MODEL_WEIGHTS_PATH),
     }
@@ -154,6 +156,7 @@ def build_rpc_cfg(
     demand_time_weight: float = DEMAND_TIME_WEIGHT,
     route_time_weight: float = ROUTE_TIME_WEIGHT,
     median_connectivity_weight: float = MEDIAN_CONNECTIVITY_WEIGHT,
+    connectivity_mode: str = "legacy",
 ):
     """Build an LC-style eval cfg backed by RPC/pi_random instead of weights.
 
@@ -173,6 +176,7 @@ def build_rpc_cfg(
         f"++experiment.cost_function.kwargs.demand_time_weight={demand_time_weight}",
         f"++experiment.cost_function.kwargs.route_time_weight={route_time_weight}",
         f"++experiment.cost_function.kwargs.median_connectivity_weight={median_connectivity_weight}",
+        f"++experiment.cost_function.kwargs.connectivity_mode={connectivity_mode}",
         f"++run_name={run_name}",
         "model=random_path_combiner",
     ]
@@ -203,6 +207,7 @@ def build_bco_cfg(
     demand_time_weight: float = DEMAND_TIME_WEIGHT,
     route_time_weight: float = ROUTE_TIME_WEIGHT,
     median_connectivity_weight: float = MEDIAN_CONNECTIVITY_WEIGHT,
+    connectivity_mode: str = "legacy",
     worse_accept_temperature: float = BCO_WORSE_ACCEPT_TEMPERATURE,
     worse_accept_decay: float = BCO_WORSE_ACCEPT_DECAY,
     worse_accept_min_temperature: float = BCO_WORSE_ACCEPT_MIN_TEMPERATURE,
@@ -252,6 +257,7 @@ def build_bco_cfg(
         f"++experiment.cost_function.kwargs.demand_time_weight={demand_time_weight}",
         f"++experiment.cost_function.kwargs.route_time_weight={route_time_weight}",
         f"++experiment.cost_function.kwargs.median_connectivity_weight={median_connectivity_weight}",
+        f"++experiment.cost_function.kwargs.connectivity_mode={connectivity_mode}",
         f"++run_name={run_name}",
         f"++n_bees={n_bees}",
         f"++n_iterations={BCO_N_ITERATIONS}",
