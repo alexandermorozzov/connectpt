@@ -1655,7 +1655,7 @@ class CostHelperOutput:
                # (self.n_skipped_stops > 0)
     
 
-CONNECTIVITY_MODES = ('legacy', 'weighted_median')
+CONNECTIVITY_MODES = ('legacy', 'mean_weighted', 'median_weighted')
 
 
 class CostModule(torch.nn.Module):
@@ -1668,13 +1668,24 @@ class CostModule(torch.nn.Module):
         self.avg_transfer_wait_time_s = avg_transfer_wait_time_s
         self.symmetric_routes = symmetric_routes
         self.low_memory_mode = low_memory_mode
-        # How the *weighted* connectivity (WMC) is aggregated:
+        # How the *weighted* connectivity (WMC) is aggregated. In every mode the
+        # per-node value is built from the all-pairs transit times tau_ij over
+        # reachable destinations j (diagonal and unreachable pairs dropped).
         #   'legacy'          -- median_j( tau_ij * (D_ij / max_l D_lj) ), the
-        #                        original demand-attenuated median (kept
-        #                        bit-for-bit for reproducing past runs).
-        #   'weighted_median' -- demand-weighted median of the trip times tau_ij
-        #                        (weights = D_ij), averaged over nodes. Returns a
-        #                        genuine travel time on the same scale as ATT.
+        #                        original demand-attenuated median. NOTE: the
+        #                        underlying time matrix is now state.transit_times
+        #                        directly (the redundant second Floyd-Warshall,
+        #                        which undercounted transfers, was removed), so
+        #                        legacy values differ slightly from pre-fix runs.
+        #   'mean_weighted'   -- C_i = sum_j (D_ij / sum_j D_ij) *
+        #                            (delta_ij tau_ij + (1-delta_ij) 2 max T),
+        #                        then C = mean_i C_i. Demand-weighted mean travel
+        #                        time on the same scale as ATT, with unreachable
+        #                        pairs penalised by 2*max_{k,l} T_kl like the
+        #                        modified passenger cost (paper eq. 6).
+        #   'median_weighted' -- same per-node C_i as 'mean_weighted', but
+        #                        aggregated over nodes with the median instead of
+        #                        the mean (robust to a few badly-connected nodes).
         if connectivity_mode not in CONNECTIVITY_MODES:
             raise ValueError(
                 f"connectivity_mode={connectivity_mode!r}; expected one of "
@@ -1689,39 +1700,35 @@ class CostModule(torch.nn.Module):
         return dummy_obj.get_metrics().keys()
     
     def _compute_all_pairs_times_floyd(self, state):
-
-        transit_times = state.transit_times.clone()
-        B, N, _ = transit_times.shape
-
-        dist = transit_times.clone()
-
-        for k in range(N):
-            dist = torch.minimum(dist, dist[:, :, k].unsqueeze(2) + dist[:, k, :].unsqueeze(1))
-
-        return dist  # [B, N, N]
+        # state.transit_times is ALREADY the all-pairs shortest transit-time
+        # matrix (tau_Rij, transfer penalties included) -- it is produced by a
+        # Floyd-Warshall pass in RouteGenBatchState._update_route_data. Running
+        # Floyd-Warshall on it again does NOT add transfer penalties; it shaves
+        # one transfer penalty per intermediate junction (transit_times only
+        # satisfies the triangle inequality up to a +transfer_time slack after
+        # the boarding-transfer subtraction), undercounting transfer time by
+        # 10-30%. So we return it directly -- the same matrix ATT / the passenger
+        # cost use, exactly as in the paper.
+        return state.transit_times.clone()  # [B, N, N]
 
     @staticmethod
-    def _weighted_median(values, weights, dim=-1, eps=1e-9):
-        """Weighted median of ``values`` along ``dim`` with non-negative
-        ``weights``. Entries where ``values`` is non-finite (e.g. the
-        NaN-masked diagonal / unreachable pairs) are dropped (weight 0).
-        Rows whose total weight is ~0 return NaN so the caller's nan-aware
-        reduction skips them. Returns the value at which the cumulative
-        weight first reaches half of the row total."""
+    def _demand_weighted_node_times(values, weights, dim=-1, eps=1e-9):
+        """Per-node demand-weighted mean travel time:
+            C_i = sum_j (D_ij / sum_j D_ij) * tau_ij
+        computed along ``dim`` over reachable destinations only. Entries where
+        ``values`` (tau) is non-finite -- the NaN-masked diagonal and
+        unreachable pairs -- are dropped (weight 0). Nodes whose total demand to
+        reachable destinations is ~0 return NaN so the caller's nan-aware
+        reduction over nodes skips them. The weights are normalised by their own
+        row sum, so the result is a genuine travel time (a convex combination of
+        the tau values), not a demand-attenuated quantity."""
         valid = torch.isfinite(values)
         w = torch.where(valid, weights, torch.zeros_like(weights))
-        v = torch.where(valid, values, torch.full_like(values, float('inf')))
-        v_sorted, idx = torch.sort(v, dim=dim)
-        w_sorted = torch.gather(w, dim, idx)
-        cw = torch.cumsum(w_sorted, dim=dim)
-        # weights >= 0 => cumsum is non-decreasing, so its max along dim is the
-        # row total. Avoids index_select gymnastics and works for any dim.
-        total = cw.max(dim=dim, keepdim=True).values
-        first = (cw >= 0.5 * total.clamp(min=eps)).to(torch.float32) \
-            .argmax(dim=dim, keepdim=True)
-        med = v_sorted.gather(dim, first).squeeze(dim)
-        total = total.squeeze(dim)
-        return torch.where(total > eps, med, torch.full_like(med, float('nan')))
+        v = torch.where(valid, values, torch.zeros_like(values))
+        num = (w * v).sum(dim=dim)
+        den = w.sum(dim=dim)
+        return torch.where(den > eps, num / den.clamp(min=eps),
+                           torch.full_like(num, float('nan')))
 
 
     def _cost_helper(self, state, return_per_route_riders=False):
@@ -1822,16 +1829,39 @@ class CostModule(torch.nn.Module):
         tmp_w = torch.nanmean(node_medians_w, dim=1)
         median_connectivity_weighted = torch.where(torch.isnan(tmp_w), torch.tensor(0., device=tmp_w.device), tmp_w)
 
-        # Variant B: demand-weighted median of the trip times themselves
-        # (weights = D_ij), averaged over nodes -> a genuine travel time on the
-        # same scale as ATT. Overrides the WMC used by both the cost term
-        # (when use_weighted_connectivity) and the reported metric. Legacy mode
-        # leaves median_connectivity_weighted untouched (bit-for-bit).
-        if getattr(self, 'connectivity_mode', 'legacy') == 'weighted_median':
-            node_wmed = self._weighted_median(masked, demand_matrix, dim=2)  # [B, N]
-            tmp_wm = torch.nanmean(node_wmed, dim=1)
+        # New modes: per-node demand-weighted MEAN travel time, modified-Cp
+        # style (paper eq. 6) -- unreachable pairs are NOT dropped but penalised
+        # with 2 * max_{k,l} T_kl (T = the drive-time matrix), exactly like the
+        # passenger cost penalises unserved demand:
+        #   C_i = sum_j (D_ij / sum_j D_ij) *
+        #             ( delta_ij * tau_ij + (1 - delta_ij) * 2 * max T )
+        # aggregated over nodes by mean ('mean_weighted') or median
+        # ('median_weighted'). delta_ij = 1 if j is reachable from i, else 0; the
+        # denominator sum_j D_ij therefore spans ALL off-diagonal demand. Both
+        # yield a genuine travel time on the same scale as ATT and override the
+        # WMC used by the cost term (when use_weighted_connectivity) and the
+        # reported metric.
+        _conn_mode = getattr(self, 'connectivity_mode', 'legacy')
+        if _conn_mode in ('mean_weighted', 'median_weighted'):
+            # all_pairs == state.transit_times (tau_Rij, transfer penalties
+            # included) -- the same matrix ATT / the passenger cost use.
+            # 2 * max_{k,l} T_kl, matching the unserved-demand penalty used by
+            # the passenger cost (time_normalizer * 2 there).
+            max_T = state.drive_times.flatten(1, 2).max(dim=1).values         # [B]
+            unreached_penalty = (2.0 * max_T).view(-1, 1, 1)                  # [B, 1, 1]
+            # delta_ij = 0 where R provides no path (same `nopath` the passenger
+            # cost uses for unserved demand) -> substitute the 2*maxT penalty.
+            unreachable = nopath | (~all_pairs.isfinite())
+            conn_vals = torch.where(
+                unreachable, unreached_penalty.expand_as(all_pairs), all_pairs)
+            conn_vals = conn_vals.masked_fill(eye, float('nan'))             # drop diagonal
+            node_cw = self._demand_weighted_node_times(conn_vals, demand_matrix, dim=2)  # [B, N]
+            if _conn_mode == 'mean_weighted':
+                tmp_cw = torch.nanmean(node_cw, dim=1)
+            else:
+                tmp_cw = torch.nanmedian(node_cw, dim=1).values
             median_connectivity_weighted = torch.where(
-                torch.isnan(tmp_wm), torch.tensor(0., device=tmp_wm.device), tmp_wm)
+                torch.isnan(tmp_cw), torch.tensor(0., device=tmp_cw.device), tmp_cw)
 
         # === 3. Mean variants (REPORTED ONLY -- not used in the cost). Same
         #        drop-unreachable masking as the medians (inf -> nan, ignored). ===
