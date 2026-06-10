@@ -174,10 +174,9 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
     assert "_eh.DISABLED_COST_COMPONENTS = list(DISABLED_COST_COMPONENTS)" in text
     assert "RUN_NSGAII_BASELINES = False" in text
     assert "if RUN_NSGAII_BASELINES:" in text
-    assert (
-        'main_df = main_df[main_df["method"] != "NSGA-II"].reset_index(drop=True)'
-        in text
-    )
+    # E1 legacy (ATT+RTT baselines / main_df) was removed; only the unified
+    # E1u table (unified_df) remains.
+    assert "main_df" not in text
     assert (
         'unified_df = unified_df[unified_df["method"] != "NSGA-II"].reset_index(drop=True)'
         in text
@@ -187,8 +186,8 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
         'f"++experiment.cost_function.kwargs.connectivity_mode='
         '{CONNECTIVITY_MODE}"'
     ) in text
-    assert text.count("run_nsgaii(build_nsgaii_cfg") == 2
-    assert text.count("connectivity_mode=CONNECTIVITY_MODE),") >= 2
+    assert text.count("run_nsgaii(build_nsgaii_cfg") == 1
+    assert text.count("connectivity_mode=CONNECTIVITY_MODE),") >= 1
     assert "connectivity_mode=CONNECTIVITY_MODE, **UNIFIED_ADJ)" in text
 
 
@@ -212,4 +211,21 @@ def test_paper_combined_streams_csv_rows_with_duration():
     assert "append_paper_row(row, comparison_table_name, ndigits=3)" in text
 
     assert "r, m, dt = _run_rttwmc" in text
-    assert text.count('r, dt = run_one(f"Initial (LC+{EXP_INIT_TIER})"') == 2
+    assert text.count('r, dt = run_one(f"Initial (LC+{EXP_INIT_TIER})"') == 1
+
+
+def test_paper_combined_uses_two_sided_adj_objective():
+    notebook = json.loads(
+        (ROUTE_EXAMPLES / "paper_combined.ipynb").read_text(encoding="utf-8")
+    )
+    text = "\n".join(
+        "".join(cell.get("source", [])) for cell in notebook["cells"]
+    )
+
+    # adj penalty is the two-sided |adj - target| objective everywhere, not the
+    # one-sided cap. One source of truth (ADJ_EVAL_OBJECTIVE) for the eval/BCO
+    # sweeps, plus the training objective.
+    assert 'ADJ_EVAL_OBJECTIVE = "target"' in text
+    assert 'ADJ_TRAIN_OBJECTIVE = "target"' in text
+    assert 'adjustment_degree_objective="cap"' not in text
+    assert text.count("adjustment_degree_objective=ADJ_EVAL_OBJECTIVE") == 5
