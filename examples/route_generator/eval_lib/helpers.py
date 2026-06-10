@@ -418,7 +418,13 @@ def compute_cost_breakdown(dataloader, eval_cfg, cost_obj, routes_tensor, device
     def mean_cpu(x):
         return x.float().mean().detach().cpu()
 
+    # Both demand-weighted WMC variants (modified-Cp), reported alongside the
+    # optimized WMC. /60 to match the WMC column scale (get_metrics divides too).
+    _wmean = getattr(cho, "mean_weighted_connectivity", None)
+    _wmed = getattr(cho, "median_weighted_connectivity", None)
     return {
+        "WMC_mean": mean_cpu(_wmean / 60) if _wmean is not None else float("nan"),
+        "WMC_median": mean_cpu(_wmed / 60) if _wmed is not None else float("nan"),
         "cost_demand_component": mean_cpu(demand_component),
         "cost_route_component": mean_cpu(route_component),
         "cost_connectivity_component": mean_cpu(connectivity_component),

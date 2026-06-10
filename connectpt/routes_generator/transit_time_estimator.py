@@ -1610,8 +1610,13 @@ class CostHelperOutput:
     per_route_riders: Optional[Tensor] = None
     cost: Optional[Tensor] = None
     median_connectivity: Optional[Tensor] = None
-    # WMC = weighted_median_connectivity (set per connectivity_mode).
+    # WMC = weighted_median_connectivity (the one the cost optimizes, per
+    # connectivity_mode). The two demand-weighted variants below are both
+    # reported (modified-Cp per-node demand-weighted travel time, aggregated
+    # over nodes by mean / median respectively).
     median_connectivity_weighted: Optional[Tensor] = None
+    mean_weighted_connectivity: Optional[Tensor] = None
+    median_weighted_connectivity: Optional[Tensor] = None
 
     @property
     def mean_demand_time(self):
@@ -1819,27 +1824,29 @@ class CostModule(torch.nn.Module):
         # yield a genuine travel time on the same scale as ATT and override the
         # WMC used by the cost term (when use_weighted_connectivity) and the
         # reported metric.
+        # all_pairs == state.transit_times (tau_Rij, transfer penalties included)
+        # -- the same matrix ATT / the passenger cost use. Unreachable pairs get
+        # 2 * max_{k,l} T_kl (delta_ij = 0), matching the unserved-demand penalty.
         _conn_mode = getattr(self, 'connectivity_mode', 'median_weighted')
-        if _conn_mode in ('mean_weighted', 'median_weighted'):
-            # all_pairs == state.transit_times (tau_Rij, transfer penalties
-            # included) -- the same matrix ATT / the passenger cost use.
-            # 2 * max_{k,l} T_kl, matching the unserved-demand penalty used by
-            # the passenger cost (time_normalizer * 2 there).
-            max_T = state.drive_times.flatten(1, 2).max(dim=1).values         # [B]
-            unreached_penalty = (2.0 * max_T).view(-1, 1, 1)                  # [B, 1, 1]
-            # delta_ij = 0 where R provides no path (same `nopath` the passenger
-            # cost uses for unserved demand) -> substitute the 2*maxT penalty.
-            unreachable = nopath | (~all_pairs.isfinite())
-            conn_vals = torch.where(
-                unreachable, unreached_penalty.expand_as(all_pairs), all_pairs)
-            conn_vals = conn_vals.masked_fill(eye, float('nan'))             # drop diagonal
-            node_cw = self._demand_weighted_node_times(conn_vals, demand_matrix, dim=2)  # [B, N]
-            if _conn_mode == 'mean_weighted':
-                tmp_cw = torch.nanmean(node_cw, dim=1)
-            else:
-                tmp_cw = torch.nanmedian(node_cw, dim=1).values
-            median_connectivity_weighted = torch.where(
-                torch.isnan(tmp_cw), torch.tensor(0., device=tmp_cw.device), tmp_cw)
+        max_T = state.drive_times.flatten(1, 2).max(dim=1).values         # [B]
+        unreached_penalty = (2.0 * max_T).view(-1, 1, 1)                  # [B, 1, 1]
+        unreachable = nopath | (~all_pairs.isfinite())
+        conn_vals = torch.where(unreachable, unreached_penalty.expand_as(all_pairs), all_pairs)
+        conn_vals = conn_vals.masked_fill(eye, float('nan'))             # drop diagonal
+        # Per-node demand-weighted travel time C_i (modified-Cp). Aggregate over
+        # nodes by BOTH mean and median -- both are reported; the cost optimizes
+        # the one selected by connectivity_mode (WMC = weighted_median by default).
+        node_cw = self._demand_weighted_node_times(conn_vals, demand_matrix, dim=2)  # [B, N]
+        _mw = torch.nanmean(node_cw, dim=1)
+        mean_weighted_connectivity = torch.where(
+            torch.isnan(_mw), torch.tensor(0., device=_mw.device), _mw)
+        _dw = torch.nanmedian(node_cw, dim=1).values
+        median_weighted_connectivity = torch.where(
+            torch.isnan(_dw), torch.tensor(0., device=_dw.device), _dw)
+        # the WMC the cost term actually uses
+        median_connectivity_weighted = (
+            mean_weighted_connectivity if _conn_mode == 'mean_weighted'
+            else median_weighted_connectivity)
 
         unserved_demand_matrix = demand_matrix * nopath
 
@@ -1851,6 +1858,8 @@ class CostModule(torch.nn.Module):
             unserved_demand_matrix,
             median_connectivity=median_connectivity,
             median_connectivity_weighted=median_connectivity_weighted,
+            mean_weighted_connectivity=mean_weighted_connectivity,
+            median_weighted_connectivity=median_weighted_connectivity,
         )
 
         if return_per_route_riders:

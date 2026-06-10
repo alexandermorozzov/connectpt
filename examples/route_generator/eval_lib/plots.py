@@ -410,79 +410,63 @@ def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
         graph_or_coords, street_adj)
     draw_street_graph(ax, coords, street_adj_arr)
 
-    n_routes = max(routes.shape[0], reference_routes.shape[0])
-    colors = route_colors_for_n(n_routes, palette=palette)
-    overlap_map = build_edge_overlap_map(routes, reference_routes) \
-        if with_overlap_curves else None
+    colors = route_colors_for(routes, palette=palette)
+    # Curve overlapping edges using the CANDIDATE routes (added/shared belong to
+    # them); removed edges are not in the candidate so they need no curving.
+    overlap_map = build_edge_overlap_map(routes) if with_overlap_curves else None
 
-    for route_idx in range(n_routes):
-        route = route_to_list(routes[route_idx]) \
-            if route_idx < routes.shape[0] else []
-        reference = route_to_list(reference_routes[route_idx]) \
-            if route_idx < reference_routes.shape[0] else []
+    # NETWORK-level edge sets (undirected key -> a representative edge). The diff
+    # is over the whole network, NOT per route slot, so reordering routes between
+    # the seed and the candidate is not shown as spurious removed/added edges.
+    def _net_edges(route_set):
+        m = {}
+        for route_tensor in route_set:
+            for edge in route_edge_list(route_to_list(route_tensor)):
+                m.setdefault(undirected_edge_key(edge), edge)
+        return m
+
+    ref_edge_map = _net_edges(reference_routes)
+    cand_edge_map = _net_edges(routes)
+    removed_keys = set(ref_edge_map) - set(cand_edge_map)
+
+    # edges only in the seed network -> dashed grey (drawn once; they coincide
+    # with no candidate edge, so nothing can hide them).
+    if removed_keys:
+        plot_edges(
+            ax, coords, [ref_edge_map[k] for k in removed_keys],
+            color="dimgray", linewidth=2.2, alpha=0.85, linestyle="--", zorder=2,
+        )
+
+    # candidate edges, per route, classified added (new to the network) vs
+    # shared (also in the seed network), coloured by route.
+    for route_idx, route_tensor in enumerate(routes):
+        route = route_to_list(route_tensor)
         color = colors[route_idx % len(colors)]
-
-        route_edges_in_order = route_edge_list(route)
-        reference_edges_in_order = route_edge_list(reference)
-        route_edge_keys = {undirected_edge_key(edge)
-                           for edge in route_edges_in_order}
-        reference_edge_keys = {undirected_edge_key(edge)
-                               for edge in reference_edges_in_order}
-
-        shared_edges = [
-            edge for edge in route_edges_in_order
-            if undirected_edge_key(edge) in reference_edge_keys
-        ]
-        added_edges = [
-            edge for edge in route_edges_in_order
-            if undirected_edge_key(edge) not in reference_edge_keys
-        ]
-        removed_edges = [
-            edge for edge in reference_edges_in_order
-            if undirected_edge_key(edge) not in route_edge_keys
-        ]
-
-        if removed_edges:
-            plot_edges(
-                ax, coords, removed_edges,
-                color="dimgray", linewidth=2.2, alpha=0.85, linestyle="--",
-                route_idx=route_idx, overlap_map=overlap_map, zorder=2,
-            )
+        shared_edges = [e for e in route_edge_list(route)
+                        if undirected_edge_key(e) in ref_edge_map]
+        added_edges = [e for e in route_edge_list(route)
+                       if undirected_edge_key(e) not in ref_edge_map]
         if shared_edges:
-            plot_edges(
-                ax, coords, shared_edges,
-                color=color, linewidth=2.0, alpha=0.35,
-                route_idx=route_idx, overlap_map=overlap_map, zorder=3,
-            )
+            plot_edges(ax, coords, shared_edges, color=color, linewidth=2.0,
+                       alpha=0.35, route_idx=route_idx, overlap_map=overlap_map,
+                       zorder=3)
         if added_edges:
-            plot_edges(
-                ax, coords, added_edges,
-                color=color, linewidth=4.0, alpha=0.95,
-                route_idx=route_idx, overlap_map=overlap_map, zorder=4,
-            )
+            plot_edges(ax, coords, added_edges, color=color, linewidth=4.0,
+                       alpha=0.95, route_idx=route_idx, overlap_map=overlap_map,
+                       zorder=4)
 
-        route_nodes = set(route)
-        reference_nodes = set(reference)
-        shared_nodes = sorted(route_nodes & reference_nodes)
-        added_nodes = sorted(route_nodes - reference_nodes)
-        removed_nodes = sorted(reference_nodes - route_nodes)
-
-        if shared_nodes:
-            ax.scatter(
-                coords[shared_nodes, 0], coords[shared_nodes, 1],
-                s=20, facecolors="white", edgecolors=[color], linewidths=1.0,
-                zorder=5,
-            )
-        if added_nodes:
-            ax.scatter(
-                coords[added_nodes, 0], coords[added_nodes, 1],
-                s=40, c=[color], edgecolors="black", linewidths=0.5, zorder=6,
-            )
-        if removed_nodes:
-            ax.scatter(
-                coords[removed_nodes, 0], coords[removed_nodes, 1],
-                s=45, c="crimson", marker="x", linewidths=1.4, zorder=6,
-            )
+    # NETWORK-level node diff (added = new to the network, removed = gone).
+    ref_nodes = {n for r in reference_routes for n in route_to_list(r)}
+    cand_nodes = {n for r in routes for n in route_to_list(r)}
+    added_nodes = sorted(cand_nodes - ref_nodes)
+    removed_nodes = sorted(ref_nodes - cand_nodes)
+    if added_nodes:
+        ax.scatter(coords[added_nodes, 0], coords[added_nodes, 1],
+                   s=45, facecolors="lime", edgecolors="black", linewidths=0.6,
+                   zorder=6)
+    if removed_nodes:
+        ax.scatter(coords[removed_nodes, 0], coords[removed_nodes, 1],
+                   s=55, c="crimson", marker="x", linewidths=1.6, zorder=6)
 
     ax.scatter(coords[:, 0], coords[:, 1],
                c="black", s=45, alpha=0.65, zorder=4)

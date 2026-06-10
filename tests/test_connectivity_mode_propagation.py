@@ -169,7 +169,7 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
         "".join(cell.get("source", [])) for cell in notebook["cells"]
     )
 
-    assert 'CONNECTIVITY_MODE = "mean_weighted"' in text
+    assert 'CONNECTIVITY_MODE = "median_weighted"' in text
     assert 'DISABLED_COST_COMPONENTS = ["demand"]' in text
     assert "_eh.DISABLED_COST_COMPONENTS = list(DISABLED_COST_COMPONENTS)" in text
     assert "RUN_NSGAII_BASELINES = False" in text
