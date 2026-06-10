@@ -69,11 +69,6 @@ def undirected_edge_key(edge):
     return tuple(sorted(edge))
 
 
-def route_nodes_text(route):
-    """Pretty-print a route as ``a -> b -> c`` (or ``"empty"``)."""
-    return " -> ".join(map(str, route)) if route else "empty"
-
-
 def get_first_route_set(routes):
     """Coerce routes into a 2-D ``[n_routes, max_route_len]`` tensor (CPU).
 
@@ -482,56 +477,6 @@ def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
     ax.axis("off")
 
 
-def draw_route_sequence_table(ax, routes, title="Route sequences", *,
-                              palette="tab20"):
-    """Render a small mpl table listing each route's node sequence.
-
-    ``title`` is positional-or-keyword so the training notebook's
-    ``draw_route_sequence_table(ax, routes, "Initial route nodes")`` call
-    keeps working.
-    """
-    routes = get_first_route_set(routes)
-    colors = route_colors_for(routes, palette=palette)
-    rows = []
-    cell_colours = []
-
-    for route_idx, route_tensor in enumerate(routes):
-        route = route_to_list(route_tensor)
-        rows.append([f"R{route_idx}", route_nodes_text(route)])
-        route_color = colors[route_idx % len(colors)]
-        label_color = route_color if route else (0.86, 0.86, 0.86, 1.0)
-        cell_colours.append([label_color, (1.0, 1.0, 1.0, 1.0)])
-
-    ax.axis("off")
-    ax.set_title(title, fontsize=9, pad=2)
-    table = ax.table(
-        cellText=rows,
-        cellColours=cell_colours,
-        colLabels=["route", "nodes"],
-        colColours=[(0.94, 0.94, 0.94, 1.0), (0.94, 0.94, 0.94, 1.0)],
-        colWidths=[0.16, 0.84],
-        cellLoc="left",
-        loc="center",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(7)
-    table.scale(1.0, 1.15)
-
-    for (row_idx, col_idx), cell in table.get_celld().items():
-        cell.set_edgecolor("0.75")
-        cell.set_linewidth(0.6)
-        if row_idx == 0:
-            cell.get_text().set_fontweight("bold")
-        elif col_idx == 0:
-            route_idx = row_idx - 1
-            route = route_to_list(routes[route_idx])
-            cell.get_text().set_color("white" if route else "0.35")
-            cell.get_text().set_fontweight("bold")
-        else:
-            cell.get_text().set_fontfamily("monospace")
-    return table
-
-
 # ---------------------------------------------------------------------------
 # Cost-component enable / disable helpers
 # ---------------------------------------------------------------------------
@@ -543,52 +488,12 @@ def draw_route_sequence_table(ax, routes, title="Route sequences", *,
 COST_COMPONENT_NAMES = ("demand", "route", "connectivity")
 
 # Human-readable axis / panel labels per component.
-COMPONENT_DISPLAY_LABELS = {
-    "demand": "demand (ATT)",
-    "route": "route (RTT)",
-    "connectivity": "connectivity",
-}
 
 # Base (undecorated) dataframe columns owned by each cost component, across
 # both the evaluation_seeded and lc_improvement_training notebooks. The
 # filter below also recognizes these wrapped in ``mean_`` / ``std_``
 # prefixes and ``_with_worse`` / ``_without_worse`` suffixes (worse-accept
 # summary tables).
-_COMPONENT_OWNED_COLUMNS = {
-    "demand": {
-        "cost_demand_term", "cost_demand_component", "cost_demand_weight",
-        "ATT",
-        "train_component_demand_delta", "val_component_delta_demand",
-        "seed_component_demand", "final_component_demand",
-        "component_delta_demand",
-        "train_critic_mse_demand",
-        "train_critic_explained_variance_demand",
-        "train_return_mean_demand", "train_advantage_mean_demand",
-    },
-    "route": {
-        "cost_route_term", "cost_route_component", "cost_route_weight",
-        "RTT",
-        "train_component_route_delta", "val_component_delta_route",
-        "seed_component_route", "final_component_route",
-        "component_delta_route",
-        "train_critic_mse_route",
-        "train_critic_explained_variance_route",
-        "train_return_mean_route", "train_advantage_mean_route",
-    },
-    "connectivity": {
-        "cost_connectivity_term", "cost_connectivity_component",
-        "cost_connectivity_weight",
-        "median_connectivity", "# disconnected node pairs",
-        "train_component_connectivity_delta",
-        "val_component_delta_connectivity",
-        "seed_component_connectivity", "final_component_connectivity",
-        "component_delta_connectivity",
-        "train_critic_mse_connectivity",
-        "train_critic_explained_variance_connectivity",
-        "train_return_mean_connectivity",
-        "train_advantage_mean_connectivity",
-    },
-}
 
 
 def resolve_enabled_components(enabled):
@@ -614,44 +519,10 @@ def disabled_components(enabled):
     return tuple(c for c in COST_COMPONENT_NAMES if c not in active)
 
 
-def _strip_column_decorators(col):
-    base = str(col)
-    for suffix in ("_without_worse", "_with_worse"):
-        if base.endswith(suffix):
-            base = base[: -len(suffix)]
-            break
-    for prefix in ("mean_", "std_"):
-        if base.startswith(prefix):
-            base = base[len(prefix):]
-            break
-    return base
-
-
-def disabled_component_columns(columns, enabled):
-    """Return the subset of ``columns`` owned by a disabled cost component."""
-    owned = set()
-    for comp in disabled_components(enabled):
-        owned |= _COMPONENT_OWNED_COLUMNS[comp]
-    return [c for c in columns if _strip_column_decorators(c) in owned]
-
-
-def filter_component_columns(columns, enabled):
-    """Drop disabled-component entries from a list of column names."""
-    drop = set(disabled_component_columns(columns, enabled))
-    return [c for c in columns if c not in drop]
-
-
-def drop_disabled_component_columns(df, enabled):
-    """Return ``df`` with disabled-component columns removed."""
-    drop = disabled_component_columns(list(df.columns), enabled)
-    return df.drop(columns=drop) if drop else df
-
-
 __all__ = [
     "route_to_list",
     "route_edge_list",
     "undirected_edge_key",
-    "route_nodes_text",
     "get_first_route_set",
     "route_colors_for",
     "route_colors_for_n",
@@ -664,12 +535,7 @@ __all__ = [
     "summarize_route_changes",
     "plot_plain_route_set",
     "plot_route_diff",
-    "draw_route_sequence_table",
     "COST_COMPONENT_NAMES",
-    "COMPONENT_DISPLAY_LABELS",
     "resolve_enabled_components",
     "disabled_components",
-    "disabled_component_columns",
-    "filter_component_columns",
-    "drop_disabled_component_columns",
 ]

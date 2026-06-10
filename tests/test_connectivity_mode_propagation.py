@@ -161,6 +161,30 @@ def test_run_nsgaii_applies_runtime_connectivity_mode(monkeypatch):
     assert seen["optimizer_cost_obj"] is cost_obj
 
 
+def test_params_is_single_source_of_unified_objective():
+    import eval_lib.params as params
+    import eval_lib.paper as paper
+
+    assert params.CONNECTIVITY_MODE == "median_weighted"
+    assert params.DISABLED_COST_COMPONENTS == ["demand"]
+    assert params.UNIFIED_COST_WEIGHTS == {
+        "demand_time_weight": 0.0,
+        "route_time_weight": 0.5,
+        "median_connectivity_weight": 0.5,
+    }
+    assert params.ADJ_WEIGHT == 10.0
+    assert params.ADJ_TARGET == 0.2
+    assert params.ADJ_OBJECTIVE == "target"
+    # UNIFIED_ADJ is built from the params constants.
+    assert paper.UNIFIED_ADJ == {
+        "adjustment_degree_weight": params.ADJ_WEIGHT,
+        "adjustment_degree_target": params.ADJ_TARGET,
+        "adjustment_degree_objective": params.ADJ_OBJECTIVE,
+        "adjustment_degree_gap": params.ADJ_GAP,
+        "adjustment_degree_mode": params.ADJ_MODE,
+    }
+
+
 def test_paper_combined_sets_connectivity_mode_everywhere():
     notebook = json.loads(
         (ROUTE_EXAMPLES / "paper_combined.ipynb").read_text(encoding="utf-8")
@@ -169,14 +193,21 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
         "".join(cell.get("source", [])) for cell in notebook["cells"]
     )
 
-    assert 'CONNECTIVITY_MODE = "median_weighted"' in text
-    assert 'DISABLED_COST_COMPONENTS = ["demand"]' in text
-    assert "_eh.DISABLED_COST_COMPONENTS = list(DISABLED_COST_COMPONENTS)" in text
+    # Both the PART 1 (training) and PART 2 (experiments) config cells import
+    # the unified objective from eval_lib.params; no local re-definitions.
+    assert text.count("from eval_lib.params import") == 2
+    assert 'CONNECTIVITY_MODE = "' not in text
+    assert "DISABLED_COST_COMPONENTS = [" not in text
+    assert "ADJ_WEIGHT = " not in text
+    assert "ADJ_TARGET = " not in text
+    assert "ADJ_OBJECTIVE = " not in text
+    assert "UNIFIED_COST_WEIGHTS = dict" not in text
     assert "RUN_NSGAII_BASELINES = False" in text
     assert "if RUN_NSGAII_BASELINES:" in text
     # E1 legacy (ATT+RTT baselines / main_df) was removed; only the unified
     # E1u table (unified_df) remains.
     assert "main_df" not in text
+    assert "BASE_WEIGHTS" not in text
     assert (
         'unified_df = unified_df[unified_df["method"] != "NSGA-II"].reset_index(drop=True)'
         in text
@@ -199,11 +230,11 @@ def test_paper_combined_streams_csv_rows_with_duration():
         "".join(cell.get("source", [])) for cell in notebook["cells"]
     )
 
-    assert "def append_paper_row(row, name, ndigits=3):" in text
-    assert 'to_csv(path, mode="a", header=header, index=False)' in text
-    assert "def _row(city, method, source, m, rt, seed, duration_s=None):" in text
+    # append_paper_row / paper_row(_row) now live in eval_lib.paper; the
+    # notebook imports them from there.
+    assert "append_paper_row" in text
+    assert "paper_row as _row" in text
     assert "def _e2_row(ctx, series_col, label, alpha, target, routes, metrics, duration_s=None):" in text
-    assert '"duration_s": (round(float(duration_s), 1)' in text
 
     assert "append_paper_row(row, _e2_our_table, ndigits=4)" in text
     assert "append_paper_row(row, _e2_abl_table, ndigits=4)" in text
@@ -222,10 +253,11 @@ def test_paper_combined_uses_two_sided_adj_objective():
         "".join(cell.get("source", [])) for cell in notebook["cells"]
     )
 
-    # adj penalty is the two-sided |adj - target| objective everywhere, not the
-    # one-sided cap. One source of truth (ADJ_EVAL_OBJECTIVE) for the eval/BCO
-    # sweeps, plus the training objective.
-    assert 'ADJ_EVAL_OBJECTIVE = "target"' in text
-    assert 'ADJ_TRAIN_OBJECTIVE = "target"' in text
+    # adj penalty everywhere comes from the single params source: training
+    # passes ADJ_OBJECTIVE, the BCO/eval sweeps spread UNIFIED_ADJ (which the
+    # params test pins to the two-sided "target" objective). No literals left.
     assert 'adjustment_degree_objective="cap"' not in text
-    assert text.count("adjustment_degree_objective=ADJ_EVAL_OBJECTIVE") == 5
+    assert 'adjustment_degree_objective="target"' not in text
+    assert "adj_objective=ADJ_OBJECTIVE" in text or "objective=ADJ_OBJECTIVE" in text
+    assert text.count("**UNIFIED_ADJ") >= 3
+    assert text.count("**dict(UNIFIED_ADJ") == 2  # our-model + E2 (variable target)

@@ -1,31 +1,55 @@
-"""Tunable experiment parameters for the route-evaluation notebook.
+"""Tunable experiment parameters -- the single source of truth.
 
 Repo paths live in :mod:`eval_lib.context`. The BCO algorithm constants are
 sourced from the algorithm YAML ``cfg/bco_mumford.yaml`` -- edit that YAML to
 tune them; this module just re-exports the values under their historical
-constant names so the notebooks / helpers keep working. The remaining knobs
-(route-problem size, cost weights, RL-improvement settings,
-run-orchestration flags) stay here.
+constant names so the notebook / helpers keep working.
+
+The **unified paper objective** block below is read by BOTH parts of
+``paper_combined.ipynb``: PART 1 trains the edit model on exactly the same
+objective the PART 2 experiments (our model + all BCO baselines) optimize.
+Change a value here and training, eval-lib config builders and the notebook
+all follow.
 """
 from omegaconf import OmegaConf as _OmegaConf
 
 from .context import CFG_DIR
 
+# === Unified paper objective (paper_combined.ipynb) =========================
+# Training (PART 1) and experiments (PART 2) both optimize
+#     0.5 * RTT  +  0.5 * WMC  +  ADJ_WEIGHT * |adj - ADJ_TARGET|
+# with the demand component disabled and WMC = the demand-weighted median
+# connectivity (modified-Cp, ``median_weighted``).
+CONNECTIVITY_MODE = "median_weighted"
+DISABLED_COST_COMPONENTS = ["demand"]
+
+DEMAND_TIME_WEIGHT = 0.0
+ROUTE_TIME_WEIGHT = 0.5
+MEDIAN_CONNECTIVITY_WEIGHT = 0.5
+UNIFIED_COST_WEIGHTS = dict(
+    demand_time_weight=DEMAND_TIME_WEIGHT,
+    route_time_weight=ROUTE_TIME_WEIGHT,
+    median_connectivity_weight=MEDIAN_CONNECTIVITY_WEIGHT,
+)
+
+# Adjustment-degree penalty: ADJ_WEIGHT * |adj - ADJ_TARGET| (two-sided
+# "target" objective -- deviating below the target is penalized too).
+ADJ_WEIGHT = 10.0
+ADJ_TARGET = 0.2
+ADJ_OBJECTIVE = "target"
+ADJ_GAP = 0.1
+ADJ_MODE = "paper"
+
+# === Problem-size defaults (config builders) ================================
 CITY_NAME = "Mumford0"
 
-N_ROUTES = 10
 MIN_ROUTE_LEN = 2
 MAX_ROUTE_LEN = 12
 
 LC_SAMPLES = 100
 USE_NEURAL_BCO = False
 
-# Route-comparison figures: draw the per-route node-sequence tables under each
-# panel. Default False (compact figures, route maps + subtitles only); flip
-# True if you need the per-route node listings.
-SHOW_ROUTE_SEQUENCE_TABLES = False
-
-# === BCO algorithm constants -- sourced from cfg/bco_mumford.yaml ===
+# === BCO algorithm constants -- sourced from cfg/bco_mumford.yaml ===========
 # The algorithm YAML is the single source of truth; the BCO_* names below are
 # re-exports so existing notebook / helper code keeps working.
 _BCO_CFG = _OmegaConf.load(CFG_DIR / "bco_mumford.yaml")
@@ -45,30 +69,3 @@ BCO_WORSE_SELECTION_DECAY = float(_BCO_CFG.worse_selection_decay)
 BCO_WORSE_SELECTION_MIN_TEMPERATURE = float(_BCO_CFG.worse_selection_min_temperature)
 BCO_WORSE_SELECTION_UNIFORM_MIX = float(_BCO_CFG.worse_selection_uniform_mix)
 BCO_WORSE_SELECTION_ELITE_COUNT = int(_BCO_CFG.worse_selection_elite_count)
-# Trim-grace selection: a route-shrinking (trim) mutation is force-accepted as
-# a setup move and the bee is shielded from cost-based selection for this many
-# population-selection rounds, so a follow-up extend can build on the trim.
-# Applied only to the worse-accept experiment.
-BCO_TRIM_GRACE_PERIOD = int(_BCO_CFG.worse_accept_trim_grace_period)
-
-RUN_RL_ONLY_BASELINE = True  # Set False to skip RL-only eval/table/plot rows.
-RL_IMPROVEMENT_RUN_NAME = "rl_improvement_only_from_lc_mumford0"
-RL_MAX_ROUTE_EDIT_STEPS = 8
-RL_MAX_TRIM_ACTIONS_PER_ROUTE = 1
-RL_FORCE_NONHALT_FIRST_STEP = False
-RL_RETURN_BEST_ROUTES = False
-
-DEMAND_TIME_WEIGHT = 0.33
-ROUTE_TIME_WEIGHT = 0.33
-MEDIAN_CONNECTIVITY_WEIGHT = 0.33
-
-# Disable individual cost components (demand / route / connectivity). A
-# disabled component is dropped from the weighted cost everywhere -- BCO, LC
-# and RL-improvement runs all optimize and are scored without it -- and its
-# columns are removed from every comparison table. Leave the list empty to
-# keep all three. Example: DISABLED_COST_COMPONENTS = ["connectivity"].
-DISABLED_COST_COMPONENTS = ["connectivity"]
-ENABLED_COST_COMPONENTS = [
-    c for c in ("demand", "route", "connectivity")
-    if c not in set(DISABLED_COST_COMPONENTS)
-]

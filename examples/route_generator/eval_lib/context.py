@@ -33,8 +33,6 @@ CFG_DIR = ROOT_DIR / "connectpt" / "routes_generator" / "cfg"
 DATASETS_DIR = ROOT_DIR / "datasets"
 BENCHMARK_DIR = DATASETS_DIR / "benchmark"
 MACSA_DATA_DIR = DATASETS_DIR / "MACSA_data"
-RAW_GRAPHS_PATH = DATASETS_DIR / "raw_graphs_1000.pkl"
-LC_RESULTS_DIR = DATASETS_DIR / "nx_heuristic_results_10r_len12"
 
 # === run artifacts + model checkpoints (repo-root artifacts/) ===
 ARTIFACTS_DIR = ROOT_DIR / "artifacts"

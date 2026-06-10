@@ -201,13 +201,6 @@ def _run_baseline(method_fn, cfg, init_routes, prefix, method_kwargs, *,
     return result
 
 
-def _propagate_return_history(run_func):
-    """Decorator-like wrapper unused at the moment -- kept for future cleanup
-    if more sa/ga/hh-style runners get added; for now run_sa/ga/hh inline the
-    return_history kwarg."""
-    return run_func
-
-
 def _early_stop_kwargs(cfg):
     """Pull ``early_stop_patience`` / ``early_stop_min_delta`` out of the cfg
     if either was set as a Hydra ++override. Both default to None / 0.0, which
@@ -392,36 +385,8 @@ BENCHMARK_SPECS = [
 ]
 BENCHMARK_NX_SEED = 0
 BENCHMARK_INIT_MODE = "rpc"
-BENCHMARK_INIT_LABELS = {
-    "rpc": "RPC",
-    "nx": "NX-heuristic",
-}
-BENCHMARK_RUN_RL_IMPROVEMENT = RUN_RL_ONLY_BASELINE
-BENCHMARK_RUN_NSGAII = True            # NSGA-II is slow on Mumford2/3
-REUSE_EXISTING_BENCHMARK_SWEEP = True
 
 # requested metrics only: Cp (ATT) | Co (RTT) | d0 | d1 | d2 | d_un | cost
-BENCHMARK_METRIC_KEYS = {
-    "Cp (ATT)": "ATT",
-    "Co (RTT)": "RTT",
-    "d0": "$d_0$",
-    "d1": "$d_1$",
-    "d2": "$d_2$",
-    "d_un": "$d_{un}$",
-    "cost": "cost",
-}
-
-
-def summarize_benchmark_run(benchmark, method, metrics):
-    row = {"benchmark": benchmark, "method": method}
-    for label, key in BENCHMARK_METRIC_KEYS.items():
-        row[label] = metric_value(metrics, key)
-    return row
-
-
-def benchmark_init_label(init_mode=None):
-    init_mode = BENCHMARK_INIT_MODE if init_mode is None else init_mode
-    return BENCHMARK_INIT_LABELS.get(init_mode, str(init_mode))
 
 
 def load_benchmark_graph(spec, init_mode=None):
@@ -444,134 +409,3 @@ def load_benchmark_graph(spec, init_mode=None):
     return tensors, init_routes
 
 
-def _record(rows, city, method, run_fn, routes_out=None, metrics_out=None):
-    """Run run_fn(); on failure log it and append an all-NaN row so one bad
-    method/benchmark does not abort the whole sweep.
-
-    ``run_fn()`` returns the full runner tuple ``(run_name, metrics, unserved,
-    routes, ...)``; the metrics land in the rows table and -- when
-    ``routes_out`` / ``metrics_out`` are passed -- the route tensor and full
-    metrics dict are kept under ``(city, method)`` for the route figures.
-
-    The finally-block frees GPU memory after every method. gc.collect()
-    breaks the reference cycle that a caught exception's traceback holds
-    over the failed run's frames -- otherwise that run's CUDA tensors stay
-    alive. torch.cuda.empty_cache() returns the freed blocks so the next
-    method gets a clean, de-fragmented allocator. Without this an OOM in
-    one method poisons every method after it."""
-    try:
-        result = run_fn()
-        rows.append(summarize_benchmark_run(city, method, result[1]))
-        if routes_out is not None:
-            routes_out[(city, method)] = as_route_tensor(result[3])
-        if metrics_out is not None:
-            metrics_out[(city, method)] = result[1]
-    except Exception as exc:
-        print(f"  [{city}] {method} FAILED: {exc}")
-        rows.append({"benchmark": city, "method": method,
-                     **{label: float("nan") for label in BENCHMARK_METRIC_KEYS}})
-    finally:
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-
-def run_benchmark_sweep(specs=None):
-    """Cross-benchmark sweep. Returns a dict ``{rows_df, routes, metrics,
-    specs}``: ``rows_df`` is the metric table, ``routes`` / ``metrics`` are
-    keyed by ``(city, method)`` for the route-comparison figures."""
-    if specs is None:
-        specs = BENCHMARK_SPECS
-    rows = []
-    routes_by_method = {}
-    metrics_by_method = {}
-    for spec in specs:
-        city = spec["city"]
-        n_routes = spec["n_routes"]
-        min_len = spec["min_route_len"]
-        max_len = spec["max_route_len"]
-        print(f"=== {city}: n_routes={n_routes} min={min_len} max={max_len} ===")
-        init_label = benchmark_init_label()
-        try:
-            tensors, init_routes = load_benchmark_graph(spec)
-        except Exception as exc:
-            print(f"  [{city}] could not build {init_label} init: {exc}")
-            continue
-        print(f"  {init_label} init routes: {tuple(init_routes.shape)}")
-
-        # Benchmark initial routes (reference baseline)
-        _record(rows, city, f"{init_label} (initial)", lambda: _run_baseline(
-            None, build_sa_cfg(f"{city}_{BENCHMARK_INIT_MODE}_init",
-                               n_routes, min_len, max_len),
-            init_routes, f"{city}_{BENCHMARK_INIT_MODE}_init_", {},
-            tensors=tensors),
-            routes_by_method, metrics_by_method)
-
-        # BCO variants
-        for variant in BCO_VARIANTS:
-            def _bco(variant=variant):
-                cfg = build_bco_cfg(
-                    run_name=f"{city}_{variant['run_name']}",
-                    n_routes=n_routes, min_route_len=min_len,
-                    max_route_len=max_len,
-                    use_neural_bees=variant["use_neural_bees"],
-                    n_type1_bees=variant["n_type1_bees"],
-                    n_type2_bees=variant["n_type2_bees"],
-                    n_type4_bees=variant["n_type4_bees"],
-                    n_type5_bees=variant.get("n_type5_bees", 0),
-                    n_type6_bees=variant.get("n_type6_bees", 0),
-                    n_type7_bees=variant.get("n_type7_bees", 0),
-                )
-                return run_bco(cfg, init_routes, tensors=tensors,
-                               run_name_scope=f"{city}_")
-            _record(rows, city, f"BCO: {variant['summary_label']}", _bco,
-                    routes_by_method, metrics_by_method)
-
-        if BENCHMARK_RUN_RL_IMPROVEMENT:
-            # RL improvement only
-            _record(rows, city, "RL improvement only", lambda: run_rl_improvement(
-                init_routes, run_name=f"{city}_rl_only", n_routes=n_routes,
-                min_route_len=min_len, max_route_len=max_len, tensors=tensors),
-                routes_by_method, metrics_by_method)
-
-        # simulated annealing / genetic algorithm / hyper-heuristics
-        _record(rows, city, "Simulated annealing", lambda: run_sa(
-            build_sa_cfg(f"{city}_sa", n_routes, min_len, max_len),
-            init_routes, tensors=tensors, run_name_scope=f"{city}_"),
-            routes_by_method, metrics_by_method)
-        _record(rows, city, "Genetic algorithm", lambda: run_ga(
-            build_ga_cfg(f"{city}_ga", n_routes, min_len, max_len),
-            init_routes, tensors=tensors, run_name_scope=f"{city}_"),
-            routes_by_method, metrics_by_method)
-        _record(rows, city, "Hyper-heuristics", lambda: run_hh(
-            build_hh_cfg(f"{city}_hh", n_routes, min_len, max_len),
-            init_routes, tensors=tensors, run_name_scope=f"{city}_"),
-            routes_by_method, metrics_by_method)
-
-        # NSGA-II (multi-objective). Seeded with the same benchmark init
-        # routes as every other benchmark method: the seed lands in the
-        # initial population as one explicit member, the remaining pop_size-1
-        # slots are still filled via cfg.init_mode (default 'husselmann') so
-        # NSGA-II keeps its diversity behaviour on top of a known floor.
-        if BENCHMARK_RUN_NSGAII:
-            def _nsgaii():
-                _, output = run_nsgaii(
-                    build_nsgaii_cfg(f"{city}_nsgaii", n_routes, min_len, max_len),
-                    tensors=tensors, init_routes=init_routes,
-                    run_name_scope=f"{city}_")
-                best = reduce_pareto_front(
-                    output, DEMAND_TIME_WEIGHT, ROUTE_TIME_WEIGHT)
-                routes = best["routes"]
-                if routes.ndim == 2:
-                    routes = routes[None]
-                return _run_baseline(
-                    None,
-                    build_sa_cfg(f"{city}_nsgaii_eval", n_routes, min_len, max_len),
-                    routes, f"{city}_nsgaii_eval_", {}, tensors=tensors)
-            _record(rows, city, "NSGA-II", _nsgaii,
-                    routes_by_method, metrics_by_method)
-
-    from .tables import TABLE_DECIMALS as _TABLE_DECIMALS
-    return {"rows_df": pd.DataFrame(rows).round(_TABLE_DECIMALS),
-            "routes": routes_by_method,
-            "metrics": metrics_by_method, "specs": list(specs)}
