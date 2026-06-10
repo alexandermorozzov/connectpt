@@ -128,7 +128,7 @@ def build_lc_cfg(
     demand_time_weight: float = DEMAND_TIME_WEIGHT,
     route_time_weight: float = ROUTE_TIME_WEIGHT,
     median_connectivity_weight: float = MEDIAN_CONNECTIVITY_WEIGHT,
-    connectivity_mode: str = "legacy",
+    connectivity_mode: str = "median_weighted",
 ):
     run_name = safe_run_name(run_name)
     params = {
@@ -156,7 +156,7 @@ def build_rpc_cfg(
     demand_time_weight: float = DEMAND_TIME_WEIGHT,
     route_time_weight: float = ROUTE_TIME_WEIGHT,
     median_connectivity_weight: float = MEDIAN_CONNECTIVITY_WEIGHT,
-    connectivity_mode: str = "legacy",
+    connectivity_mode: str = "median_weighted",
 ):
     """Build an LC-style eval cfg backed by RPC/pi_random instead of weights.
 
@@ -207,7 +207,7 @@ def build_bco_cfg(
     demand_time_weight: float = DEMAND_TIME_WEIGHT,
     route_time_weight: float = ROUTE_TIME_WEIGHT,
     median_connectivity_weight: float = MEDIAN_CONNECTIVITY_WEIGHT,
-    connectivity_mode: str = "legacy",
+    connectivity_mode: str = "median_weighted",
     worse_accept_temperature: float = BCO_WORSE_ACCEPT_TEMPERATURE,
     worse_accept_decay: float = BCO_WORSE_ACCEPT_DECAY,
     worse_accept_min_temperature: float = BCO_WORSE_ACCEPT_MIN_TEMPERATURE,
@@ -418,12 +418,7 @@ def compute_cost_breakdown(dataloader, eval_cfg, cost_obj, routes_tensor, device
     def mean_cpu(x):
         return x.float().mean().detach().cpu()
 
-    # mean-based connectivity (reported only; /60 to match the WMC/MC columns).
-    _mcw = getattr(cho, "mean_connectivity_weighted", None)
-    _mc = getattr(cho, "mean_connectivity", None)
     return {
-        "WMC_mean": mean_cpu(_mcw / 60) if _mcw is not None else float("nan"),
-        "MC_mean": mean_cpu(_mc / 60) if _mc is not None else float("nan"),
         "cost_demand_component": mean_cpu(demand_component),
         "cost_route_component": mean_cpu(route_component),
         "cost_connectivity_component": mean_cpu(connectivity_component),

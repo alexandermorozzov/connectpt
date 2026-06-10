@@ -1610,10 +1610,8 @@ class CostHelperOutput:
     per_route_riders: Optional[Tensor] = None
     cost: Optional[Tensor] = None
     median_connectivity: Optional[Tensor] = None
+    # WMC = weighted_median_connectivity (set per connectivity_mode).
     median_connectivity_weighted: Optional[Tensor] = None
-    # mean (instead of median) connectivity -- reported only, NOT optimized.
-    mean_connectivity: Optional[Tensor] = None
-    mean_connectivity_weighted: Optional[Tensor] = None
 
     @property
     def mean_demand_time(self):
@@ -1655,28 +1653,23 @@ class CostHelperOutput:
                # (self.n_skipped_stops > 0)
     
 
-CONNECTIVITY_MODES = ('legacy', 'mean_weighted', 'median_weighted')
+CONNECTIVITY_MODES = ('mean_weighted', 'median_weighted')
 
 
 class CostModule(torch.nn.Module):
     def __init__(self, mean_stop_time_s=MEAN_STOP_TIME_S,
                  avg_transfer_wait_time_s=AVG_TRANSFER_WAIT_TIME_S,
                  symmetric_routes=True, low_memory_mode=False,
-                 connectivity_mode='legacy'):
+                 connectivity_mode='median_weighted'):
         super().__init__()
         self.mean_stop_time_s = mean_stop_time_s
         self.avg_transfer_wait_time_s = avg_transfer_wait_time_s
         self.symmetric_routes = symmetric_routes
         self.low_memory_mode = low_memory_mode
-        # How the *weighted* connectivity (WMC) is aggregated. In every mode the
-        # per-node value is built from the all-pairs transit times tau_ij over
-        # reachable destinations j (diagonal and unreachable pairs dropped).
-        #   'legacy'          -- median_j( tau_ij * (D_ij / max_l D_lj) ), the
-        #                        original demand-attenuated median. NOTE: the
-        #                        underlying time matrix is now state.transit_times
-        #                        directly (the redundant second Floyd-Warshall,
-        #                        which undercounted transfers, was removed), so
-        #                        legacy values differ slightly from pre-fix runs.
+        # How the *weighted* connectivity (WMC = weighted_median_connectivity) is
+        # aggregated. The per-node value C_i is the demand-weighted travel time to
+        # every other node, with unreachable pairs penalised (modified-Cp,
+        # paper eq. 6):
         #   'mean_weighted'   -- C_i = sum_j (D_ij / sum_j D_ij) *
         #                            (delta_ij tau_ij + (1-delta_ij) 2 max T),
         #                        then C = mean_i C_i. Demand-weighted mean travel
@@ -1797,39 +1790,24 @@ class CostModule(torch.nn.Module):
         n_duplicate_stops = count_duplicate_stops(state.max_n_nodes, 
                                                 batch_routes)
         
-        # Получаем матрицу кратчайших путей
+        # all-pairs transit times (tau_Rij, transfer penalties included)
         all_pairs = self._compute_all_pairs_times_floyd(state)
-        # Берём максимум по строкам (по оси 1)
-        row_max = demand_matrix.max(dim=1, keepdim=True).values  # [N, 1] или [B, N, 1] в батче
-
-        # Чтобы избежать деления на 0
-        row_max = torch.where(row_max == 0, torch.tensor(1., device=row_max.device), row_max)
-
-        # Делим каждую строку на её максимум
-        demand_weight = demand_matrix / row_max
         B, N, _ = all_pairs.shape
 
-        # Убираем диагональ (расстояние от узла к себе)
-        eye = torch.eye(N, device=all_pairs.device).bool().unsqueeze(0)  # [1, N, N]
-        masked = all_pairs.masked_fill(eye, float('nan'))                # [B, N, N]
-
-        # Меняем inf → nan, чтобы их исключить из медианы
-        masked = masked.masked_fill(~masked.isfinite(), float('nan'))    # теперь только достижимые пути
-
-        # === 1. Обычная медианная связанность ===
-        node_medians = torch.nanmedian(masked, dim=2).values              # [B, N]
+        # Plain (unweighted) median connectivity -- REPORTED only. Drop the
+        # diagonal and unreachable pairs (inf -> nan, ignored by the medians).
+        eye = torch.eye(N, device=all_pairs.device).bool().unsqueeze(0)   # [1, N, N]
+        masked = all_pairs.masked_fill(eye, float('nan'))                 # [B, N, N]
+        masked = masked.masked_fill(~masked.isfinite(), float('nan'))     # reachable only
+        node_medians = torch.nanmedian(masked, dim=2).values             # [B, N]
         tmp = torch.nanmean(node_medians, dim=1)
         median_connectivity = torch.where(torch.isnan(tmp), torch.tensor(0., device=tmp.device), tmp)
 
-        # === 2. Взвешенная медианная связанность ===
-        # Маска та же, но домножаем расстояния на веса спроса
-        # demand_weight: [N, N] → добавим ось батча
-        weighted_masked = masked * demand_weight             # [B, N, N]
-        node_medians_w = torch.nanmedian(weighted_masked, dim=2).values   # [B, N]
-        tmp_w = torch.nanmean(node_medians_w, dim=1)
-        median_connectivity_weighted = torch.where(torch.isnan(tmp_w), torch.tensor(0., device=tmp_w.device), tmp_w)
+        # WMC = weighted_median_connectivity, set by the modified-Cp block below
+        # (default connectivity_mode='median_weighted'). Fallback = plain median.
+        median_connectivity_weighted = median_connectivity
 
-        # New modes: per-node demand-weighted MEAN travel time, modified-Cp
+        # Modes: per-node demand-weighted MEAN travel time, modified-Cp
         # style (paper eq. 6) -- unreachable pairs are NOT dropped but penalised
         # with 2 * max_{k,l} T_kl (T = the drive-time matrix), exactly like the
         # passenger cost penalises unserved demand:
@@ -1841,7 +1819,7 @@ class CostModule(torch.nn.Module):
         # yield a genuine travel time on the same scale as ATT and override the
         # WMC used by the cost term (when use_weighted_connectivity) and the
         # reported metric.
-        _conn_mode = getattr(self, 'connectivity_mode', 'legacy')
+        _conn_mode = getattr(self, 'connectivity_mode', 'median_weighted')
         if _conn_mode in ('mean_weighted', 'median_weighted'):
             # all_pairs == state.transit_times (tau_Rij, transfer penalties
             # included) -- the same matrix ATT / the passenger cost use.
@@ -1863,15 +1841,6 @@ class CostModule(torch.nn.Module):
             median_connectivity_weighted = torch.where(
                 torch.isnan(tmp_cw), torch.tensor(0., device=tmp_cw.device), tmp_cw)
 
-        # === 3. Mean variants (REPORTED ONLY -- not used in the cost). Same
-        #        drop-unreachable masking as the medians (inf -> nan, ignored). ===
-        node_means = torch.nanmean(masked, dim=2)                         # [B, N]
-        _tmp_m = torch.nanmean(node_means, dim=1)
-        mean_connectivity = torch.where(torch.isnan(_tmp_m), torch.tensor(0., device=_tmp_m.device), _tmp_m)
-        node_means_w = torch.nanmean(weighted_masked, dim=2)              # [B, N]
-        _tmp_mw = torch.nanmean(node_means_w, dim=1)
-        mean_connectivity_weighted = torch.where(torch.isnan(_tmp_mw), torch.tensor(0., device=_tmp_mw.device), _tmp_mw)
-
         unserved_demand_matrix = demand_matrix * nopath
 
         output = CostHelperOutput(
@@ -1882,8 +1851,6 @@ class CostModule(torch.nn.Module):
             unserved_demand_matrix,
             median_connectivity=median_connectivity,
             median_connectivity_weighted=median_connectivity_weighted,
-            mean_connectivity=mean_connectivity,
-            mean_connectivity_weighted=mean_connectivity_weighted,
         )
 
         if return_per_route_riders:
@@ -1922,7 +1889,7 @@ class MyCostModule(CostModule):
                  enabled_components=None, disabled_components=None,
                  adjustment_degree_weight=0.0, adjustment_degree_target=0.2,
                  adjustment_degree_objective='raw', adjustment_degree_gap=0.1,
-                 adjustment_degree_mode='paper', connectivity_mode='legacy'):
+                 adjustment_degree_mode='paper', connectivity_mode='median_weighted'):
         super().__init__(mean_stop_time_s, avg_transfer_wait_time_s,
                          symmetric_routes, low_memory_mode,
                          connectivity_mode=connectivity_mode)

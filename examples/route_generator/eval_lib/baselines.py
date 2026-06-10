@@ -56,7 +56,7 @@ HH_N_ITERATIONS = 20000
 
 
 def _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len,
-                            connectivity_mode="legacy"):
+                            connectivity_mode="median_weighted"):
     return [
         "+eval=mumford0",
         "++eval.dataset.type=tensor",
@@ -95,7 +95,7 @@ def _early_stop_overrides(early_stop_patience, early_stop_min_delta):
 def build_sa_cfg(run_name, n_routes, min_route_len, max_route_len,
                  n_iterations=SA_N_ITERATIONS,
                  early_stop_patience=None, early_stop_min_delta=0.0,
-                 connectivity_mode="legacy"):
+                 connectivity_mode="median_weighted"):
     overrides = _baseline_cfg_overrides(
         run_name, n_routes, min_route_len, max_route_len, connectivity_mode)
     overrides.append(f"++alg_args.n_iterations={n_iterations}")
@@ -106,7 +106,7 @@ def build_sa_cfg(run_name, n_routes, min_route_len, max_route_len,
 def build_ga_cfg(run_name, n_routes, min_route_len, max_route_len,
                  n_iterations=GA_N_ITERATIONS, population_size=GA_POP_SIZE,
                  early_stop_patience=None, early_stop_min_delta=0.0,
-                 connectivity_mode="legacy"):
+                 connectivity_mode="median_weighted"):
     overrides = _baseline_cfg_overrides(
         run_name, n_routes, min_route_len, max_route_len, connectivity_mode)
     overrides.append(f"++n_iterations={n_iterations}")
@@ -118,7 +118,7 @@ def build_ga_cfg(run_name, n_routes, min_route_len, max_route_len,
 def build_hh_cfg(run_name, n_routes, min_route_len, max_route_len,
                  n_iterations=HH_N_ITERATIONS, max_repair_iters=None,
                  early_stop_patience=None, early_stop_min_delta=0.0,
-                 connectivity_mode="legacy"):
+                 connectivity_mode="median_weighted"):
     overrides = _baseline_cfg_overrides(
         run_name, n_routes, min_route_len, max_route_len, connectivity_mode)
     overrides.append(f"++n_iterations={n_iterations}")
@@ -281,7 +281,7 @@ NSGAII_POP_SIZE = 200
 
 def build_nsgaii_cfg(run_name, n_routes, min_route_len, max_route_len,
                      n_iterations=NSGAII_N_ITERATIONS, pop_size=NSGAII_POP_SIZE,
-                     connectivity_mode="legacy"):
+                     connectivity_mode="median_weighted"):
     overrides = [
         "+eval=mumford0",
         "++eval.dataset.type=tensor",

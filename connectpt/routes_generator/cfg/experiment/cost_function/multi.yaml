@@ -7,3 +7,5 @@ kwargs:
   # preference-conditioned neural generation, which the Husselmann variant
   # does not use.
   variable_weights: true
+  # WMC = weighted_median_connectivity (used by the unified NSGA objective).
+  connectivity_mode: median_weighted
