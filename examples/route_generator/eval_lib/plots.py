@@ -18,6 +18,8 @@ Canonical lineage: V2 of cell ``80161e50`` in
 """
 from __future__ import annotations
 
+from collections import Counter
+
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -386,9 +388,12 @@ def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
                     palette="tab20", with_overlap_curves=True):
     """Draw ``routes`` overlaid with diff markings vs ``reference_routes``.
 
-    Edges only in the reference are drawn as dashed grey lines; shared edges
-    are dimmed in the route color; new edges are emphasized in the route
-    color. Nodes added/removed/shared are marked distinctly.
+    Edge coverage that the candidate dropped relative to the seed is drawn as
+    dashed grey lines -- this is multiplicity-aware, so trimming a duplicated
+    edge from several routes down to fewer (or zero) shows one dashed copy per
+    lost coverage, not just full removals. Shared edges are dimmed in the route
+    color; edges new to the network are emphasized in the route color. Nodes
+    added/removed are marked distinctly.
 
     Like :func:`plot_plain_route_set`, accepts either the PyG-graph
     convention ``(..., graph, title, ...)`` or the raw-arrays convention
@@ -410,27 +415,52 @@ def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
     # them); removed edges are not in the candidate so they need no curving.
     overlap_map = build_edge_overlap_map(routes) if with_overlap_curves else None
 
-    # NETWORK-level edge sets (undirected key -> a representative edge). The diff
-    # is over the whole network, NOT per route slot, so reordering routes between
-    # the seed and the candidate is not shown as spurious removed/added edges.
-    def _net_edges(route_set):
-        m = {}
+    # NETWORK-level edge MULTISETS (undirected key -> coverage count + a
+    # representative edge). The diff is over the whole network WITH multiplicity,
+    # NOT per route slot: reordering routes between the seed and the candidate is
+    # not flagged, but reducing how many routes cover an edge IS. So a duplicated
+    # edge trimmed from 3 routes down to 1 shows up as two removed copies -- the
+    # core dedup signal, which a plain set difference would hide.
+    def _net_counts(route_set):
+        counts, rep = Counter(), {}
         for route_tensor in route_set:
             for edge in route_edge_list(route_to_list(route_tensor)):
-                m.setdefault(undirected_edge_key(edge), edge)
-        return m
+                key = undirected_edge_key(edge)
+                counts[key] += 1
+                rep.setdefault(key, edge)
+        return counts, rep
 
-    ref_edge_map = _net_edges(reference_routes)
-    cand_edge_map = _net_edges(routes)
-    removed_keys = set(ref_edge_map) - set(cand_edge_map)
+    ref_counts, ref_rep = _net_counts(reference_routes)
+    cand_counts, _ = _net_counts(routes)
+    ref_edge_map = ref_rep  # presence test for the per-route classification below
 
-    # edges only in the seed network -> dashed grey (drawn once; they coincide
-    # with no candidate edge, so nothing can hide them).
-    if removed_keys:
-        plot_edges(
-            ax, coords, [ref_edge_map[k] for k in removed_keys],
-            color="dimgray", linewidth=2.2, alpha=0.85, linestyle="--", zorder=2,
-        )
+    def _removed_rad(slot):
+        # straight for the first copy; fan further copies out (alternating sides)
+        # so a trimmed duplicate stays visible next to the kept candidate edge.
+        if slot == 0:
+            return 0.0
+        sign = 1.0 if slot % 2 == 1 else -1.0
+        lane = (slot + 1) // 2
+        return sign * min(lane * 0.16, 0.28)
+
+    # removed COPIES: any edge whose candidate coverage dropped below the seed
+    # coverage (full removal, or a duplicate trimmed away) -> dashed grey arcs.
+    for key, ref_n in ref_counts.items():
+        cand_n = cand_counts.get(key, 0)
+        edge = ref_rep[key]
+        start_xy, end_xy = coords[edge[0]], coords[edge[1]]
+        for j in range(ref_n - cand_n):
+            rad = _removed_rad(cand_n + j)
+            if abs(rad) < 1e-9:
+                ax.plot([start_xy[0], end_xy[0]], [start_xy[1], end_xy[1]],
+                        color="dimgray", linewidth=2.2, alpha=0.85,
+                        linestyle="--", solid_capstyle="round", zorder=2)
+            else:
+                ax.add_patch(FancyArrowPatch(
+                    posA=start_xy, posB=end_xy, arrowstyle="-",
+                    connectionstyle=f"arc3,rad={rad:.4f}", color="dimgray",
+                    linewidth=2.2, alpha=0.85, linestyle="--",
+                    shrinkA=0, shrinkB=0, mutation_scale=1, zorder=2))
 
     # candidate edges, per route, classified added (new to the network) vs
     # shared (also in the seed network), coloured by route.
