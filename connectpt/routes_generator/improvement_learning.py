@@ -2037,7 +2037,8 @@ def train_lc_improvement_cfg_ppo(
         max_trim_actions_per_route=None, train_indices=None, val_indices=None,
         best_model_path=None,
         max_rollout_samples=8192, target_n_routes=None,
-        curriculum_fn=None, history_checkpoint_path=None):
+        curriculum_fn=None, val_curriculum_fn=None,
+        history_checkpoint_path=None):
     """Train LC improvement with the construction PPO machinery adapted to edits.
 
     ``curriculum_fn(iteration) -> (indices, stage_label)`` optionally restricts
@@ -2529,8 +2530,16 @@ def train_lc_improvement_cfg_ppo(
             or iteration == int(n_iterations) - 1
         )
         if eval_due:
+            # Curriculum-aware validation: when a val_curriculum_fn is given,
+            # validate ONLY on the tiers currently active in training, so the
+            # validation signal (and best-checkpoint selection) is comparable to
+            # what the agent is being trained on. At the final stage all tiers
+            # are active, so this reduces to the full validation set.
+            active_val_indices = (val_curriculum_fn(iteration)
+                                  if val_curriculum_fn is not None
+                                  else val_indices)
             last_val = evaluate_lc_improvement(
-                model, cost_obj, graphs, seed_routes, val_indices, device,
+                model, cost_obj, graphs, seed_routes, active_val_indices, device,
                 min_route_len, max_route_len,
                 batch_size=effective_batch_size,
                 force_nonhalt_first_step=force_nonhalt_first_step,
@@ -2634,30 +2643,29 @@ def train_lc_improvement_cfg_ppo(
         history.append(row)
         _write_history_checkpoint(history, history_checkpoint_path)
 
+        # Unified, comparable progress metrics: the per-episode reward is the
+        # mean cost reduction over an episode (seed - final), computed the SAME
+        # way for train and validation, so train_ep_rew, val_ep_rew and their
+        # gap are directly comparable. (Train is at the per-batch sampled cost
+        # weights / adjustment target; validation at the fixed eval operating
+        # point.) Everything else stays in the history DataFrame for the figure
+        # and TensorBoard, but is kept out of the live line to reduce clutter.
+        _tr_ep = row["train_delta"]
+        _va_ep = row["val_delta"]
+        _gap = (_tr_ep - _va_ep
+                if _tr_ep == _tr_ep and _va_ep == _va_ep else float("nan"))
+        row["train_val_gap"] = _gap
         pbar.set_postfix({
-            "reward": f"{row['train_reward_mean']:.3f}",
-            "t_ret": f"{row['train_return_mean']:.3f}",
-            "delta": f"{row['train_delta']:.3f}",
-            "ratio": f"{row['train_ppo_ratio_mean']:.3f}",
-            "clip": f"{row['train_ppo_clip_fraction']:.2%}",
+            "stage": cur_stage_label,
+            "tr_rew": f"{_tr_ep:+.3f}",
+            "val_rew": f"{_va_ep:+.3f}",
+            "gap": f"{_gap:+.3f}",
         })
         print(
-            f"cfg_ppo_iter={row['iteration']:03d} "
-            f"reward={row['train_reward_mean']:.4f} "
-            f"reward_ep={row['train_reward_per_episode']:.4f} "
-            f"reward_delta_err={row['train_reward_delta_residual']:.4f} "
-            f"train_ret={row['train_return_mean']:.4f} "
-            f"train_delta={row['train_delta']:.4f} "
-            f"val_delta={row['val_delta']:.4f} "
-            f"ratio={row['train_ppo_ratio_mean']:.3f} "
-            f"clip={row['train_ppo_clip_fraction']:.2%} "
-            f"actions="
-            f"ext:{row['train_action_extend_count']} "
-            f"trim_s:{row['train_action_trim_start_count']} "
-            f"trim_e:{row['train_action_trim_end_count']} "
-            f"halt:{row['train_action_halt_count']} "
-            f"avg_steps={row['train_action_avg_actions_per_route']:.2f} "
-            f"eval={row['is_eval_iteration']}"
+            f"iter={row['iteration']:03d} stage={cur_stage_label:<10} "
+            f"train_ep_rew={_tr_ep:+.4f} val_ep_rew={_va_ep:+.4f} "
+            f"train_val_gap={_gap:+.4f}"
+            + ("  [eval]" if eval_due else "")
         )
         # Do not keep the previous rollout reachable while collecting the
         # next one. This matters especially when rollout states stay on GPU.
@@ -2697,6 +2705,7 @@ def train_lc_improvement_cfg_d3po(
         max_trim_actions_per_route=None, train_indices=None, val_indices=None,
         best_model_path=None,
         max_rollout_samples=8192, target_n_routes=None,
+        curriculum_fn=None, val_curriculum_fn=None,
         history_checkpoint_path=None):
     """Train LC improvement with D3PO as a PPO alternative.
 
@@ -3013,8 +3022,16 @@ def train_lc_improvement_cfg_d3po(
             or iteration == int(n_iterations) - 1
         )
         if eval_due:
+            # Curriculum-aware validation: when a val_curriculum_fn is given,
+            # validate ONLY on the tiers currently active in training, so the
+            # validation signal (and best-checkpoint selection) is comparable to
+            # what the agent is being trained on. At the final stage all tiers
+            # are active, so this reduces to the full validation set.
+            active_val_indices = (val_curriculum_fn(iteration)
+                                  if val_curriculum_fn is not None
+                                  else val_indices)
             last_val = evaluate_lc_improvement(
-                model, cost_obj, graphs, seed_routes, val_indices, device,
+                model, cost_obj, graphs, seed_routes, active_val_indices, device,
                 min_route_len, max_route_len,
                 batch_size=effective_batch_size,
                 force_nonhalt_first_step=force_nonhalt_first_step,
