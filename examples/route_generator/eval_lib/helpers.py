@@ -40,6 +40,10 @@ from . import plots as _plots
 # once via set_input_tensors(); this replaces the old `input_tensors` global.
 INPUT_TENSORS = None
 
+# Adjustment-conditioning feature count of the edit-model checkpoint pointed
+# to by EDIT_MODEL_WEIGHTS_PATH (0 = unconditioned legacy checkpoints).
+EDIT_MODEL_N_ADJ_COND_FEATS = 0
+
 
 def set_input_tensors(tensors):
     """Register the default benchmark tensors used by make_test_dataloader."""
@@ -485,6 +489,14 @@ def build_edit_model(device, weights_path=None, load_weights=True):
         "++run_name=eval_seeded_edit_model",
         "++experiment.logdir=null",
     ]
+    # Checkpoints trained with adjustment conditioning carry 1-2 extra global
+    # features; the architecture must match or load_state_dict fails. Set
+    # eval_lib.helpers.EDIT_MODEL_N_ADJ_COND_FEATS alongside
+    # EDIT_MODEL_WEIGHTS_PATH when pointing at a conditioned checkpoint.
+    if EDIT_MODEL_N_ADJ_COND_FEATS:
+        overrides.append(
+            "++model.route_generator.kwargs.n_adjustment_cond_feats="
+            f"{int(EDIT_MODEL_N_ADJ_COND_FEATS)}")
     if load_weights:
         overrides.append(f"+model.weights='{weights_path}'")
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):

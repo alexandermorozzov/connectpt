@@ -744,6 +744,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                                 ignore_type4_max_route_len=
                                 ignore_type4_max_route_len,
                                 type5_allow_halt=type5_allow_halt,
+                                adj_condition_target=adjustment_degree_target,
+                                adj_condition_weight=adjustment_degree_weight,
                                 ignore_type5_max_route_len=
                                 ignore_type5_max_route_len,
                                 ignore_type6_max_route_len=
@@ -1002,6 +1004,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
                 rpc_model=None, env_state=None, n_type4=0,
                 n_type5=0, n_type6=0, n_type7=0, edit_model=None,
                 type5_allow_halt=True,
+                adj_condition_target=None, adj_condition_weight=None,
                 ignore_type4_max_route_len=False,
                 ignore_type5_max_route_len=False,
                 ignore_type6_max_route_len=False,
@@ -1121,6 +1124,8 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
             chosen_route_idxs,
             ignore_max_route_len=ignore_type5_max_route_len,
             allow_halt=type5_allow_halt,
+            adj_condition_target=adj_condition_target,
+            adj_condition_weight=adj_condition_weight,
         )
         type5_gather = chosen_route_idxs[:, type5_idxs, None, None].expand(
             -1, -1, -1, max_n_nodes)
@@ -1306,7 +1311,9 @@ def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs
 def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
                              greedy=False, ignore_max_route_len=False,
                              allow_extend=True, allow_trim_start=True,
-                             allow_trim_end=True, allow_halt=True):
+                             allow_trim_end=True, allow_halt=True,
+                             adj_condition_target=None,
+                             adj_condition_weight=None):
     """Apply one edit step (extend / trim_start / trim_end / halt) per bee.
 
     Like ``get_neural_extend_variants`` but the model is allowed to choose
@@ -1348,6 +1355,22 @@ def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
     with env_state.defer_route_data_update():
         env_state.replace_routes(flat_kept)
         env_state.set_current_routes(flat_chosen)
+    # Adjustment-conditioned edit models expect 1-2 extra global features
+    # (target [, weight]). The state-level gate feeds EVERY model that reads
+    # this state, so set it only around the edit-model calls and clear it
+    # afterwards (the construction bee model is built without these feats).
+    n_cond = int(getattr(model, 'n_adjustment_cond_feats', 0) or 0)
+    if n_cond > 0:
+        if adj_condition_target is None:
+            raise ValueError(
+                "edit model was trained with adjustment conditioning "
+                f"(n_adjustment_cond_feats={n_cond}) but no "
+                "adj_condition_target was provided")
+        env_state.set_adjustment_conditioning(
+            float(adj_condition_target),
+            weight=(float(adj_condition_weight)
+                    if (n_cond >= 2 and adj_condition_weight is not None)
+                    else None))
     env_state = model.setup_planning(env_state)
 
     pre_step_routes = env_state.current_routes.clone()
@@ -1373,6 +1396,9 @@ def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
             allow_halt=allow_halt)
 
     halted = action_kinds == ROUTE_ACTION_HALT
+    if n_cond > 0:
+        # back to the sentinel: other (unconditioned) models share this state
+        env_state.set_adjustment_conditioning(-1.0, weight=None)
     env_state.apply_route_actions(action_kinds, action)
 
     post_step_routes = env_state.current_routes.clone()
