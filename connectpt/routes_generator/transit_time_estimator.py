@@ -2,6 +2,7 @@ import logging as log
 import copy
 import math
 from collections import deque
+from contextlib import contextmanager
 from typing import Union
 from collections.abc import Sequence
 
@@ -552,24 +553,27 @@ class RouteGenBatchState:
             updated_routes[bi, :len(trimmed)] = trimmed
 
     def _replace_planned_routes(self, finished_routes, current_routes):
-        self._clear_routes_helper()
-        if self.extra_data.fixed_routes.numel() > 0:
-            self._add_routes_to_tensors(self.extra_data.fixed_routes)
-            self._add_routes_to_context_masks(self.extra_data.fixed_routes)
+        # one transit-data rebuild for the whole replace + re-seed sequence
+        with self.defer_route_data_update():
+            self._clear_routes_helper()
+            if self.extra_data.fixed_routes.numel() > 0:
+                self._add_routes_to_tensors(self.extra_data.fixed_routes)
+                self._add_routes_to_context_masks(self.extra_data.fixed_routes)
 
-        has_finished_routes = any(len(routes) > 0 for routes in finished_routes)
-        if has_finished_routes:
-            finished_tensor = tu.get_batch_tensor_from_routes(
-                finished_routes, self.device
-            )
-            self.add_new_routes(finished_tensor)
-        else:
-            self._update_route_data()
+            has_finished_routes = any(len(routes) > 0
+                                      for routes in finished_routes)
+            if has_finished_routes:
+                finished_tensor = tu.get_batch_tensor_from_routes(
+                    finished_routes, self.device
+                )
+                self.add_new_routes(finished_tensor)
+            else:
+                self._update_route_data()
 
-        if current_routes.device != self.device:
-            current_routes = current_routes.to(self.device)
-        if (current_routes > -1).any():
-            self.set_current_routes(current_routes)
+            if current_routes.device != self.device:
+                current_routes = current_routes.to(self.device)
+            if (current_routes > -1).any():
+                self.set_current_routes(current_routes)
 
     def _clear_routes_helper(self, batch_index=None):
         if batch_index is None:
@@ -699,16 +703,17 @@ class RouteGenBatchState:
                 accumulate=True,
             )
     
-    def replace_routes(self, batch_new_routes, 
-                only_routes_with_demand_are_valid=False, 
+    def replace_routes(self, batch_new_routes,
+                only_routes_with_demand_are_valid=False,
                 invalid_directly_connected=False):
-        self._clear_routes_helper()
-        if self.extra_data.fixed_routes.numel() > 0:
-            self._add_routes_to_tensors(self.extra_data.fixed_routes)
-            self._add_routes_to_context_masks(self.extra_data.fixed_routes)
-        self.add_new_routes(batch_new_routes, 
-                            only_routes_with_demand_are_valid,
-                            invalid_directly_connected)
+        with self.defer_route_data_update():
+            self._clear_routes_helper()
+            if self.extra_data.fixed_routes.numel() > 0:
+                self._add_routes_to_tensors(self.extra_data.fixed_routes)
+                self._add_routes_to_context_masks(self.extra_data.fixed_routes)
+            self.add_new_routes(batch_new_routes,
+                                only_routes_with_demand_are_valid,
+                                invalid_directly_connected)
 
     def clear_routes(self):
         self._clear_routes_helper()
@@ -874,11 +879,38 @@ class RouteGenBatchState:
                     continue
                 self._finished_routes[bi].append(route[:length])
     
+    @contextmanager
+    def defer_route_data_update(self):
+        """Batch several route-tensor mutations into ONE _update_route_data.
+
+        Several mutation paths (replace + seed current route) rebuild the
+        transit data twice back-to-back although nothing reads the
+        intermediate result. _update_route_data is a pure function of
+        route_mat / transfer times, so running it once after the last
+        mutation yields exactly the tensors the eager per-mutation updates
+        would have produced -- bit-identical results, half the Floyd-Warshall
+        work on those paths.
+        """
+        if getattr(self, '_route_update_deferred', False):
+            yield   # already inside an outer deferral; its exit will update
+            return
+        self._route_update_deferred = True
+        try:
+            yield
+        finally:
+            self._route_update_deferred = False
+            self._update_route_data()
+
     def _update_route_data(self):
+        if getattr(self, '_route_update_deferred', False):
+            return
         # do things that have to be done whether we added or removed routes
         fw_mat = self.route_mat + self.transfer_time_s[:, None, None]
         nexts, transit_times = tu.floyd_warshall(fw_mat)
-        _, path_edge_counts = tu.reconstruct_all_paths(nexts)
+        # node counts of the shortest paths; identical to
+        # reconstruct_all_paths(nexts)[1] but without materializing the full
+        # (B, N, N, max_len) path tensor (only the counts are needed here).
+        path_edge_counts = tu.count_path_nodes(nexts)
         # subtract one transfer time from each transit time to avoid counting
          # a transfer for the first edge of a journey
         transit_times -= self.transfer_time_s[:, None, None]

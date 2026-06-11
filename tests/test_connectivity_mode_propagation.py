@@ -194,14 +194,15 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
     )
 
     # Both the PART 1 (training) and PART 2 (experiments) config cells import
-    # the unified objective from eval_lib.params; no local re-definitions.
+    # the unified objective from eval_lib.params; no local re-definitions of
+    # the shared names (line-anchored so experiment-local prefixed constants
+    # like M0_NBCO_ADJ_TARGET stay allowed).
+    import re
     assert text.count("from eval_lib.params import") == 2
-    assert 'CONNECTIVITY_MODE = "' not in text
-    assert "DISABLED_COST_COMPONENTS = [" not in text
-    assert "ADJ_WEIGHT = " not in text
-    assert "ADJ_TARGET = " not in text
-    assert "ADJ_OBJECTIVE = " not in text
-    assert "UNIFIED_COST_WEIGHTS = dict" not in text
+    for name in ("CONNECTIVITY_MODE", "DISABLED_COST_COMPONENTS", "ADJ_WEIGHT",
+                 "ADJ_TARGET", "ADJ_OBJECTIVE", "UNIFIED_COST_WEIGHTS"):
+        assert not re.search(rf"^{name} *=", text, re.M), \
+            f"{name} is re-defined in the notebook (params.py is the source)"
     assert "RUN_NSGAII_BASELINES = False" in text
     assert "if RUN_NSGAII_BASELINES:" in text
     # E1 legacy (ATT+RTT baselines / main_df) was removed; only the unified
@@ -260,4 +261,6 @@ def test_paper_combined_uses_two_sided_adj_objective():
     assert 'adjustment_degree_objective="target"' not in text
     assert "adj_objective=ADJ_OBJECTIVE" in text or "objective=ADJ_OBJECTIVE" in text
     assert text.count("**UNIFIED_ADJ") >= 3
-    assert text.count("**dict(UNIFIED_ADJ") == 2  # our-model + E2 (variable target)
+    # our-model + E2 sweep override the target via dict(UNIFIED_ADJ, ...);
+    # additional experiment cells may add more such overrides.
+    assert text.count("**dict(UNIFIED_ADJ") >= 2

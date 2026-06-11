@@ -234,6 +234,46 @@ def reconstruct_all_paths(nexts):
     return path_tensor, path_lens
 
 
+def count_path_nodes(nexts):
+    """Node counts of the shortest paths encoded by ``nexts``.
+
+    Returns exactly ``reconstruct_all_paths(nexts)[1]`` (0 on the diagonal and
+    for unreachable pairs) but walks the ``nexts`` matrix with a vectorized
+    pointer chase instead of materializing the full (B, N, N, max_len) path
+    tensor -- much cheaper in both time and memory. The walk follows the same
+    pointers, so tie-broken equal-cost paths yield identical counts.
+    """
+    has_batch_dim = nexts.ndim == 3
+    nx = nexts if has_batch_dim else nexts[None]
+    batch_size, n_nodes, _ = nx.shape
+    dev = nx.device
+    node_idxs = torch.arange(n_nodes, device=dev)
+    dst = node_idxs[None, None, :].expand(batch_size, n_nodes, n_nodes)
+
+    flat_nx = nx.reshape(batch_size, -1)
+    cur = nx.clone()                     # first hop from source toward dst
+    # source + the first hop = 2 nodes; each further step below adds one.
+    # (the diagonal / unreachable entries are overwritten to 0 at the end.)
+    counts = torch.full((batch_size, n_nodes, n_nodes), 2, dtype=torch.long,
+                        device=dev)
+    active = (cur != dst) & (cur >= 0)
+    for _ in range(n_nodes):
+        if not active.any():
+            break
+        counts[active] += 1
+        step_idx = (cur.clamp(min=0) * n_nodes + dst).reshape(batch_size, -1)
+        nxt = flat_nx.gather(1, step_idx).reshape(batch_size, n_nodes, n_nodes)
+        cur = torch.where(active, nxt, cur)
+        active = active & (cur != dst) & (cur >= 0)
+
+    # match reconstruct_all_paths: 0 for unreachable pairs and the diagonal
+    counts[nx == -1] = 0
+    counts[:, node_idxs, node_idxs] = 0
+    if not has_batch_dim:
+        counts = counts.squeeze(0)
+    return counts
+
+
 def aggregate_node_features(nexts, features, agg_mode="sum", 
                             return_node_counts=False):
     """

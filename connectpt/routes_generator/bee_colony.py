@@ -78,6 +78,29 @@ def _get_alignment_scores(candidate_routes, reference_routes, symmetric_routes,
 
     cand_valid = flat_candidates > -1
     ref_valid = flat_references > -1
+    cand_lens = cand_valid.sum(dim=-1)
+    ref_lens = ref_valid.sum(dim=-1)
+
+    # Fast path for identical route pairs (the common case: a mutation step
+    # changes one route per network, the rest still equal the reference).
+    # With gap == 0 the NW score of an identical pair is exactly its length
+    # (a sum of 1.0 match scores -- exact in fp32), and the reversed
+    # alignment can never exceed it, so the maximum is the length itself.
+    # Only the non-identical pairs go through the expensive DP; NW rows are
+    # independent, so subsetting yields bit-identical scores for them.
+    if gap == 0.0:
+        identical = (flat_candidates == flat_references).all(dim=-1)
+        if identical.any():
+            alignment_scores = cand_lens.to(torch.float32)
+            differing = ~identical
+            if differing.any():
+                diff_scores, _, _ = _get_alignment_scores(
+                    flat_candidates[differing], flat_references[differing],
+                    symmetric_routes, gap)
+                alignment_scores = alignment_scores.clone()
+                alignment_scores[differing] = diff_scores
+            return alignment_scores, cand_lens, ref_lens
+
     pairwise_matches = flat_candidates[:, :, None] == flat_references[:, None, :]
     valid_pairwise_matches = pairwise_matches & cand_valid[:, :, None] & ref_valid[:, None, :]
     alignment_scores = needleman_wunsch(valid_pairwise_matches.to(torch.float32),
@@ -1214,8 +1237,10 @@ def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs
     flat_kept = bee_networks[keep_mask].reshape(
         batch_size * n_bees, n_routes - 1, max_n_nodes)
 
-    env_state.replace_routes(flat_kept)
-    env_state.set_current_routes(flat_chosen)
+    # one transit-data rebuild for the replace + seed-current pair
+    with env_state.defer_route_data_update():
+        env_state.replace_routes(flat_kept)
+        env_state.set_current_routes(flat_chosen)
     env_state = model.setup_planning(env_state)
 
     pre_step_routes = env_state.current_routes.clone()
@@ -1315,8 +1340,10 @@ def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
     flat_kept = bee_networks[keep_mask].reshape(
         batch_size * n_bees, n_routes - 1, max_n_nodes)
 
-    env_state.replace_routes(flat_kept)
-    env_state.set_current_routes(flat_chosen)
+    # one transit-data rebuild for the replace + seed-current pair
+    with env_state.defer_route_data_update():
+        env_state.replace_routes(flat_kept)
+        env_state.set_current_routes(flat_chosen)
     env_state = model.setup_planning(env_state)
 
     pre_step_routes = env_state.current_routes.clone()
