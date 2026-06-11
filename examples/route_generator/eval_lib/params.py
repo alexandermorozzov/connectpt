@@ -32,11 +32,18 @@ UNIFIED_COST_WEIGHTS = dict(
     median_connectivity_weight=MEDIAN_CONNECTIVITY_WEIGHT,
 )
 
-# Adjustment-degree penalty: ADJ_WEIGHT * |adj - ADJ_TARGET| (two-sided
-# "target" objective -- deviating below the target is penalized too).
+# Adjustment-degree penalty. The SEARCH (BCO acceptance, E1u/E2 experiments)
+# uses the two-sided "target" objective ADJ_WEIGHT * |adj - ADJ_TARGET|: the
+# front is anchored at the prescribed modification budget. TRAINING reward
+# shaping uses the one-sided "cap" max(0, adj - ADJ_TARGET) instead -- a
+# two-sided term as a *reward* pays the agent for arbitrary changes up to the
+# target (and rewards corrupting clean networks), drowning the RTT/WMC signal;
+# as a budget upper bound it leaves the improvement reward untouched below the
+# target. Both penalize the NETWORK-mean degree.
 ADJ_WEIGHT = 10.0
 ADJ_TARGET = 0.2
-ADJ_OBJECTIVE = "target"
+ADJ_OBJECTIVE = "target"        # eval / BCO search acceptance
+ADJ_TRAIN_OBJECTIVE = "cap"     # PPO reward shaping (training only)
 ADJ_GAP = 0.1
 ADJ_MODE = "paper"
 

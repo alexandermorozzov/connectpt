@@ -67,3 +67,33 @@ def test_cap_objective_no_penalty_below_target():
     m.adjustment_seed = tu.get_batch_tensor_from_routes(seed)
     pen = m._adjustment_penalty(_stub_state(cur), torch.zeros(1))
     assert float(pen) == 0.0
+
+
+def test_training_penalty_matches_cost_module_form():
+    """network_adjustment_penalty (PPO shaping) must equal the eval/BCO form:
+    weight * get_adjustment_penalties(mean_i adj_i) -- penalty OF the mean,
+    not mean of per-route penalties."""
+    from connectpt.routes_generator.improvement_learning import (
+        network_adjustment_penalty)
+    torch.manual_seed(0)
+    for objective in ("raw", "cap", "cap_sq", "target"):
+        for _ in range(5):
+            degrees = torch.rand(7, 12)        # [batch, n_routes]
+            w, tgt = 10.0, 0.2
+            want = w * get_adjustment_penalties(
+                degrees.mean(dim=-1), objective=objective, target=tgt)
+            got = network_adjustment_penalty(degrees, w, tgt, objective)
+            assert torch.allclose(got, want), objective
+    # concentrated rewrite of ONE route stays inside the network budget:
+    # 1 of 12 routes fully changed -> mean 1/12 < 0.2 -> cap penalty must be 0
+    degrees = torch.zeros(1, 12)
+    degrees[0, 0] = 1.0
+    pen = network_adjustment_penalty(degrees, 10.0, 0.2, "cap")
+    assert float(pen) == 0.0
+    # per-batch tensor target/weight (adjustment conditioning) broadcast
+    degrees = torch.rand(4, 12)
+    tgt = torch.tensor([0.1, 0.2, 0.3, 0.4])
+    w = torch.tensor([1.0, 2.0, 5.0, 10.0])
+    got = network_adjustment_penalty(degrees, w, tgt, "target")
+    want = w * (degrees.mean(-1) - tgt).abs()
+    assert torch.allclose(got, want)

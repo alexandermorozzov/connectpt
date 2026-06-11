@@ -174,7 +174,8 @@ def test_params_is_single_source_of_unified_objective():
     }
     assert params.ADJ_WEIGHT == 10.0
     assert params.ADJ_TARGET == 0.2
-    assert params.ADJ_OBJECTIVE == "target"
+    assert params.ADJ_OBJECTIVE == "target"        # search / BCO acceptance
+    assert params.ADJ_TRAIN_OBJECTIVE == "cap"     # PPO reward shaping
     # UNIFIED_ADJ is built from the params constants.
     assert paper.UNIFIED_ADJ == {
         "adjustment_degree_weight": params.ADJ_WEIGHT,
@@ -259,7 +260,10 @@ def test_paper_combined_uses_two_sided_adj_objective():
     # params test pins to the two-sided "target" objective). No literals left.
     assert 'adjustment_degree_objective="cap"' not in text
     assert 'adjustment_degree_objective="target"' not in text
-    assert "adj_objective=ADJ_OBJECTIVE" in text or "objective=ADJ_OBJECTIVE" in text
+    # PART 1 training shapes with the one-sided cap (ADJ_TRAIN_OBJECTIVE);
+    # PART 2 search uses ADJ_OBJECTIVE via UNIFIED_ADJ.
+    assert "adj_objective=ADJ_TRAIN_OBJECTIVE" in text \
+        or "objective=ADJ_TRAIN_OBJECTIVE" in text
     assert text.count("**UNIFIED_ADJ") >= 3
     # our-model + E2 sweep override the target via dict(UNIFIED_ADJ, ...);
     # additional experiment cells may add more such overrides.

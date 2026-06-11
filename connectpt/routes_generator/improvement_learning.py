@@ -546,6 +546,32 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
     return output
 
 
+def network_adjustment_penalty(route_degrees, weight, target, objective):
+    """Network-level adjustment penalty: ``weight * penalty(mean_i adj_i)``.
+
+    This is the same form as MyCostModule._adjustment_penalty (the eval / BCO
+    objective): the per-route degrees are averaged into one network degree
+    FIRST, and the cap / target / cap_sq transform is applied to that mean.
+    ``weight`` and ``target`` may be scalars or per-batch tensors (adjustment
+    conditioning).
+    """
+    network_degree = route_degrees.mean(dim=-1)
+    tgt = torch.as_tensor(target, dtype=network_degree.dtype,
+                          device=network_degree.device)
+    if objective == "cap":
+        pen = (network_degree - tgt).clamp(min=0.0)
+    elif objective == "cap_sq":
+        pen = (network_degree - tgt).clamp(min=0.0) ** 2
+    elif objective == "target":
+        pen = (network_degree - tgt).abs()
+    elif objective == "raw":
+        pen = network_degree
+    else:
+        raise ValueError(
+            f"Unknown adjustment degree objective '{objective}'.")
+    return weight * pen
+
+
 def _route_change_mask(seed_routes, generated_routes):
     seed_routes = seed_routes.detach()
     generated_routes = generated_routes.detach().to(seed_routes.device)
@@ -2247,58 +2273,50 @@ def train_lc_improvement_cfg_ppo(
     # and the fixed cfg scalars are used.
     cur_adj_target = None    # [batch] tensor or None
     cur_adj_weight = None    # [batch] tensor or None
-    # Cached per-route penalties (shape [batch, n_routes]) for the current
-    # episode. Only the slot being edited changes within an episode, so we
-    # compute the full vector once per episode and refresh only the edited route
-    # per step (avoids an n_routes-wide Needleman-Wunsch every step).
-    episode_route_pen_holder = [None]
-
-    def _pen_per_route(adj):
-        """Per-route penalty [.,n_routes] from adjustment degrees, using the
-        sampled per-graph target when conditioning, else the fixed scalar."""
-        if adjustment_conditioning and cur_adj_target is not None:
-            tgt = cur_adj_target.reshape(-1, 1)
-        else:
-            tgt = adjustment_degree_target
-        if adjustment_degree_objective == "cap":
-            return (adj - tgt).clamp(min=0.0)
-        if adjustment_degree_objective == "cap_sq":
-            # quadratic one-sided: gradient grows with overshoot (target-aware)
-            return (adj - tgt).clamp(min=0.0) ** 2
-        if adjustment_degree_objective == "target":
-            return (adj - tgt).abs()
-        return adj  # 'raw'
+    # Cached per-route adjustment DEGREES (shape [batch, n_routes]) for the
+    # current episode. Only the slot being edited changes within an episode, so
+    # we compute the full vector once per episode and refresh only the edited
+    # route per step (avoids an n_routes-wide Needleman-Wunsch every step).
+    episode_route_adj_holder = [None]
 
     def _net_weight():
         if adjustment_conditioning and cur_adj_weight is not None:
             return cur_adj_weight.reshape(-1)
         return adjustment_degree_weight
 
+    def _net_target():
+        if adjustment_conditioning and cur_adj_target is not None:
+            return cur_adj_target.reshape(-1)
+        return adjustment_degree_target
+
     def _init_episode_adjustment():
-        """Compute the full per-route penalty vector once at episode start."""
+        """Compute the full per-route degree vector once at episode start."""
         if not use_adjustment_penalty or cur_seed_routes is None \
                 or cur_working_routes is None:
             return
-        adj = get_adjustment_degrees(
+        episode_route_adj_holder[0] = get_adjustment_degrees(
             cur_working_routes, cur_seed_routes, cost_obj.symmetric_routes,
             gap=adjustment_degree_gap, mode=adjustment_degree_mode)
-        episode_route_pen_holder[0] = _pen_per_route(adj)
 
     def adjustment_penalty_fn(state):
-        """Per-network adjustment-degree penalty (vs seed routes) for shaping.
+        """Network-level adjustment-degree penalty (vs seed routes) for shaping.
 
-        Returns ``[batch]`` = weight * mean_route penalty for the full current
-        network (frozen context slots + the live in-progress route), or None
-        when disabled / not yet initialized. Reuses the episode-cached per-route
-        penalties and recomputes only the edited route. With conditioning the
+        Returns ``[batch]`` = weight * penalty(mean_i adj_i) -- the penalty of
+        the NETWORK-mean degree, exactly matching the eval/BCO form in
+        MyCostModule._adjustment_penalty. (Penalizing each route's deviation
+        separately and averaging the penalties is a different, much more
+        restrictive objective: it forbids the concentrated rewrites -- e.g.
+        fully replacing one duplicated route -- that the network-budget
+        semantics deliberately allow.) Reuses the episode-cached per-route
+        degrees and recomputes only the edited route. With conditioning the
         per-graph sampled target/weight (also fed to the agent) are used.
         """
         if not use_adjustment_penalty:
             return None
         route_idx = prev_route_idx_holder[0]
-        base_pen = episode_route_pen_holder[0]
+        base_adj = episode_route_adj_holder[0]
         if route_idx is None or cur_seed_routes is None \
-                or cur_working_routes is None or base_pen is None:
+                or cur_working_routes is None or base_adj is None:
             return None
         cur_list = _get_current_routes_from_state(state)
         cur_tensor = get_batch_tensor_from_routes(
@@ -2310,10 +2328,10 @@ def train_lc_improvement_cfg_ppo(
             cur_seed_routes[:, route_idx:route_idx + 1, :],
             cost_obj.symmetric_routes,
             gap=adjustment_degree_gap, mode=adjustment_degree_mode)
-        pen_cur = _pen_per_route(adj_cur)
-        pens = base_pen.clone()
-        pens[:, route_idx] = pen_cur[:, 0]
-        return _net_weight() * pens.mean(dim=1)
+        degrees = base_adj.clone()
+        degrees[:, route_idx] = adj_cur[:, 0]
+        return network_adjustment_penalty(
+            degrees, _net_weight(), _net_target(), adjustment_degree_objective)
 
     def make_next_state(prev_state=None):
         nonlocal epoch_indices, index_cursor, route_cursor
