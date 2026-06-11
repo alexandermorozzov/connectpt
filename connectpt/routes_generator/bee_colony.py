@@ -435,6 +435,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                ignore_type5_max_route_len=False,
                ignore_type6_max_route_len=False,
                ignore_type7_max_route_len=False,
+               type5_allow_halt=True,
                use_demand_weighted_route_selection=False,
                worse_accept_temperature=0.0,
                worse_accept_decay=0.995,
@@ -742,6 +743,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                                 edit_model=edit_model,
                                 ignore_type4_max_route_len=
                                 ignore_type4_max_route_len,
+                                type5_allow_halt=type5_allow_halt,
                                 ignore_type5_max_route_len=
                                 ignore_type5_max_route_len,
                                 ignore_type6_max_route_len=
@@ -999,6 +1001,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
                 shortest_paths, force_linking_unlinked, bee_model=None,
                 rpc_model=None, env_state=None, n_type4=0,
                 n_type5=0, n_type6=0, n_type7=0, edit_model=None,
+                type5_allow_halt=True,
                 ignore_type4_max_route_len=False,
                 ignore_type5_max_route_len=False,
                 ignore_type6_max_route_len=False,
@@ -1117,6 +1120,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
             bee_networks,
             chosen_route_idxs,
             ignore_max_route_len=ignore_type5_max_route_len,
+            allow_halt=type5_allow_halt,
         )
         type5_gather = chosen_route_idxs[:, type5_idxs, None, None].expand(
             -1, -1, -1, max_n_nodes)
@@ -1302,7 +1306,7 @@ def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs
 def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
                              greedy=False, ignore_max_route_len=False,
                              allow_extend=True, allow_trim_start=True,
-                             allow_trim_end=True):
+                             allow_trim_end=True, allow_halt=True):
     """Apply one edit step (extend / trim_start / trim_end / halt) per bee.
 
     Like ``get_neural_extend_variants`` but the model is allowed to choose
@@ -1356,7 +1360,8 @@ def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
                 env_state, greedy=greedy,
                 allow_extend=allow_extend,
                 allow_trim_start=allow_trim_start,
-                allow_trim_end=allow_trim_end)
+                allow_trim_end=allow_trim_end,
+                allow_halt=allow_halt)
         finally:
             env_state.extra_data.max_route_len = original_max_route_len
     else:
@@ -1364,7 +1369,8 @@ def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
             env_state, greedy=greedy,
             allow_extend=allow_extend,
             allow_trim_start=allow_trim_start,
-            allow_trim_end=allow_trim_end)
+            allow_trim_end=allow_trim_end,
+            allow_halt=allow_halt)
 
     halted = action_kinds == ROUTE_ACTION_HALT
     env_state.apply_route_actions(action_kinds, action)

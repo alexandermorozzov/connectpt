@@ -280,13 +280,14 @@ def try_copy_mutation(routes, kind, max_multiplicity, rng, min_len, max_len,
 
 
 def inject_route_copies(routes, tier_cfg, rng, min_len, max_len,
-                        demand=None, n_nodes=None):
+                        demand=None, n_nodes=None, street_adj=None):
     """Apply one tier's worth of copy-injection events to a route tensor.
 
     Returns ``(routes, applied_events, mutated_routes)`` where the two
     Counters tally events / touched routes per mutation kind (used by the
     training-dataset meta table; callers that only need the routes can ignore
-    them).
+    them). Pass ``street_adj`` to repair/reject glue junctions that are not
+    real street edges (default None keeps the legacy phantom-leg behavior).
     """
     routes = routes.clone()
     applied_events = Counter()
@@ -299,7 +300,8 @@ def inject_route_copies(routes, tier_cfg, rng, min_len, max_len,
         for kind in kinds:
             proposal, touched = try_copy_mutation(
                 routes, kind, int(tier_cfg["max_multiplicity"]), rng,
-                min_len, max_len, demand=demand, n_nodes=n_nodes, d_un_cap=d_un_cap)
+                min_len, max_len, demand=demand, n_nodes=n_nodes,
+                d_un_cap=d_un_cap, street_adj=street_adj)
             if touched:
                 routes = proposal
                 applied_events[kind] += 1
@@ -469,3 +471,130 @@ def inject_realistic_tier(routes, rng, min_len, max_len, *, street_adj,
         applied["drop_cover"] += 1
 
     return routes, applied
+
+
+# --- graded training curriculum ----------------------------------------------
+# Difficulty ladder for the edit-model training data (paper_combined PART 1).
+# Each tier produces a defect that is FIXABLE BY CONSTRUCTION with a known
+# reward direction, graded from gross to subtle:
+#   dup_gross     -> trim an obvious full duplicate,
+#   stub_routes   -> rebuild truncated route tails (the original clean route
+#                    is an existence proof of a better network),
+#   detour_gross  -> straighten a blatant 2-3x detour,
+#   drop_cover    -> extend to re-cover dropped stops (big WMC jump),
+#   detour_subtle -> 1.3-1.6x detours + partial duplicates,
+#   realistic_mix -> the exact eval-init distribution (REALISTIC_TIER_CFG),
+#   lc_clean      -> nothing to fix (calibrated halt).
+# All street-graph tiers are phantom-leg free (street_adj is threaded through).
+
+CURRICULUM_TIER_CFG = {
+    "dup_gross":     {"kind": "copies", "events": 3, "max_multiplicity": 3,
+                      "kinds": ("full_copy",)},
+    "stub_routes":   {"kind": "stub", "frac_range": (0.3, 0.5)},
+    "detour_gross":  {"kind": "detours", "events": 3,
+                      "min_stretch": 2.0, "max_stretch": 3.0,
+                      "max_redundancy_gain": 0.10},
+    "drop_cover":    {"kind": "drops", "events": 4, "d_un_target_pct": 10.0},
+    "detour_subtle": {"kind": "mix",
+                      "dup":    {"events": 1, "max_multiplicity": 2,
+                                 "kinds": ("prefix_copy", "suffix_copy",
+                                           "middle_copy"),
+                                 "covered": True, "d_un_cap": D_UN_CAP_PCT},
+                      "detour": {"events": 2, "min_stretch": 1.3,
+                                 "max_stretch": 1.6,
+                                 "max_redundancy_gain": 0.05},
+                      "drop_cover": {"events": 0, "d_un_target_pct": 0.0}},
+    "realistic_mix": {"kind": "mix", **REALISTIC_TIER_CFG},
+    "lc_clean":      {"kind": "clean"},
+}
+
+
+def truncate_route_tails(routes, rng, min_len, max_len, frac_range=(0.3, 0.5)):
+    """Stub tier: cut a random fraction off the tail of every route.
+
+    The optimal fix is pure re-extension and the untruncated route proves a
+    better network exists, so the construction headroom is guaranteed.
+    Routes already at ``min_len`` are left alone. Returns
+    ``(routes, n_cut_stops)``.
+    """
+    routes = routes.clone()
+    cut_total = 0
+    for i in range(routes.shape[0]):
+        ns = route_nodes(routes[i])
+        if len(ns) <= min_len:
+            continue
+        frac = rng.uniform(*frac_range)
+        keep = max(min_len, int(round(len(ns) * (1.0 - frac))))
+        if keep >= len(ns):
+            continue
+        cut_total += len(ns) - keep
+        replace_route(routes, i, ns[:keep])
+    return routes, cut_total
+
+
+def inject_curriculum_tier(routes, tier_cfg, rng, min_len, max_len, *,
+                           street_adj, demand, n_nodes):
+    """Apply one curriculum tier to a clean network.
+
+    Dispatches on ``tier_cfg['kind']`` and returns ``(routes, applied)``
+    where ``applied`` is a Counter of injected events (kinds prefixed by
+    defect type, plus ``stub_cut_stops`` for the stub tier).
+    """
+    kind = tier_cfg["kind"]
+    applied = Counter()
+
+    if kind == "clean":
+        return routes.clone(), applied
+
+    if kind == "copies":
+        out, events, _ = inject_route_copies(
+            routes, tier_cfg, rng, min_len, max_len,
+            demand=demand, n_nodes=n_nodes, street_adj=street_adj)
+        for k, v in events.items():
+            applied[f"dup_{k}"] += v
+        return out, applied
+
+    if kind == "stub":
+        out, cut = truncate_route_tails(routes, rng, min_len, max_len,
+                                        tier_cfg["frac_range"])
+        applied["stub_cut_stops"] = cut
+        return out, applied
+
+    if kind == "detours":
+        out = routes.clone()
+        for _ in range(int(tier_cfg["events"])):
+            res = try_detour_mutation(
+                out, rng, street_adj, min_len, max_len,
+                min_stretch=float(tier_cfg["min_stretch"]),
+                max_stretch=float(tier_cfg["max_stretch"]),
+                demand=demand, n_nodes=n_nodes,
+                max_redundancy_gain=float(
+                    tier_cfg.get("max_redundancy_gain", 0.05)))
+            if res is not None:
+                ri, candidate, _, _ = res
+                replace_route(out, ri, candidate)
+                applied["detour"] += 1
+        return out, applied
+
+    if kind == "drops":
+        out = routes.clone()
+        for _ in range(int(tier_cfg["events"])):
+            if uncovered_demand_pct(out, demand, n_nodes) >= \
+                    float(tier_cfg["d_un_target_pct"]):
+                break
+            res = try_drop_cover_mutation(out, rng, demand, street_adj,
+                                          min_len, max_len)
+            if res is None:
+                break
+            ri, candidate, _ = res
+            replace_route(out, ri, candidate)
+            applied["drop_cover"] += 1
+        return out, applied
+
+    if kind == "mix":
+        sub_cfg = {k: v for k, v in tier_cfg.items() if k != "kind"}
+        return inject_realistic_tier(routes, rng, min_len, max_len,
+                                     street_adj=street_adj, demand=demand,
+                                     n_nodes=n_nodes, tier_cfg=sub_cfg)
+
+    raise ValueError(f"unknown curriculum tier kind: {kind}")
