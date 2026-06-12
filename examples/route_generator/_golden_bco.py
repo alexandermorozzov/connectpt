@@ -18,7 +18,8 @@ from eval_lib.params import CONNECTIVITY_MODE, UNIFIED_COST_WEIGHTS
 from eval_lib.paper import bco_cfg_set, UNIFIED_ADJ, set_cfg_value
 
 _eh.EDIT_MODEL_WEIGHTS_PATH = EDIT_MODEL_WEIGHTS_DIR / \
-    "improvement_lc_rttconn_adj_w10_t02_finetune100.pt"
+    "improvement_lc_realistic_scratch_rttwmc_adj_v1.pt"
+_eh.EDIT_MODEL_N_ADJ_COND_FEATS = 1
 
 GOLDEN_PATH = ARTIFACTS_DIR / "results" / "_golden_bco.pt"
 N_ITER = 3

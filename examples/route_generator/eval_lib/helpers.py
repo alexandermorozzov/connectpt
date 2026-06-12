@@ -42,7 +42,7 @@ INPUT_TENSORS = None
 
 # Adjustment-conditioning feature count of the edit-model checkpoint pointed
 # to by EDIT_MODEL_WEIGHTS_PATH (0 = unconditioned legacy checkpoints).
-EDIT_MODEL_N_ADJ_COND_FEATS = 0
+EDIT_MODEL_N_ADJ_COND_FEATS = 1
 
 
 def set_input_tensors(tensors):
@@ -722,6 +722,19 @@ def build_default_bco_variants():
             "n_type4_bees": 0,
             "n_type5_bees": 8,
             "n_type6_bees": 2,
+            "n_type7_bees": 0,
+        },
+        {
+            "key": "trim12_extend12",
+            "summary_label": "Trim 12 + extend 12 BCO",
+            "run_name": "seeded_bco_trim12_extend12_from_lc_mumford0",
+            "use_neural_bees": True,
+            "n_bees": 24,
+            "n_type1_bees": 0,
+            "n_type2_bees": 0,
+            "n_type4_bees": 12,
+            "n_type5_bees": 0,
+            "n_type6_bees": 12,
             "n_type7_bees": 0,
         },
         # Note: Figure-5-style ablation variants (neural construction vs

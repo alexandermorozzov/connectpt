@@ -47,7 +47,7 @@ MODEL_WEIGHTS_PATH = (
 # trained LC edit / improvement model weights -- produced by the training
 # notebook, kept under model_weights/improvement/ alongside the other weights.
 EDIT_MODEL_WEIGHTS_PATH = (
-    EDIT_MODEL_WEIGHTS_DIR / "improvement_lc_improvement_trim.pt"
+    EDIT_MODEL_WEIGHTS_DIR / "improvement_lc_realistic_scratch_rttwmc_adj_v1.pt"
 )
 
 # Make sure the artifact output dirs exist (inputs under datasets/ must already
