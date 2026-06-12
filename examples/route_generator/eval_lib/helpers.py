@@ -42,7 +42,7 @@ INPUT_TENSORS = None
 
 # Adjustment-conditioning feature count of the edit-model checkpoint pointed
 # to by EDIT_MODEL_WEIGHTS_PATH (0 = unconditioned legacy checkpoints).
-EDIT_MODEL_N_ADJ_COND_FEATS = 1
+EDIT_MODEL_N_ADJ_COND_FEATS = 0
 
 
 def set_input_tensors(tensors):
