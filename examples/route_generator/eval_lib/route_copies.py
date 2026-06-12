@@ -333,7 +333,8 @@ REALISTIC_TIER_CFG = {
 
 def try_detour_mutation(routes, rng, street_adj, min_len, max_len,
                         min_stretch=1.3, max_stretch=2.5, attempts=120,
-                        demand=None, n_nodes=None, max_redundancy_gain=0.05):
+                        demand=None, n_nodes=None, max_redundancy_gain=0.05,
+                        block_all_interior=False):
     """Replace a route segment with a longer street path (a "detour").
 
     Picks two anchor stops >= 2 legs apart and reroutes between them via a
@@ -342,8 +343,11 @@ def try_detour_mutation(routes, rng, street_adj, min_len, max_len,
     detour models a *suboptimal* route, not coverage loss or duplication:
     when ``demand``/``n_nodes`` are given, candidates that disconnect served
     demand are rejected, and the network redundancy may grow by at most
-    ``max_redundancy_gain``. Returns ``(route_idx, new_nodes, old_time,
-    new_time)`` or None.
+    ``max_redundancy_gain``. ``block_all_interior=True`` forbids the WHOLE old
+    corridor (not one random stop), forcing a topologically long bypass --
+    used by the gross training tier to make detours expensive enough that
+    straightening them carries a real reward. Returns ``(route_idx,
+    new_nodes, old_time, new_time)`` or None.
     """
     n_routes = routes.shape[0]
     base_d_un = (uncovered_demand_pct(routes, demand, n_nodes)
@@ -360,11 +364,14 @@ def try_detour_mutation(routes, rng, street_adj, min_len, max_len,
         old_t = segment_time(old_seg, street_adj)
         if old_t <= 0:
             continue
-        # Block a random interior stop of the segment ("closed street") so the
-        # path MUST go around -- a plain noised Dijkstra almost always returns
-        # the direct segment again, since fewer hops usually beats the noise.
-        blocked = rng.choice(old_seg[1:-1])
-        forbidden = ((set(ns[:i]) | set(ns[j + 1:])) - {ns[i], ns[j]}) | {blocked}
+        # Block interior stop(s) of the segment ("closed street") so the path
+        # MUST go around -- a plain noised Dijkstra almost always returns the
+        # direct segment again, since fewer hops usually beats the noise.
+        if block_all_interior:
+            blocked = set(old_seg[1:-1])
+        else:
+            blocked = {rng.choice(old_seg[1:-1])}
+        forbidden = ((set(ns[:i]) | set(ns[j + 1:])) - {ns[i], ns[j]}) | blocked
         path = street_path(street_adj, ns[i], ns[j], rng=rng, noise=1.0,
                            forbidden=forbidden)
         if path is None or path == old_seg:
@@ -491,9 +498,15 @@ CURRICULUM_TIER_CFG = {
     "dup_gross":     {"kind": "copies", "events": 3, "max_multiplicity": 3,
                       "kinds": ("full_copy",)},
     "stub_routes":   {"kind": "stub", "frac_range": (0.3, 0.5)},
-    "detour_gross":  {"kind": "detours", "events": 3,
-                      "min_stretch": 2.0, "max_stretch": 3.0,
-                      "max_redundancy_gain": 0.10},
+    # Detours must be EXPENSIVE enough that straightening them pays: with only
+    # 3 events at 2-3x stretch the whole tier costs ~0.05 in unified cost (the
+    # repair reward is ~zero), so the agent never learns the fix. 8 events at
+    # up to 4.5x puts the available repair profit on the same scale as the
+    # other tiers.
+    "detour_gross":  {"kind": "detours", "events": 6,
+                      "min_stretch": 1.8, "max_stretch": 6.0,
+                      "max_redundancy_gain": 0.20,
+                      "block_all_interior": True},
     "drop_cover":    {"kind": "drops", "events": 4, "d_un_target_pct": 10.0},
     "detour_subtle": {"kind": "mix",
                       "dup":    {"events": 1, "max_multiplicity": 2,
@@ -569,7 +582,9 @@ def inject_curriculum_tier(routes, tier_cfg, rng, min_len, max_len, *,
                 max_stretch=float(tier_cfg["max_stretch"]),
                 demand=demand, n_nodes=n_nodes,
                 max_redundancy_gain=float(
-                    tier_cfg.get("max_redundancy_gain", 0.05)))
+                    tier_cfg.get("max_redundancy_gain", 0.05)),
+                block_all_interior=bool(
+                    tier_cfg.get("block_all_interior", False)))
             if res is not None:
                 ri, candidate, _, _ = res
                 replace_route(out, ri, candidate)
