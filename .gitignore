@@ -45,3 +45,4 @@ datasets
 # Generated run artifacts -- results CSV, route dumps, model weights,
 # training logs -- are kept local only; regenerate by running the notebooks.
 artifacts/
+.tmp_pycache

@@ -192,6 +192,7 @@ def build_bco_cfg(
     early_stop_min_delta: float = 0.0,
     bee_model_arch: str | None = None,
     bee_model_weights=None,
+    force_cpu: bool = False,
 ):
     """Build a BCO config.
 
@@ -222,6 +223,7 @@ def build_bco_cfg(
         "+eval=mumford0",
         "++eval.dataset.type=tensor",
         "++experiment.logdir=null",  # no empty TensorBoard run dir for eval runs
+        f"++experiment.cpu={str(force_cpu).lower()}",
         f"++eval.n_routes={n_routes}",
         f"++eval.min_route_len={min_route_len}",
         f"++eval.max_route_len={max_route_len}",

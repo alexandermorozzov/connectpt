@@ -1,7 +1,6 @@
 """EKB case-study helpers for paper_combined.ipynb."""
 from __future__ import annotations
 
-from html import escape
 from pathlib import Path
 
 import numpy as np
@@ -15,14 +14,7 @@ from .helpers import as_route_tensor
 EKB_DATA_DIR = DATASETS_DIR / "EKB"
 EKB_COORD_CRS = "EPSG:32641"  # UTM zone 41N: Ekaterinburg -> WGS84.
 EKB_CITY_NAME = "EKB"
-EKB_MAP_PATH = ARTIFACTS_DIR / "paper_results" / "ekb_seed_routes_map.html"
-
-_ROUTE_COLORS = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
-    "#393b79", "#637939", "#8c6d31", "#843c39", "#7b4173",
-    "#3182bd", "#31a354", "#756bb1", "#636363", "#e6550d",
-]
+EKB_STATIC_MAP_PATH = ARTIFACTS_DIR / "paper_results" / "ekb_seed_routes_static.png"
 
 
 def load_ekb_tensors(data_dir=EKB_DATA_DIR, travel_time_scale=60.0):
@@ -110,6 +102,87 @@ def ekb_route_stats(routes):
     }
 
 
+def ekb_connectivity_stats(tensors, routes=None):
+    """Connectivity diagnostics for the EKB street graph."""
+    street_adj = tensors["street_adj"]
+    demand = tensors["demand"]
+    if isinstance(street_adj, torch.Tensor):
+        street_adj = street_adj.detach().cpu()
+    else:
+        street_adj = torch.as_tensor(street_adj)
+    if isinstance(demand, torch.Tensor):
+        demand = demand.detach().cpu()
+    else:
+        demand = torch.as_tensor(demand)
+
+    n_nodes = int(street_adj.shape[0])
+    directed = (street_adj > 0) & torch.isfinite(street_adj)
+    undirected = directed | directed.T
+    seen = torch.zeros(n_nodes, dtype=torch.bool)
+    components = []
+    for start in range(n_nodes):
+        if seen[start]:
+            continue
+        stack = [start]
+        seen[start] = True
+        comp = []
+        while stack:
+            node = stack.pop()
+            comp.append(node)
+            neighbors = torch.where(undirected[node] & ~seen)[0].tolist()
+            for nxt in neighbors:
+                seen[nxt] = True
+                stack.append(int(nxt))
+        components.append(comp)
+    components = sorted(components, key=len, reverse=True)
+
+    comp_id = torch.empty(n_nodes, dtype=torch.long)
+    for idx, comp in enumerate(components):
+        comp_id[torch.tensor(comp)] = idx
+    cross_component = comp_id[:, None] != comp_id[None, :]
+    total_demand = demand.sum()
+    cross_demand = demand[cross_component].sum()
+
+    route_nodes = set()
+    route_self_loops = []
+    routes_with_repeats = []
+    if routes is not None:
+        rr = as_route_tensor(routes)
+        if rr.ndim == 3:
+            rr = rr[0]
+        giant = set(components[0]) if components else set()
+        for route_idx, route_tensor in enumerate(rr):
+            nodes = _route_nodes(route_tensor)
+            route_nodes.update(nodes)
+            if len(nodes) != len(set(nodes)):
+                routes_with_repeats.append(route_idx)
+            for start, end in zip(nodes[:-1], nodes[1:]):
+                if start == end:
+                    route_self_loops.append((route_idx, start))
+        route_nodes_outside_giant = sorted(route_nodes - giant)
+    else:
+        route_nodes_outside_giant = []
+
+    isolated_nodes = [comp[0] for comp in components if len(comp) == 1]
+    return {
+        "n_nodes": n_nodes,
+        "directed_arcs": int(directed.sum().item()),
+        "undirected_edges": int(torch.triu(undirected, diagonal=1).sum().item()),
+        "symmetric": bool(torch.equal(directed, directed.T)),
+        "n_components": len(components),
+        "component_sizes": [len(comp) for comp in components],
+        "isolated_nodes": isolated_nodes,
+        "cross_component_demand": float(cross_demand.item()),
+        "cross_component_demand_pct": (
+            float(100.0 * cross_demand.item() / total_demand.item())
+            if float(total_demand.item()) > 0 else 0.0),
+        "route_covered_nodes": len(route_nodes) if routes is not None else None,
+        "route_nodes_outside_giant": route_nodes_outside_giant,
+        "routes_with_repeats": routes_with_repeats,
+        "route_self_loops": route_self_loops,
+    }
+
+
 def make_ekb_plot_street_adj(*route_sets, n_nodes=None, source_adj=None):
     """Sparse route-edge adjacency for readable matplotlib EKB route figures.
 
@@ -160,105 +233,27 @@ def make_ekb_plot_street_adj(*route_sets, n_nodes=None, source_adj=None):
     return adj
 
 
+def make_ekb_street_underlay_adj(source_adj):
+    """Static EKB street-graph underlay for matplotlib route figures.
+
+    Missing EKB street edges are encoded as zeros, while the generic plotting
+    helper treats every finite value as drawable. This converts the travel-time
+    matrix to the plotting convention: finite positive arcs remain visible and
+    all missing/self edges become ``inf``.
+    """
+    src = source_adj.detach().cpu().numpy() if isinstance(source_adj, torch.Tensor) else source_adj
+    src = np.asarray(src, dtype=float)
+    if src.ndim != 2 or src.shape[0] != src.shape[1]:
+        raise ValueError(f"EKB street adjacency must be square, got {src.shape}")
+
+    positive = np.isfinite(src) & (src > 0)
+    forward = np.where(positive, src, np.inf)
+    backward = np.where(positive.T, src.T, np.inf)
+    underlay = np.minimum(forward, backward).astype(np.float32)
+    underlay[~(positive | positive.T)] = np.inf
+    np.fill_diagonal(underlay, np.inf)
+    return underlay
+
+
 def _route_nodes(route_tensor):
     return [int(node) for node in route_tensor.tolist() if int(node) >= 0]
-
-
-def _metric_summary_html(metrics):
-    if not metrics:
-        return ""
-    keys = ["cost", "cost_delta", "cost_delta_pct", "RTT", "WMC", "ATT",
-            "adj_vs_seed", "d_un", "redun%"]
-    bits = []
-    for key in keys:
-        if key not in metrics:
-            continue
-        value = metrics[key]
-        try:
-            value = float(value)
-        except (TypeError, ValueError):
-            continue
-        if key in {"RTT", "ATT"}:
-            bits.append(f"{key}={value:.0f}")
-        elif key in {"d_un", "redun%", "cost_delta_pct"}:
-            bits.append(f"{key}={value:.1f}")
-        else:
-            bits.append(f"{key}={value:.3f}")
-    return " | ".join(bits)
-
-
-def build_ekb_folium_map(routes, coords, *, metrics=None,
-                         source_crs=EKB_COORD_CRS, max_routes=None,
-                         tiles="CartoDB positron", show_stops=True,
-                         title="EKB seed routes"):
-    """Create a folium map with EKB route polylines on a web basemap."""
-    import folium
-
-    rr = as_route_tensor(routes)
-    if rr.ndim == 3:
-        rr = rr[0]
-    if isinstance(coords, torch.Tensor):
-        coords = coords.detach().cpu().numpy()
-    latlon = project_ekb_coords(coords, source_crs=source_crs)
-    stats = ekb_route_stats(rr)
-
-    fmap = folium.Map(
-        location=[float(latlon[:, 0].mean()), float(latlon[:, 1].mean())],
-        zoom_start=11,
-        tiles=tiles,
-        control_scale=True,
-    )
-    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(fmap)
-
-    n_routes = rr.shape[0] if max_routes is None else min(int(max_routes), rr.shape[0])
-    for route_idx, route_tensor in enumerate(rr[:n_routes]):
-        nodes = _route_nodes(route_tensor)
-        if len(nodes) < 2:
-            continue
-        points = [(float(latlon[node, 0]), float(latlon[node, 1]))
-                  for node in nodes]
-        color = _ROUTE_COLORS[route_idx % len(_ROUTE_COLORS)]
-        tooltip = f"route {route_idx}: {len(nodes)} stops"
-        folium.PolyLine(
-            points, color=color, weight=3.0, opacity=0.78,
-            tooltip=tooltip).add_to(fmap)
-        folium.CircleMarker(
-            points[0], radius=3.5, color=color, fill=True,
-            fill_opacity=0.9, tooltip=f"route {route_idx} start").add_to(fmap)
-        folium.CircleMarker(
-            points[-1], radius=3.5, color=color, fill=True,
-            fill_opacity=0.9, tooltip=f"route {route_idx} end").add_to(fmap)
-
-    if show_stops:
-        for node_idx, (lat, lon) in enumerate(latlon):
-            folium.CircleMarker(
-                [float(lat), float(lon)], radius=1.5, color="#111111",
-                weight=0.5, fill=True, fill_opacity=0.45,
-                tooltip=f"stop {node_idx}").add_to(fmap)
-
-    stat_line = (
-        f"{stats['n_routes']} routes | {stats['unique_stops']} covered stops | "
-        f"len {stats['min_len']}-{stats['max_len']} "
-        f"(mean {stats['mean_len']:.1f})")
-    metric_line = _metric_summary_html(metrics)
-    subtitle = stat_line if not metric_line else f"{stat_line}<br>{escape(metric_line)}"
-    title_html = f"""
-    <div style="position: fixed; top: 12px; left: 50px; z-index: 9999;
-                background: rgba(255,255,255,0.92); padding: 8px 10px;
-                border: 1px solid #999; border-radius: 4px;
-                font-family: Arial, sans-serif; font-size: 13px;">
-      <b>{escape(title)}</b><br>{subtitle}
-    </div>
-    """
-    fmap.get_root().html.add_child(folium.Element(title_html))
-    folium.LayerControl(collapsed=True).add_to(fmap)
-    return fmap
-
-
-def save_ekb_folium_map(routes, coords, path=EKB_MAP_PATH, **kwargs):
-    """Build and save the EKB folium map, returning the output path."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fmap = build_ekb_folium_map(routes, coords, **kwargs)
-    fmap.save(path)
-    return path
