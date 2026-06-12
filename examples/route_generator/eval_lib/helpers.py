@@ -188,6 +188,7 @@ def build_bco_cfg(
     worse_selection_uniform_mix: float = BCO_WORSE_SELECTION_UNIFORM_MIX,
     worse_selection_elite_count: int = BCO_WORSE_SELECTION_ELITE_COUNT,
     trim_grace_period: int = 0,
+    process_neural_bees_sequentially: bool = False,
     early_stop_patience: int | None = None,
     early_stop_min_delta: float = 0.0,
     bee_model_arch: str | None = None,
@@ -258,6 +259,8 @@ def build_bco_cfg(
         f"++worse_selection_uniform_mix={worse_selection_uniform_mix}",
         f"++worse_selection_elite_count={worse_selection_elite_count}",
         f"++trim_grace_period={trim_grace_period}",
+        "++process_neural_bees_sequentially="
+        f"{str(process_neural_bees_sequentially).lower()}",
         f"++early_stop_min_delta={float(early_stop_min_delta)}",
     ]
     if bee_model_arch is not None:
@@ -595,6 +598,8 @@ def run_bco(cfg, init_routes, mutation_counts_out=None, *,
         worse_selection_uniform_mix=cfg.get("worse_selection_uniform_mix", 0.05),
         worse_selection_elite_count=cfg.get("worse_selection_elite_count", 1),
         trim_grace_period=cfg.get("trim_grace_period", 0),
+        process_neural_bees_sequentially=cfg.get(
+            "process_neural_bees_sequentially", False),
         early_stop_patience=cfg.get("early_stop_patience", None),
         early_stop_min_delta=float(cfg.get("early_stop_min_delta", 0.0)),
         mutation_counts_out=mutation_counts_out,

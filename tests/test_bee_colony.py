@@ -194,6 +194,108 @@ def test_get_mutants_forwards_nohalt_flags_to_edit_bees(monkeypatch):
     }
 
 
+def test_get_mutants_can_process_type1_neural_bees_sequentially(monkeypatch):
+    bee_networks = torch.tensor(
+        [[
+            [[0, 1, -1, -1], [2, 3, -1, -1]],
+            [[4, 5, -1, -1], [6, 7, -1, -1]],
+            [[8, 9, -1, -1], [1, 2, -1, -1]],
+        ]],
+        dtype=torch.long,
+    )
+    chosen_route_idxs = torch.tensor([[0, 1, 0]], dtype=torch.long)
+    calls = []
+
+    def fake_neural_variants(model, env_state, got_bee_networks,
+                             got_chosen_route_idxs, greedy=False):
+        calls.append(int(got_bee_networks.shape[1]))
+        out = got_bee_networks.clone()
+        out[:, :, -1] = torch.tensor(
+            [99, 98, -1, -1], dtype=torch.long)
+        return out
+
+    monkeypatch.setattr(
+        bee_colony, "get_neural_variants", fake_neural_variants)
+
+    new_networks, mutation_types = bee_colony.get_mutants(
+        bee_networks,
+        chosen_route_idxs,
+        n_type1=3,
+        n_type2=0,
+        direct_sat_dmd=torch.zeros((1, 1, 1)),
+        shorten_prob=0.0,
+        street_node_neighbours=torch.zeros((1, 1, 1), dtype=torch.bool),
+        shortest_paths=torch.zeros((1, 1, 1, 1), dtype=torch.long),
+        force_linking_unlinked=False,
+        bee_model=object(),
+        env_state=object(),
+        process_neural_bees_sequentially=True,
+        return_mutation_metadata=True,
+    )
+
+    assert calls == [1, 1, 1]
+    assert mutation_types.tolist() == [1, 1, 1]
+    for bee_idx, route_idx in enumerate(chosen_route_idxs[0].tolist()):
+        assert torch.equal(
+            new_networks[0, bee_idx, route_idx],
+            torch.tensor([99, 98, -1, -1]),
+        )
+
+
+def test_get_mutants_can_process_type5_edit_bees_sequentially(monkeypatch):
+    bee_networks = torch.tensor(
+        [[
+            [[0, 1, 2, -1], [3, 4, -1, -1]],
+            [[1, 2, 3, -1], [4, 5, -1, -1]],
+            [[2, 3, 4, -1], [5, 6, -1, -1]],
+        ]],
+        dtype=torch.long,
+    )
+    chosen_route_idxs = torch.tensor([[0, 1, 0]], dtype=torch.long)
+    calls = []
+
+    def fake_edit(model, env_state, got_bee_networks, got_chosen_route_idxs,
+                  greedy=False, ignore_max_route_len=False,
+                  allow_extend=True, allow_trim_start=True,
+                  allow_trim_end=True, allow_halt=True,
+                  adj_condition_target=None, adj_condition_weight=None):
+        calls.append(int(got_bee_networks.shape[1]))
+        out = got_bee_networks.clone()
+        gather_idx = got_chosen_route_idxs[..., None, None].expand(
+            -1, -1, -1, out.shape[-1])
+        route = out.gather(2, gather_idx).squeeze(2).clone()
+        route[..., 0] += 100
+        out.scatter_(2, gather_idx, route.unsqueeze(2))
+        return out
+
+    monkeypatch.setattr(bee_colony, "get_neural_edit_variants", fake_edit)
+
+    new_networks, mutation_types = bee_colony.get_mutants(
+        bee_networks,
+        chosen_route_idxs,
+        n_type1=0,
+        n_type2=0,
+        direct_sat_dmd=torch.zeros((1, 1, 1)),
+        shorten_prob=0.0,
+        street_node_neighbours=torch.zeros((1, 1, 1), dtype=torch.bool),
+        shortest_paths=torch.zeros((1, 1, 1, 1), dtype=torch.long),
+        force_linking_unlinked=False,
+        bee_model=object(),
+        env_state=object(),
+        n_type5=3,
+        edit_model=object(),
+        process_neural_bees_sequentially=True,
+        return_mutation_metadata=True,
+    )
+
+    assert calls == [1, 1, 1]
+    assert mutation_types.tolist() == [5, 5, 5]
+    for bee_idx, route_idx in enumerate(chosen_route_idxs[0].tolist()):
+        expected = bee_networks[0, bee_idx, route_idx].clone()
+        expected[0] += 100
+        assert torch.equal(new_networks[0, bee_idx, route_idx], expected)
+
+
 def test_mutation_stats_include_type7_and_worse_acceptance_bucket():
     mutation_stats = {}
     mutation_types = torch.tensor([1, 7], dtype=torch.long)

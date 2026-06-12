@@ -449,6 +449,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                worse_selection_uniform_mix=0.05,
                worse_selection_elite_count=1,
                trim_grace_period=0,
+               process_neural_bees_sequentially=False,
                early_stop_patience=None,
                early_stop_min_delta=0.0):
     """Implementation of the method of  Nikolic and Teodorovic (2013).
@@ -518,6 +519,10 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         protected from cost-based selection for ``trim_grace_period``
         population-selection rounds, letting the trim survive into the next
         generation. Set to 0 to keep the original cost-only selection.
+    process_neural_bees_sequentially -- if True, neural/RPC/edit bee
+        mutations are evaluated one bee at a time along the bee dimension and
+        then reassembled. This reduces peak memory for large single graphs
+        while preserving the default batched behaviour when False.
     """
     if edit_model is None and getattr(bee_model, 'supports_trim_actions', False):
         edit_model = bee_model
@@ -761,6 +766,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                                 ignore_type6_max_route_len,
                                 ignore_type7_max_route_len=
                                 ignore_type7_max_route_len,
+                                process_neural_bees_sequentially=
+                                process_neural_bees_sequentially,
                                 return_mutation_metadata=True)
 
                 new_bee_raw_costs, new_bee_metrics = \
@@ -1007,6 +1014,59 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     return state, cost_history
 
 
+def _index_single_bee(bee_networks, chosen_route_idxs, bee_idx):
+    bee_idx = bee_idx.reshape(1)
+    return (bee_networks.index_select(1, bee_idx),
+            chosen_route_idxs.index_select(1, bee_idx))
+
+
+def _stack_bee_route_outputs(outputs, bee_networks):
+    if outputs:
+        return torch.stack(outputs, dim=1)
+    return bee_networks.new_full(
+        (bee_networks.shape[0], 0, bee_networks.shape[-1]), -1)
+
+
+def _gather_chosen_routes_from_networks(networks, chosen_route_idxs):
+    max_n_nodes = networks.shape[-1]
+    gather_idx = chosen_route_idxs[..., None, None].expand(
+        -1, -1, -1, max_n_nodes)
+    return networks.gather(2, gather_idx).squeeze(2)
+
+
+def _run_rebuild_variants_for_bees(variant_fn, model, env_state,
+                                   bee_networks, chosen_route_idxs,
+                                   bee_idxs):
+    """Run a rebuild-style neural variant one bee at a time."""
+    outputs = []
+    for bee_idx in bee_idxs.unbind(0):
+        bee_slice, chosen_slice = _index_single_bee(
+            bee_networks, chosen_route_idxs, bee_idx)
+        networks = variant_fn(model, env_state, bee_slice, chosen_slice)
+        outputs.append(networks[:, 0, -1])
+    return _stack_bee_route_outputs(outputs, bee_networks)
+
+
+def _run_selected_route_variants_for_bees(variant_fn, *variant_args,
+                                          **variant_kwargs):
+    """Run one-step neural/edit variants one bee at a time.
+
+    The final three positional args are ``bee_networks``,
+    ``chosen_route_idxs``, and ``bee_idxs`` preceded by any model/env args
+    expected by ``variant_fn``.
+    """
+    *prefix_args, bee_networks, chosen_route_idxs, bee_idxs = variant_args
+    outputs = []
+    for bee_idx in bee_idxs.unbind(0):
+        bee_slice, chosen_slice = _index_single_bee(
+            bee_networks, chosen_route_idxs, bee_idx)
+        networks = variant_fn(
+            *prefix_args, bee_slice, chosen_slice, **variant_kwargs)
+        routes = _gather_chosen_routes_from_networks(networks, chosen_slice)
+        outputs.append(routes[:, 0])
+    return _stack_bee_route_outputs(outputs, bee_networks)
+
+
 def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
                 direct_sat_dmd, shorten_prob, street_node_neighbours,
                 shortest_paths, force_linking_unlinked, bee_model=None,
@@ -1021,6 +1081,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
                 ignore_type5_max_route_len=False,
                 ignore_type6_max_route_len=False,
                 ignore_type7_max_route_len=False,
+                process_neural_bees_sequentially=False,
                 return_mutation_metadata=False):
     bee_networks = bee_networks.clone()
 
@@ -1079,12 +1140,17 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
     if n_type1 == 0:
         new_type1_routes = modified_routes[:, type1_idxs]
     elif bee_model is not None:
-        # run it on all bees...
-        new_type1_networks = get_neural_variants(bee_model, env_state, 
-                                                 bee_networks,
-                                                 chosen_route_idxs)
-        # ...and keep only the type 1 bee routes
-        new_type1_routes = new_type1_networks[:, type1_idxs, -1]
+        if process_neural_bees_sequentially:
+            new_type1_routes = _run_rebuild_variants_for_bees(
+                get_neural_variants, bee_model, env_state, bee_networks,
+                chosen_route_idxs, type1_idxs)
+        else:
+            # run it on all bees...
+            new_type1_networks = get_neural_variants(bee_model, env_state, 
+                                                     bee_networks,
+                                                     chosen_route_idxs)
+            # ...and keep only the type 1 bee routes
+            new_type1_routes = new_type1_networks[:, type1_idxs, -1]
     else:
         new_type1_routes = get_bee_1_variants(remaining_state, modified_routes,
                                               direct_sat_dmd, shortest_paths,
@@ -1105,81 +1171,116 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
     new_routes[:, type2_idxs] = new_type2_routes
     if rpc_model is not None:
         # modify type 3 routes
-        new_type3_networks = get_neural_variants(rpc_model, env_state,
-                                                  bee_networks,
-                                                  chosen_route_idxs)
-        new_type3_routes = new_type3_networks[:, type3_idxs, -1]
+        if process_neural_bees_sequentially:
+            new_type3_routes = _run_rebuild_variants_for_bees(
+                get_neural_variants, rpc_model, env_state, bee_networks,
+                chosen_route_idxs, type3_idxs)
+        else:
+            new_type3_networks = get_neural_variants(rpc_model, env_state,
+                                                      bee_networks,
+                                                      chosen_route_idxs)
+            new_type3_routes = new_type3_networks[:, type3_idxs, -1]
         new_routes[:, type3_idxs] = new_type3_routes
 
     if bee_model is not None and n_type4 > 0:
         # modify type 4 routes: single-step GNN extension of the chosen route
-        new_type4_all = get_neural_extend_variants(
-            bee_model,
-            env_state,
-            bee_networks,
-            chosen_route_idxs,
-            ignore_max_route_len=ignore_type4_max_route_len,
-            allow_halt=type4_allow_halt,
-        )
-        type4_gather = chosen_route_idxs[:, type4_idxs, None, None].expand(
-            -1, -1, -1, max_n_nodes)
-        new_type4_routes = new_type4_all[:, type4_idxs].gather(
-            2, type4_gather).squeeze(2)
+        if process_neural_bees_sequentially:
+            new_type4_routes = _run_selected_route_variants_for_bees(
+                get_neural_extend_variants, bee_model, env_state,
+                bee_networks, chosen_route_idxs, type4_idxs,
+                ignore_max_route_len=ignore_type4_max_route_len,
+                allow_halt=type4_allow_halt)
+        else:
+            new_type4_all = get_neural_extend_variants(
+                bee_model,
+                env_state,
+                bee_networks,
+                chosen_route_idxs,
+                ignore_max_route_len=ignore_type4_max_route_len,
+                allow_halt=type4_allow_halt,
+            )
+            type4_gather = chosen_route_idxs[:, type4_idxs, None, None].expand(
+                -1, -1, -1, max_n_nodes)
+            new_type4_routes = new_type4_all[:, type4_idxs].gather(
+                2, type4_gather).squeeze(2)
         new_routes[:, type4_idxs] = new_type4_routes
 
     if edit_model is not None and n_type5 > 0:
         # modify type 5 routes: single-step edit (extend / trim_start /
         # trim_end / halt) using a trim-capable model.
-        new_type5_all = get_neural_edit_variants(
-            edit_model,
-            env_state,
-            bee_networks,
-            chosen_route_idxs,
-            ignore_max_route_len=ignore_type5_max_route_len,
-            allow_halt=type5_allow_halt,
-            adj_condition_target=adj_condition_target,
-            adj_condition_weight=adj_condition_weight,
-        )
-        type5_gather = chosen_route_idxs[:, type5_idxs, None, None].expand(
-            -1, -1, -1, max_n_nodes)
-        new_type5_routes = new_type5_all[:, type5_idxs].gather(
-            2, type5_gather).squeeze(2)
+        if process_neural_bees_sequentially:
+            new_type5_routes = _run_selected_route_variants_for_bees(
+                get_neural_edit_variants, edit_model, env_state,
+                bee_networks, chosen_route_idxs, type5_idxs,
+                ignore_max_route_len=ignore_type5_max_route_len,
+                allow_halt=type5_allow_halt,
+                adj_condition_target=adj_condition_target,
+                adj_condition_weight=adj_condition_weight)
+        else:
+            new_type5_all = get_neural_edit_variants(
+                edit_model,
+                env_state,
+                bee_networks,
+                chosen_route_idxs,
+                ignore_max_route_len=ignore_type5_max_route_len,
+                allow_halt=type5_allow_halt,
+                adj_condition_target=adj_condition_target,
+                adj_condition_weight=adj_condition_weight,
+            )
+            type5_gather = chosen_route_idxs[:, type5_idxs, None, None].expand(
+                -1, -1, -1, max_n_nodes)
+            new_type5_routes = new_type5_all[:, type5_idxs].gather(
+                2, type5_gather).squeeze(2)
         new_routes[:, type5_idxs] = new_type5_routes
 
     if edit_model is not None and n_type6 > 0:
         # modify type 6 routes: trim-only edit (trim_start / trim_end / halt)
         # using a trim-capable model. Extending is masked out.
-        new_type6_all = get_neural_trim_variants(
-            edit_model,
-            env_state,
-            bee_networks,
-            chosen_route_idxs,
-            ignore_max_route_len=ignore_type6_max_route_len,
-            allow_halt=type6_allow_halt,
-        )
-        type6_gather = chosen_route_idxs[:, type6_idxs, None, None].expand(
-            -1, -1, -1, max_n_nodes)
-        new_type6_routes = new_type6_all[:, type6_idxs].gather(
-            2, type6_gather).squeeze(2)
+        if process_neural_bees_sequentially:
+            new_type6_routes = _run_selected_route_variants_for_bees(
+                get_neural_trim_variants, edit_model, env_state,
+                bee_networks, chosen_route_idxs, type6_idxs,
+                ignore_max_route_len=ignore_type6_max_route_len,
+                allow_halt=type6_allow_halt)
+        else:
+            new_type6_all = get_neural_trim_variants(
+                edit_model,
+                env_state,
+                bee_networks,
+                chosen_route_idxs,
+                ignore_max_route_len=ignore_type6_max_route_len,
+                allow_halt=type6_allow_halt,
+            )
+            type6_gather = chosen_route_idxs[:, type6_idxs, None, None].expand(
+                -1, -1, -1, max_n_nodes)
+            new_type6_routes = new_type6_all[:, type6_idxs].gather(
+                2, type6_gather).squeeze(2)
         new_routes[:, type6_idxs] = new_type6_routes
 
     if edit_model is not None and n_type7 > 0:
         # modify type 7 routes: trim-only edit, then one construction-style
         # extension/halt step, evaluated as a single compound mutation.
         extend_model = bee_model if bee_model is not None else edit_model
-        new_type7_all = get_neural_trim_then_extend_variants(
-            edit_model,
-            extend_model,
-            env_state,
-            bee_networks,
-            chosen_route_idxs,
-            ignore_max_route_len=ignore_type7_max_route_len,
-            allow_halt=type7_allow_halt,
-        )
-        type7_gather = chosen_route_idxs[:, type7_idxs, None, None].expand(
-            -1, -1, -1, max_n_nodes)
-        new_type7_routes = new_type7_all[:, type7_idxs].gather(
-            2, type7_gather).squeeze(2)
+        if process_neural_bees_sequentially:
+            new_type7_routes = _run_selected_route_variants_for_bees(
+                get_neural_trim_then_extend_variants, edit_model, extend_model,
+                env_state, bee_networks, chosen_route_idxs, type7_idxs,
+                ignore_max_route_len=ignore_type7_max_route_len,
+                allow_halt=type7_allow_halt)
+        else:
+            new_type7_all = get_neural_trim_then_extend_variants(
+                edit_model,
+                extend_model,
+                env_state,
+                bee_networks,
+                chosen_route_idxs,
+                ignore_max_route_len=ignore_type7_max_route_len,
+                allow_halt=type7_allow_halt,
+            )
+            type7_gather = chosen_route_idxs[:, type7_idxs, None, None].expand(
+                -1, -1, -1, max_n_nodes)
+            new_type7_routes = new_type7_all[:, type7_idxs].gather(
+                2, type7_gather).squeeze(2)
         new_routes[:, type7_idxs] = new_type7_routes
 
     bee_networks.scatter_(2, gather_idx, new_routes[..., None, :])
@@ -1758,6 +1859,8 @@ def main(cfg: DictConfig, tensors:dict):
     worse_selection_uniform_mix = cfg.get('worse_selection_uniform_mix', 0.05)
     worse_selection_elite_count = cfg.get('worse_selection_elite_count', 1)
     trim_grace_period = cfg.get('trim_grace_period', 0)
+    process_neural_bees_sequentially = cfg.get(
+        'process_neural_bees_sequentially', False)
 
     if not use_neural_bees:
         bee_model = None
@@ -1813,7 +1916,9 @@ def main(cfg: DictConfig, tensors:dict):
             worse_selection_min_temperature=worse_selection_min_temperature,
             worse_selection_uniform_mix=worse_selection_uniform_mix,
             worse_selection_elite_count=worse_selection_elite_count,
-            trim_grace_period=trim_grace_period)
+            trim_grace_period=trim_grace_period,
+            process_neural_bees_sequentially=
+            process_neural_bees_sequentially)
     routes = test_output[-1]
     metrics = test_output[-2]
     unserved_demand = test_output[-3]
