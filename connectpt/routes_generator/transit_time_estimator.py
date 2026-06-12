@@ -42,6 +42,18 @@ COST_WEIGHT_KEY_ORDER = (
 # with COST_WEIGHT_KEY_ORDER. Used to enable / disable individual components.
 COST_COMPONENT_NAMES = ('demand', 'route', 'connectivity')
 
+
+def _finite_time_diameter(times, eps=EPSILON):
+    """Per-batch max finite travel time for normalization."""
+    finite_times = torch.where(torch.isfinite(times),
+                               times, torch.zeros_like(times))
+    if finite_times.ndim >= 3:
+        diameter = finite_times.flatten(1, 2).max(1).values
+    else:
+        diameter = finite_times.flatten().max().reshape(1)
+    return diameter.clamp_min(eps)
+
+
 # Accepted spellings for each cost component, mapped to its index. Lets
 # configs / notebooks refer to a component by short name, by its weight-key
 # name, or by a couple of common aliases (ATT / RTT).
@@ -1061,7 +1073,7 @@ class RouteGenBatchState:
     
     def get_global_state_features(self, include_redundancy=None):
         cost_weights = self.cost_weights_tensor
-        diameter = self.drive_times.flatten(1,2).max(1).values
+        diameter = _finite_time_diameter(self.drive_times)
         mean_route_time = self.total_route_time / (
             self.n_routes_to_plan * diameter)
 
@@ -1860,7 +1872,7 @@ class CostModule(torch.nn.Module):
         # -- the same matrix ATT / the passenger cost use. Unreachable pairs get
         # 2 * max_{k,l} T_kl (delta_ij = 0), matching the unserved-demand penalty.
         _conn_mode = getattr(self, 'connectivity_mode', 'median_weighted')
-        max_T = state.drive_times.flatten(1, 2).max(dim=1).values         # [B]
+        max_T = _finite_time_diameter(state.drive_times)                  # [B]
         unreached_penalty = (2.0 * max_T).view(-1, 1, 1)                  # [B, 1, 1]
         unreachable = nopath | (~all_pairs.isfinite())
         conn_vals = torch.where(unreachable, unreached_penalty.expand_as(all_pairs), all_pairs)
@@ -2185,7 +2197,7 @@ class MyCostModule(CostModule):
             constraint_weight, state.batch_size, state.device)
 
         # normalize all time values by the maximum drive time in the graph
-        time_normalizer = state.drive_times.flatten(1,2).max(1).values
+        time_normalizer = _finite_time_diameter(state.drive_times)
 
         n_routes = state.n_routes_to_plan
 

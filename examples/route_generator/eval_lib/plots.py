@@ -273,7 +273,8 @@ def summarize_route_changes(routes, reference_routes):
 
 def plot_plain_route_set(ax, routes, graph_or_coords, street_adj=None,
                          title=None, subtitle=None, *,
-                         palette="tab20", with_overlap_curves=True):
+                         palette="tab20", with_overlap_curves=True,
+                         show_node_labels=True, node_size=55):
     """Draw a single route set on top of the underlying street graph.
 
     Two positional conventions are supported:
@@ -316,12 +317,14 @@ def plot_plain_route_set(ax, routes, graph_or_coords, street_adj=None,
             zorder=3,
         )
 
-    ax.scatter(coords[:, 0], coords[:, 1], c="black", s=55, zorder=5)
-    for node_idx, (x_coord, y_coord) in enumerate(coords):
-        ax.text(
-            x_coord, y_coord, str(node_idx),
-            fontsize=7, color="white", ha="center", va="center", zorder=6,
-        )
+    if node_size is not None and node_size > 0:
+        ax.scatter(coords[:, 0], coords[:, 1], c="black", s=node_size, zorder=5)
+    if show_node_labels:
+        for node_idx, (x_coord, y_coord) in enumerate(coords):
+            ax.text(
+                x_coord, y_coord, str(node_idx),
+                fontsize=7, color="white", ha="center", va="center", zorder=6,
+            )
 
     ax.set_title(f"{title}\n{subtitle}" if subtitle else title,
                  fontsize=12, fontweight="bold")
@@ -385,7 +388,8 @@ def plot_demand_graph(ax, demand, graph_or_coords, street_adj=None,
 
 def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
                     street_adj=None, title=None, subtitle=None, *,
-                    palette="tab20", with_overlap_curves=True):
+                    palette="tab20", with_overlap_curves=True,
+                    show_node_labels=True, node_size=45):
     """Draw ``routes`` overlaid with diff markings vs ``reference_routes``.
 
     Edge coverage that the candidate dropped relative to the seed is drawn as
@@ -493,13 +497,15 @@ def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
         ax.scatter(coords[removed_nodes, 0], coords[removed_nodes, 1],
                    s=55, c="crimson", marker="x", linewidths=1.6, zorder=6)
 
-    ax.scatter(coords[:, 0], coords[:, 1],
-               c="black", s=45, alpha=0.65, zorder=4)
-    for node_idx, (x_coord, y_coord) in enumerate(coords):
-        ax.text(
-            x_coord, y_coord, str(node_idx),
-            fontsize=7, color="white", ha="center", va="center", zorder=7,
-        )
+    if node_size is not None and node_size > 0:
+        ax.scatter(coords[:, 0], coords[:, 1],
+                   c="black", s=node_size, alpha=0.65, zorder=4)
+    if show_node_labels:
+        for node_idx, (x_coord, y_coord) in enumerate(coords):
+            ax.text(
+                x_coord, y_coord, str(node_idx),
+                fontsize=7, color="white", ha="center", va="center", zorder=7,
+            )
 
     ax.set_title(f"{title}\n{subtitle}" if subtitle else title,
                  fontsize=12, fontweight="bold")

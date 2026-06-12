@@ -81,10 +81,12 @@ def test_get_mutants_routes_type7_through_compound_helper(monkeypatch):
 
     def fake_trim_then_extend(
             got_trim_model, got_extend_model, env_state, got_bee_networks,
-            got_chosen_route_idxs, greedy=False, ignore_max_route_len=False):
+            got_chosen_route_idxs, greedy=False, ignore_max_route_len=False,
+            allow_halt=True):
         captured["trim_model"] = got_trim_model
         captured["extend_model"] = got_extend_model
         captured["ignore_max_route_len"] = ignore_max_route_len
+        captured["allow_halt"] = allow_halt
         out = got_bee_networks.clone()
         gather_idx = got_chosen_route_idxs[..., None, None].expand(
             -1, -1, -1, out.shape[-1])
@@ -119,10 +121,77 @@ def test_get_mutants_routes_type7_through_compound_helper(monkeypatch):
         "trim_model": trim_model,
         "extend_model": extend_model,
         "ignore_max_route_len": True,
+        "allow_halt": True,
     }
     assert mutation_types.tolist() == [7, 7]
     assert torch.equal(new_networks[0, 0, 0], replacement_routes[0, 0])
     assert torch.equal(new_networks[0, 1, 1], replacement_routes[0, 1])
+
+
+def test_get_mutants_forwards_nohalt_flags_to_edit_bees(monkeypatch):
+    bee_networks = torch.tensor(
+        [[
+            [[0, 1, 2, -1], [3, 4, -1, -1]],
+            [[1, 2, 3, -1], [4, 5, -1, -1]],
+            [[2, 3, 4, -1], [5, 6, -1, -1]],
+        ]],
+        dtype=torch.long,
+    )
+    chosen_route_idxs = torch.tensor([[0, 1, 0]], dtype=torch.long)
+    edit_model = object()
+    extend_model = object()
+    captured = {}
+
+    def fake_extend(model, env_state, got_bee_networks, got_chosen_route_idxs,
+                    greedy=False, ignore_max_route_len=False,
+                    allow_halt=True):
+        captured["type4_allow_halt"] = allow_halt
+        return got_bee_networks
+
+    def fake_edit(model, env_state, got_bee_networks, got_chosen_route_idxs,
+                  greedy=False, ignore_max_route_len=False,
+                  allow_extend=True, allow_trim_start=True,
+                  allow_trim_end=True, allow_halt=True,
+                  adj_condition_target=None, adj_condition_weight=None):
+        captured["type5_allow_halt"] = allow_halt
+        return got_bee_networks
+
+    def fake_trim(model, env_state, got_bee_networks, got_chosen_route_idxs,
+                  greedy=False, ignore_max_route_len=False,
+                  allow_halt=True):
+        captured["type6_allow_halt"] = allow_halt
+        return got_bee_networks
+
+    monkeypatch.setattr(bee_colony, "get_neural_extend_variants", fake_extend)
+    monkeypatch.setattr(bee_colony, "get_neural_edit_variants", fake_edit)
+    monkeypatch.setattr(bee_colony, "get_neural_trim_variants", fake_trim)
+
+    bee_colony.get_mutants(
+        bee_networks,
+        chosen_route_idxs,
+        n_type1=0,
+        n_type2=0,
+        direct_sat_dmd=torch.zeros((1, 1, 1)),
+        shorten_prob=0.0,
+        street_node_neighbours=torch.zeros((1, 1, 1), dtype=torch.bool),
+        shortest_paths=torch.zeros((1, 1, 1, 1), dtype=torch.long),
+        force_linking_unlinked=False,
+        bee_model=extend_model,
+        env_state=object(),
+        n_type4=1,
+        n_type5=1,
+        n_type6=1,
+        edit_model=edit_model,
+        type4_allow_halt=False,
+        type5_allow_halt=False,
+        type6_allow_halt=False,
+    )
+
+    assert captured == {
+        "type4_allow_halt": False,
+        "type5_allow_halt": False,
+        "type6_allow_halt": False,
+    }
 
 
 def test_mutation_stats_include_type7_and_worse_acceptance_bucket():

@@ -204,6 +204,16 @@ class HaltPolicy(torch.nn.Module):
         return actions, logits, entropy
 
 
+class HugeNodepairScorer(torch.nn.Module):
+    def forward(self, inpt):
+        return torch.full(
+            tuple(inpt.shape[:-1]) + (1,),
+            1e9,
+            dtype=inpt.dtype,
+            device=inpt.device,
+        )
+
+
 class IdentityGraphNet(torch.nn.Module):
     in_node_dim = 2
     in_edge_dim = 14
@@ -1215,6 +1225,86 @@ def test_my_cost_components_reconstruct_scalar_cost_for_simplex_weights():
         result.cost,
         atol=1e-6,
     )
+
+
+def test_my_cost_module_handles_disconnected_drive_times():
+    node_locs = torch.tensor(
+        [[0.0, 0.0], [1.0, 0.0], [10.0, 0.0], [11.0, 0.0]],
+        dtype=torch.float32,
+    )
+    street_adj = torch.full((4, 4), float("inf"))
+    street_adj.fill_diagonal_(0.0)
+    street_adj[0, 1] = street_adj[1, 0] = 10.0
+    street_adj[2, 3] = street_adj[3, 2] = 10.0
+    demand = torch.zeros((4, 4), dtype=torch.float32)
+    demand[0, 3] = demand[3, 0] = 5.0
+    graph = CityGraphData.from_tensors(node_locs, street_adj, demand,
+                                       pos_only=False)
+    assert torch.isfinite(graph["stop", "demand", "stop"].edge_attr).all()
+    cost_obj = MyCostModule(
+        demand_time_weight=0.0,
+        route_time_weight=0.5,
+        median_connectivity_weight=0.5,
+        use_weighted_connectivity=True,
+    )
+    state = RouteGenBatchState(
+        graph,
+        cost_obj,
+        n_routes_to_plan=1,
+        min_route_len=2,
+        max_route_len=3,
+        cost_weights=cost_obj.get_weights(torch.device("cpu")),
+    )
+    state.set_current_routes([0, 1])
+
+    result = cost_obj(state)
+    components = cost_obj.get_cost_components(state, result=result)
+    features = state.get_global_state_features()
+    model = PathCombiningRouteGenerator(
+        backbone_net=IdentityGraphNet(),
+        mean_stop_time_s=0,
+        embed_dim=2,
+        n_nodepair_layers=1,
+        n_pathscorer_layers=1,
+        pathscorer_hidden_dim=8,
+        n_halt_layers=1,
+        n_halt_heads=1,
+        symmetric_routes=True,
+        serial_halting=True,
+    )
+    model.setup_planning(state)
+    edge_features = model._get_edge_features(state)
+
+    assert torch.isfinite(result.cost).all()
+    assert torch.isfinite(components).all()
+    assert torch.isfinite(features).all()
+    assert torch.isfinite(edge_features).all()
+
+
+def test_path_combiner_clips_huge_nodepair_scores():
+    state = make_line_state(n_nodes=4, max_route_len=4)
+    state.set_current_routes([0, 1])
+    model = PathCombiningRouteGenerator(
+        backbone_net=IdentityGraphNet(),
+        mean_stop_time_s=0,
+        embed_dim=2,
+        n_nodepair_layers=1,
+        n_pathscorer_layers=1,
+        pathscorer_hidden_dim=8,
+        n_halt_layers=1,
+        n_halt_heads=1,
+        symmetric_routes=True,
+        serial_halting=True,
+    )
+    model.nodepair_scorer = HugeNodepairScorer()
+    model.setup_planning(state)
+
+    _node_descs, _node_pad_mask, _np_embeds, path_scores = \
+        model._encode_graph(state)
+
+    valid_scores = path_scores[path_scores > -1e9]
+    assert valid_scores.numel() > 0
+    assert torch.isfinite(valid_scores).all()
 
 
 def test_disabling_a_cost_component_drops_it_from_the_weighted_cost():

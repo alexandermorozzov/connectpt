@@ -26,6 +26,7 @@ from .transit_time_estimator import (
     ROUTE_ACTION_TRIM_END,
     ROUTE_ACTION_TRIM_START,
     RouteGenBatchState,
+    _finite_time_diameter,
 )
 
 Q_FUNC_MODE = "q function"
@@ -987,6 +988,14 @@ class RouteGeneratorBase(nn.Module):
             if isinstance(mod, FeatureNorm):
                 mod.freeze()
 
+    def _finite_time_features(self, state, times):
+        """Replace unreachable travel times with a finite graph penalty."""
+        penalty = 2.0 * _finite_time_diameter(state.drive_times)
+        penalty = penalty.to(device=times.device, dtype=times.dtype)
+        while penalty.ndim < times.ndim:
+            penalty = penalty.unsqueeze(-1)
+        return torch.where(torch.isfinite(times), times, penalty)
+
     def plan(self, *args, **kwargs):
         return self.forward_oldenv(*args, **kwargs)        
 
@@ -1095,7 +1104,8 @@ class RouteGeneratorBase(nn.Module):
         edge_features = torch.cat((edge_features, cost_weight_planes), dim=-1)
         edge_features = self.edge_norm(edge_features)
 
-        drive_times = self.time_norm(state.drive_times[..., None])
+        finite_drive_times = self._finite_time_features(state, state.drive_times)
+        drive_times = self.time_norm(finite_drive_times[..., None])
         edge_features = torch.cat((edge_features, drive_times), dim=-1)
 
         return edge_features
@@ -1449,7 +1459,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         return actions, all_logits, all_entropy
 
     def step(self, state: RouteGenBatchState, greedy=False, actions=None,
-             precalc_data=None):
+             precalc_data=None, allow_halt=True):
         """Take an action for the given state.
         actions -- a batch_size x 2 tensor of predetermined actions to take. If
             None, the actions will be chosen by the model.  If the value is 
@@ -1536,6 +1546,9 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         ext_valid = prev_valid | next_valid
         no_valid_ext = ~ext_valid.any(-1).any(-1)
         halt_scores[~starting & no_valid_ext] = TORCH_FMAX
+        if not allow_halt:
+            halt_scores = halt_scores.clone()
+            halt_scores[~old_route_is_done] = TORCH_FMIN
 
         if self.serial_halting:
             # decide whether to halt
@@ -1663,9 +1676,15 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             np_embeds = get_node_pair_descs(node_descs)
         np_embeds = torch.cat((np_embeds, edge_feats_square), dim=-1)
         np_scores = self.nodepair_scorer(np_embeds).squeeze(-1)
-
-        assert (np_scores.abs() < 10**6).all(), "Nodepair scores are " \
-            "blowing up, something wierd is going on!"
+        score_clip = 10**6
+        if (not torch.isfinite(np_scores).all()) or \
+                (np_scores.abs() >= score_clip).any():
+            log.warning(
+                "Nodepair scores exceeded the safe range; clipping for "
+                "route generation.")
+            np_scores = torch.nan_to_num(
+                np_scores, nan=0.0, posinf=score_clip, neginf=-score_clip)
+            np_scores = np_scores.clamp(-score_clip, score_clip)
 
         path_scores = tu.aggr_edges_over_sequences(path_seqs,
                                                    np_scores[..., None], 'sum')
@@ -1757,6 +1776,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
                                           routes_but_terminal]
 
         # use a neural network to compute scores and lengths
+        times_on_route = self._finite_time_features(state, times_on_route)
         norm_times = self.time_norm(times_on_route.flatten(0, 2)[:, None])
         norm_times = norm_times.reshape_as(times_on_route)[..., None]
         log.debug("updating edge scores...")
@@ -1873,6 +1893,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             prev_drive_time = prev_drive_time[:, None]
             prev_drive_time = prev_drive_time.expand(-1, 
                                                      new_drive_times.shape[-1])
+        new_drive_times = self._finite_time_features(state, new_drive_times)
+        prev_drive_time = self._finite_time_features(state, prev_drive_time)
         
         update_in = torch.stack((base_path_scores, new_drive_times,
                                  new_path_lens, prev_drive_time, prev_len), 

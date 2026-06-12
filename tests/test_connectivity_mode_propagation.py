@@ -236,7 +236,9 @@ def test_paper_combined_streams_csv_rows_with_duration():
     # notebook imports them from there.
     assert "append_paper_row" in text
     assert "paper_row as _row" in text
-    assert "def _e2_row(ctx, series_col, label, alpha, target, routes, metrics, duration_s=None):" in text
+    # Signature gained seed_metrics/adj_weight params in the E2 rework; anchor
+    # on the stable prefix rather than the full line.
+    assert "def _e2_row(ctx, series_col, label, alpha, target, routes, metrics," in text
 
     assert "append_paper_row(row, _e2_our_table, ndigits=4)" in text
     assert "append_paper_row(row, _e2_abl_table, ndigits=4)" in text
@@ -244,7 +246,10 @@ def test_paper_combined_streams_csv_rows_with_duration():
     assert "append_paper_row(row, comparison_table_name, ndigits=3)" in text
 
     assert "r, m, dt = _run_rttwmc" in text
-    assert text.count('r, dt = run_one(f"Initial (LC+{EXP_INIT_TIER})"') == 1
+    # The initial route is still scored exactly once, now via an init_method
+    # variable instead of an inline f-string.
+    assert text.count('init_method = f"Initial (LC+{EXP_INIT_TIER})"') == 1
+    assert "r, dt = run_one(init_method, lambda: _run_baseline(" in text
 
 
 def test_paper_combined_uses_two_sided_adj_objective():

@@ -435,7 +435,10 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                ignore_type5_max_route_len=False,
                ignore_type6_max_route_len=False,
                ignore_type7_max_route_len=False,
+               type4_allow_halt=True,
                type5_allow_halt=True,
+               type6_allow_halt=True,
+               type7_allow_halt=True,
                use_demand_weighted_route_selection=False,
                worse_accept_temperature=0.0,
                worse_accept_decay=0.995,
@@ -473,6 +476,9 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     n_type6_bees -- neural trim-only bees that apply one trim/halt step.
     n_type7_bees -- neural compound bees that apply one trim-only step and
         then one construction/extension step before evaluation.
+    type4_allow_halt/type5_allow_halt/type6_allow_halt/type7_allow_halt --
+        whether the corresponding one-step mutation bees may return a no-op
+        halt when another action is valid.
     silent -- if true, no tqdm output or printing
     bee_model -- if a torch model is provided, use it as the only bee type.
     adjustment_degree_weight -- penalty weight for changing routes too much
@@ -743,7 +749,10 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                                 edit_model=edit_model,
                                 ignore_type4_max_route_len=
                                 ignore_type4_max_route_len,
+                                type4_allow_halt=type4_allow_halt,
                                 type5_allow_halt=type5_allow_halt,
+                                type6_allow_halt=type6_allow_halt,
+                                type7_allow_halt=type7_allow_halt,
                                 adj_condition_target=adjustment_degree_target,
                                 adj_condition_weight=adjustment_degree_weight,
                                 ignore_type5_max_route_len=
@@ -1003,7 +1012,10 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
                 shortest_paths, force_linking_unlinked, bee_model=None,
                 rpc_model=None, env_state=None, n_type4=0,
                 n_type5=0, n_type6=0, n_type7=0, edit_model=None,
+                type4_allow_halt=True,
                 type5_allow_halt=True,
+                type6_allow_halt=True,
+                type7_allow_halt=True,
                 adj_condition_target=None, adj_condition_weight=None,
                 ignore_type4_max_route_len=False,
                 ignore_type5_max_route_len=False,
@@ -1107,6 +1119,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
             bee_networks,
             chosen_route_idxs,
             ignore_max_route_len=ignore_type4_max_route_len,
+            allow_halt=type4_allow_halt,
         )
         type4_gather = chosen_route_idxs[:, type4_idxs, None, None].expand(
             -1, -1, -1, max_n_nodes)
@@ -1142,6 +1155,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
             bee_networks,
             chosen_route_idxs,
             ignore_max_route_len=ignore_type6_max_route_len,
+            allow_halt=type6_allow_halt,
         )
         type6_gather = chosen_route_idxs[:, type6_idxs, None, None].expand(
             -1, -1, -1, max_n_nodes)
@@ -1160,6 +1174,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
             bee_networks,
             chosen_route_idxs,
             ignore_max_route_len=ignore_type7_max_route_len,
+            allow_halt=type7_allow_halt,
         )
         type7_gather = chosen_route_idxs[:, type7_idxs, None, None].expand(
             -1, -1, -1, max_n_nodes)
@@ -1218,7 +1233,8 @@ def get_new_route_variants(batch_bee_routes, direct_sat_dmd_mat, shortest_paths,
 
 
 def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs,
-                               greedy=False, ignore_max_route_len=False):
+                               greedy=False, ignore_max_route_len=False,
+                               allow_halt=True):
     """Extend chosen routes with a single GNN step instead of rebuilding them.
 
     For each bee, the chosen route is set as the current in-progress route and
@@ -1265,9 +1281,11 @@ def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs
                     env_state, greedy=greedy,
                     allow_extend=True,
                     allow_trim_start=False,
-                    allow_trim_end=False)
+                    allow_trim_end=False,
+                    allow_halt=allow_halt)
             else:
-                action, _, _ = model.step(env_state, greedy=greedy)
+                action, _, _ = model.step(
+                    env_state, greedy=greedy, allow_halt=allow_halt)
         finally:
             env_state.extra_data.max_route_len = original_max_route_len
     else:
@@ -1276,9 +1294,11 @@ def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs
                 env_state, greedy=greedy,
                 allow_extend=True,
                 allow_trim_start=False,
-                allow_trim_end=False)
+                allow_trim_end=False,
+                allow_halt=allow_halt)
         else:
-            action, _, _ = model.step(env_state, greedy=greedy)
+            action, _, _ = model.step(
+                env_state, greedy=greedy, allow_halt=allow_halt)
 
     if supports_trim_actions:
         halted = action_kinds == ROUTE_ACTION_HALT
@@ -1423,7 +1443,8 @@ def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
 
 
 def get_neural_trim_variants(model, env_state, bee_networks, chosen_route_idxs,
-                             greedy=False, ignore_max_route_len=False):
+                             greedy=False, ignore_max_route_len=False,
+                             allow_halt=True):
     """Apply one trim-only edit step per bee.
 
     This is the BCO type-6 mutation: the selected route is the current route,
@@ -1441,13 +1462,15 @@ def get_neural_trim_variants(model, env_state, bee_networks, chosen_route_idxs,
         allow_extend=False,
         allow_trim_start=True,
         allow_trim_end=True,
+        allow_halt=allow_halt,
     )
 
 
 def get_neural_trim_then_extend_variants(trim_model, extend_model, env_state,
                                          bee_networks, chosen_route_idxs,
                                          greedy=False,
-                                         ignore_max_route_len=False):
+                                         ignore_max_route_len=False,
+                                         allow_halt=True):
     """Apply trim-only edit followed by one construction-style extension.
 
     This is the BCO type-7 compound mutation.  It lets a bee pass through a
@@ -1469,6 +1492,7 @@ def get_neural_trim_then_extend_variants(trim_model, extend_model, env_state,
         chosen_route_idxs,
         greedy=greedy,
         ignore_max_route_len=ignore_max_route_len,
+        allow_halt=allow_halt,
     )
     return get_neural_extend_variants(
         extend_model,
@@ -1477,6 +1501,7 @@ def get_neural_trim_then_extend_variants(trim_model, extend_model, env_state,
         chosen_route_idxs,
         greedy=greedy,
         ignore_max_route_len=ignore_max_route_len,
+        allow_halt=allow_halt,
     )
 
 
@@ -1716,6 +1741,10 @@ def main(cfg: DictConfig, tensors:dict):
     ignore_type5_max_route_len = cfg.get('ignore_type5_max_route_len', False)
     ignore_type6_max_route_len = cfg.get('ignore_type6_max_route_len', False)
     ignore_type7_max_route_len = cfg.get('ignore_type7_max_route_len', False)
+    type4_allow_halt = cfg.get('type4_allow_halt', True)
+    type5_allow_halt = cfg.get('type5_allow_halt', True)
+    type6_allow_halt = cfg.get('type6_allow_halt', True)
+    type7_allow_halt = cfg.get('type7_allow_halt', True)
     use_demand_weighted_route_selection = \
         cfg.get('use_demand_weighted_route_selection', False)
     worse_accept_temperature = cfg.get('worse_accept_temperature', 0.0)
@@ -1770,6 +1799,10 @@ def main(cfg: DictConfig, tensors:dict):
             ignore_type5_max_route_len=ignore_type5_max_route_len,
             ignore_type6_max_route_len=ignore_type6_max_route_len,
             ignore_type7_max_route_len=ignore_type7_max_route_len,
+            type4_allow_halt=type4_allow_halt,
+            type5_allow_halt=type5_allow_halt,
+            type6_allow_halt=type6_allow_halt,
+            type7_allow_halt=type7_allow_halt,
             use_demand_weighted_route_selection=
             use_demand_weighted_route_selection,
             worse_accept_temperature=worse_accept_temperature,
