@@ -54,3 +54,6 @@ defaults:
   - _self_
   - experiment: standard
   - model: bestsofar_feb2023
+# Standardize advantages over each update's active steps (scale-invariant
+# policy gradient; vital with per-batch sampled cost weights).
+normalize_advantages: true

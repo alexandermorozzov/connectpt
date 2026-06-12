@@ -2111,6 +2111,8 @@ def train_lc_improvement_cfg_ppo(
     clip_epsilon = float(cfg.ppo.epsilon)
     use_gae = bool(cfg.ppo.use_gae)
     gae_lambda = float(cfg.ppo.gae_lambda)
+    normalize_advantages = bool(
+        _get_cfg_value(cfg, "normalize_advantages", True))
 
     # Optional adjustment-degree reward shaping. When weight <= 0 (the default)
     # every code path below is bypassed and training is bit-for-bit unchanged.
@@ -2497,6 +2499,15 @@ def train_lc_improvement_cfg_ppo(
             rollout["rewards"], rollout["value_estimates"],
             rollout["dones"], rollout["final_value_estimates"], gamma,
             use_gae, gae_lambda)
+        if normalize_advantages:
+            # Standardize over the active steps of this update. Makes the
+            # policy gradient invariant to the reward scale, which otherwise
+            # varies a lot across batches (sampled cost weights alpha, graph
+            # difficulty) and drowns the small per-edit improvement signal.
+            _act = rollout["active_masks"]
+            if _act.any():
+                _a = advantages[_act]
+                advantages = (advantages - _a.mean()) / (_a.std() + 1e-8)
         ppo_stats = _update_lc_improvement_cfg_ppo_from_rollout(
             model, optimizer, value_module, rollout, returns, advantages,
             ppo_epochs, minibatch_size, clip_epsilon, entropy_weight, device)
