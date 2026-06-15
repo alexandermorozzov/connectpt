@@ -630,6 +630,16 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     bee_states = RouteGenBatchState.batch_from_list(exp_states)
     if bee_model is not None:
         bee_states = bee_model.setup_planning(bee_states)
+    # Sequential neural-bee processing runs the model on one bee at a time and
+    # needs a state whose batch equals the number of graphs (not graphs *
+    # n_bees), so a single bee's network is not broadcast up to the full bee
+    # batch by the route-replace path. Build it once and reuse it per bee.
+    single_bee_states = None
+    if process_neural_bees_sequentially:
+        single_bee_states = RouteGenBatchState.batch_from_list(
+            state.batch_to_list())
+        if bee_model is not None:
+            single_bee_states = bee_model.setup_planning(single_bee_states)
 
     metric_names = cost_obj.get_metric_names()
     
@@ -768,6 +778,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                                 ignore_type7_max_route_len,
                                 process_neural_bees_sequentially=
                                 process_neural_bees_sequentially,
+                                single_bee_env_state=single_bee_states,
                                 return_mutation_metadata=True)
 
                 new_bee_raw_costs, new_bee_metrics = \
@@ -1082,8 +1093,18 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
                 ignore_type6_max_route_len=False,
                 ignore_type7_max_route_len=False,
                 process_neural_bees_sequentially=False,
+                single_bee_env_state=None,
                 return_mutation_metadata=False):
     bee_networks = bee_networks.clone()
+
+    # Sequential neural-bee processing runs the model on a single bee at a
+    # time, so it needs a state whose batch == the number of graphs (not
+    # graphs * n_bees). Otherwise the per-bee 1-network input is broadcast back
+    # up to the full bee batch by the state's route-replace path, corrupting
+    # results. Fall back to env_state only for callers (e.g. unit tests) that
+    # stub the variant fns and never touch the real state.
+    seq_state = single_bee_env_state if single_bee_env_state is not None \
+        else env_state
 
     # flatten batch and bee dimensions
     gather_idx = chosen_route_idxs[..., None, None]
@@ -1142,7 +1163,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
     elif bee_model is not None:
         if process_neural_bees_sequentially:
             new_type1_routes = _run_rebuild_variants_for_bees(
-                get_neural_variants, bee_model, env_state, bee_networks,
+                get_neural_variants, bee_model, seq_state, bee_networks,
                 chosen_route_idxs, type1_idxs)
         else:
             # run it on all bees...
@@ -1173,7 +1194,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
         # modify type 3 routes
         if process_neural_bees_sequentially:
             new_type3_routes = _run_rebuild_variants_for_bees(
-                get_neural_variants, rpc_model, env_state, bee_networks,
+                get_neural_variants, rpc_model, seq_state, bee_networks,
                 chosen_route_idxs, type3_idxs)
         else:
             new_type3_networks = get_neural_variants(rpc_model, env_state,
@@ -1186,7 +1207,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
         # modify type 4 routes: single-step GNN extension of the chosen route
         if process_neural_bees_sequentially:
             new_type4_routes = _run_selected_route_variants_for_bees(
-                get_neural_extend_variants, bee_model, env_state,
+                get_neural_extend_variants, bee_model, seq_state,
                 bee_networks, chosen_route_idxs, type4_idxs,
                 ignore_max_route_len=ignore_type4_max_route_len,
                 allow_halt=type4_allow_halt)
@@ -1210,7 +1231,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
         # trim_end / halt) using a trim-capable model.
         if process_neural_bees_sequentially:
             new_type5_routes = _run_selected_route_variants_for_bees(
-                get_neural_edit_variants, edit_model, env_state,
+                get_neural_edit_variants, edit_model, seq_state,
                 bee_networks, chosen_route_idxs, type5_idxs,
                 ignore_max_route_len=ignore_type5_max_route_len,
                 allow_halt=type5_allow_halt,
@@ -1238,7 +1259,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
         # using a trim-capable model. Extending is masked out.
         if process_neural_bees_sequentially:
             new_type6_routes = _run_selected_route_variants_for_bees(
-                get_neural_trim_variants, edit_model, env_state,
+                get_neural_trim_variants, edit_model, seq_state,
                 bee_networks, chosen_route_idxs, type6_idxs,
                 ignore_max_route_len=ignore_type6_max_route_len,
                 allow_halt=type6_allow_halt)
@@ -1264,7 +1285,7 @@ def get_mutants(bee_networks, chosen_route_idxs, n_type1, n_type2,
         if process_neural_bees_sequentially:
             new_type7_routes = _run_selected_route_variants_for_bees(
                 get_neural_trim_then_extend_variants, edit_model, extend_model,
-                env_state, bee_networks, chosen_route_idxs, type7_idxs,
+                seq_state, bee_networks, chosen_route_idxs, type7_idxs,
                 ignore_max_route_len=ignore_type7_max_route_len,
                 allow_halt=type7_allow_halt)
         else:

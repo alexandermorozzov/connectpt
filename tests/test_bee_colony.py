@@ -296,6 +296,45 @@ def test_get_mutants_can_process_type5_edit_bees_sequentially(monkeypatch):
         assert torch.equal(new_networks[0, bee_idx, route_idx], expected)
 
 
+def test_sequential_neural_bees_use_single_bee_env_state(monkeypatch):
+    """Per-bee neural calls must run on the single-bee state (batch == n_graphs),
+    not the full graphs*n_bees bee state, or the 1-bee input is broadcast back
+    up to the whole bee batch and corrupts/crashes the result."""
+    bee_networks = torch.tensor(
+        [[
+            [[0, 1, 2, -1], [3, 4, -1, -1]],
+            [[1, 2, 3, -1], [4, 5, -1, -1]],
+        ]],
+        dtype=torch.long,
+    )
+    chosen_route_idxs = torch.tensor([[0, 0]], dtype=torch.long)
+    seen_states = []
+
+    def fake_edit(model, env_state, got_bee_networks, got_chosen_route_idxs,
+                  **kwargs):
+        seen_states.append(env_state)
+        return got_bee_networks.clone()
+
+    monkeypatch.setattr(bee_colony, "get_neural_edit_variants", fake_edit)
+
+    full_state = object()
+    single_state = object()
+    bee_colony.get_mutants(
+        bee_networks, chosen_route_idxs, n_type1=0, n_type2=0,
+        direct_sat_dmd=torch.zeros((1, 1, 1)), shorten_prob=0.0,
+        street_node_neighbours=torch.zeros((1, 1, 1), dtype=torch.bool),
+        shortest_paths=torch.zeros((1, 1, 1, 1), dtype=torch.long),
+        force_linking_unlinked=False, bee_model=object(),
+        env_state=full_state, n_type5=2, edit_model=object(),
+        process_neural_bees_sequentially=True,
+        single_bee_env_state=single_state,
+        return_mutation_metadata=True)
+
+    assert seen_states, "edit variant fn was never called"
+    assert all(s is single_state for s in seen_states), \
+        "sequential edit bees ran on the full bee state, not the single-bee one"
+
+
 def test_mutation_stats_include_type7_and_worse_acceptance_bucket():
     mutation_stats = {}
     mutation_types = torch.tensor([1, 7], dtype=torch.long)
