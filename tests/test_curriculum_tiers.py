@@ -86,6 +86,42 @@ def test_all_tiers_respect_contract_and_run():
         _run_tier(name)
 
 
+def test_corrupt_all_routes_damages_every_route():
+    from eval_lib.route_copies import count_changed_routes
+
+    adj = _grid_street_adj()
+    demand = _uniform_demand()
+    for name in CURRICULUM_TIER_CFG:
+        base = _base_routes()
+        n_routes = int(base.shape[0])
+        out, applied = inject_curriculum_tier(
+            base, CURRICULUM_TIER_CFG[name], random.Random(0),
+            MIN_LEN, MAX_LEN, street_adj=adj, demand=demand, n_nodes=N_NODES,
+            target_corrupt_routes=n_routes)
+        _assert_contract(out, adj)
+        # every route slot differs from the clean seed, even on lc_clean.
+        assert count_changed_routes(base, out) == n_routes, name
+
+
+def test_target_corrupt_routes_respects_minimum_count():
+    from eval_lib.route_copies import count_changed_routes
+
+    adj = _grid_street_adj()
+    demand = _uniform_demand()
+    base = _base_routes()
+    out, _ = inject_curriculum_tier(
+        base, CURRICULUM_TIER_CFG["lc_clean"], random.Random(0),
+        MIN_LEN, MAX_LEN, street_adj=adj, demand=demand, n_nodes=N_NODES,
+        target_corrupt_routes=3)
+    assert count_changed_routes(base, out) >= 3
+    # default (no target) leaves the clean tier untouched.
+    base2 = _base_routes()
+    out2, _ = inject_curriculum_tier(
+        base2, CURRICULUM_TIER_CFG["lc_clean"], random.Random(0),
+        MIN_LEN, MAX_LEN, street_adj=adj, demand=demand, n_nodes=N_NODES)
+    assert count_changed_routes(base2, out2) == 0
+
+
 def test_dup_gross_increases_redundancy():
     base, out, applied, _, _ = _run_tier("dup_gross")
     assert sum(v for k, v in applied.items() if k.startswith("dup_")) >= 1

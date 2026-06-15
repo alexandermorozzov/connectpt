@@ -63,6 +63,22 @@ def leg_counts(routes):
     return counts
 
 
+def count_changed_routes(before, after):
+    """Number of route slots whose node sequence differs (padding-insensitive).
+
+    Used to record how many routes a tier actually corrupted (vs. the clean
+    seed) into the dataset meta, and to drive the ``corrupt all routes`` knob.
+    """
+    n = max(int(before.shape[0]), int(after.shape[0]))
+    changed = 0
+    for i in range(n):
+        b = route_nodes(before[i]) if i < before.shape[0] else []
+        a = route_nodes(after[i]) if i < after.shape[0] else []
+        if b != a:
+            changed += 1
+    return changed
+
+
 def redundancy_stats(routes):
     """Edge-redundancy summary: fraction of traversals that re-cover an edge."""
     counts = leg_counts(routes)
@@ -545,35 +561,70 @@ def truncate_route_tails(routes, rng, min_len, max_len, frac_range=(0.3, 0.5)):
     return routes, cut_total
 
 
+def force_corrupt_untouched(out, clean, rng, min_len, target,
+                            frac_range=(0.3, 0.5)):
+    """Truncate the tails of still-clean routes until at least ``target`` of
+    them differ from ``clean``. The ``corrupt all routes`` knob uses this to
+    guarantee every episode lands on a damaged route. Truncation is the
+    universal headroom-guaranteeing corruption (pure re-extension repairs it,
+    and the untruncated original proves a better network exists); each forced
+    cut is tagged ``forced_trunc`` in the event Counter. Returns the number of
+    routes this top-up truncated.
+    """
+    target = min(int(target), int(out.shape[0]))
+    forced = 0
+    order = list(range(int(out.shape[0])))
+    rng.shuffle(order)
+    for i in order:
+        if count_changed_routes(clean, out) >= target:
+            break
+        if route_nodes(out[i]) != route_nodes(clean[i]):
+            continue  # already corrupted by the tier itself
+        ns = route_nodes(out[i])
+        if len(ns) <= min_len:
+            continue  # nothing left to truncate
+        frac = rng.uniform(*frac_range)
+        keep = max(min_len, int(round(len(ns) * (1.0 - frac))))
+        if keep >= len(ns):
+            keep = len(ns) - 1
+        if keep < min_len:
+            continue
+        replace_route(out, i, ns[:keep])
+        forced += 1
+    return forced
+
+
 def inject_curriculum_tier(routes, tier_cfg, rng, min_len, max_len, *,
-                           street_adj, demand, n_nodes):
+                           street_adj, demand, n_nodes,
+                           target_corrupt_routes=None):
     """Apply one curriculum tier to a clean network.
 
     Dispatches on ``tier_cfg['kind']`` and returns ``(routes, applied)``
     where ``applied`` is a Counter of injected events (kinds prefixed by
     defect type, plus ``stub_cut_stops`` for the stub tier).
+
+    ``target_corrupt_routes`` (optional): after the tier's own injection,
+    truncate still-clean routes until at least this many routes differ from the
+    seed (capped at the number of routes). Pass the route count to corrupt
+    *every* route. ``None`` (default) leaves the tier behaviour unchanged.
     """
     kind = tier_cfg["kind"]
     applied = Counter()
+    clean = routes.clone()
 
     if kind == "clean":
-        return routes.clone(), applied
-
-    if kind == "copies":
+        out = routes.clone()
+    elif kind == "copies":
         out, events, _ = inject_route_copies(
             routes, tier_cfg, rng, min_len, max_len,
             demand=demand, n_nodes=n_nodes, street_adj=street_adj)
         for k, v in events.items():
             applied[f"dup_{k}"] += v
-        return out, applied
-
-    if kind == "stub":
+    elif kind == "stub":
         out, cut = truncate_route_tails(routes, rng, min_len, max_len,
                                         tier_cfg["frac_range"])
         applied["stub_cut_stops"] = cut
-        return out, applied
-
-    if kind == "detours":
+    elif kind == "detours":
         out = routes.clone()
         for _ in range(int(tier_cfg["events"])):
             res = try_detour_mutation(
@@ -589,9 +640,7 @@ def inject_curriculum_tier(routes, tier_cfg, rng, min_len, max_len, *,
                 ri, candidate, _, _ = res
                 replace_route(out, ri, candidate)
                 applied["detour"] += 1
-        return out, applied
-
-    if kind == "drops":
+    elif kind == "drops":
         out = routes.clone()
         for _ in range(int(tier_cfg["events"])):
             if uncovered_demand_pct(out, demand, n_nodes) >= \
@@ -604,12 +653,18 @@ def inject_curriculum_tier(routes, tier_cfg, rng, min_len, max_len, *,
             ri, candidate, _ = res
             replace_route(out, ri, candidate)
             applied["drop_cover"] += 1
-        return out, applied
-
-    if kind == "mix":
+    elif kind == "mix":
         sub_cfg = {k: v for k, v in tier_cfg.items() if k != "kind"}
-        return inject_realistic_tier(routes, rng, min_len, max_len,
-                                     street_adj=street_adj, demand=demand,
-                                     n_nodes=n_nodes, tier_cfg=sub_cfg)
+        out, applied = inject_realistic_tier(
+            routes, rng, min_len, max_len, street_adj=street_adj,
+            demand=demand, n_nodes=n_nodes, tier_cfg=sub_cfg)
+    else:
+        raise ValueError(f"unknown curriculum tier kind: {kind}")
 
-    raise ValueError(f"unknown curriculum tier kind: {kind}")
+    if target_corrupt_routes is not None:
+        forced = force_corrupt_untouched(
+            out, clean, rng, min_len, int(target_corrupt_routes))
+        if forced:
+            applied["forced_trunc"] += forced
+
+    return out, applied
