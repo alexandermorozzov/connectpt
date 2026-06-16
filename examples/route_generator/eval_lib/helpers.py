@@ -522,7 +522,8 @@ def build_edit_model(device, weights_path=None, load_weights=True):
 
 
 def run_bco(cfg, init_routes, mutation_counts_out=None, *,
-            tensors=None, run_name_scope="", cost_history_out=None):
+            tensors=None, run_name_scope="", cost_history_out=None,
+            iteration_callback=None):
     # tensors=None -> Mumford0 dataloader; tensors=<dict> -> explicit
     # tensor dataset. run_name_scope prefixes the run name so the
     # benchmark paths can keep their dataset/run-name labels.
@@ -564,6 +565,7 @@ def run_bco(cfg, init_routes, mutation_counts_out=None, *,
         return_routes=True,
         return_histories=cost_history_out is not None,
         routes_tensor=init_routes,
+        iteration_callback=iteration_callback,
         n_bees=cfg.n_bees,
         n_iterations=cfg.n_iterations,
         n_type1_bees=cfg.get("n_type1_bees", None),

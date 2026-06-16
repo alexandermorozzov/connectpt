@@ -423,6 +423,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                n_type1_bees=None, n_type2_bees=None, n_type4_bees=0,
                n_type5_bees=0, n_type6_bees=0, n_type7_bees=0,
                silent=False,
+               iteration_callback=None,
                force_linking_unlinked=False,
                bee_model=None, edit_model=None,
                sum_writer=None, mutation_counts_out=None,
@@ -892,7 +893,19 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                 bee_adjustment_penalties[is_improvement, improvement_idx]
             cost_history[:, iteration + 1] = best_raw_costs
             new_best = bee_metrics[is_improvement, improvement_idx]
-            best_metrics[is_improvement] = new_best     
+            best_metrics[is_improvement] = new_best
+
+            # Live checkpoint: whenever the incumbent improves, hand the current
+            # best network (+ its costs/metrics) to an optional callback so a
+            # caller can persist it -- so an early stop never loses the best.
+            if iteration_callback is not None and bool(is_improvement.any()):
+                try:
+                    iteration_callback(int(iteration), best_networks,
+                                       best_objective_costs,
+                                       best_adjustment_degrees,
+                                       best_metrics, metric_names)
+                except Exception as _cb_exc:
+                    log.warning(f"bee_colony iteration_callback failed: {_cb_exc}")
 
             if use_worse_selection and current_worse_selection_temperature > 0:
                 parent_idxs = _sample_soft_selection_parents(
