@@ -2038,7 +2038,8 @@ def train_lc_improvement_cfg_ppo(
         best_model_path=None,
         max_rollout_samples=8192, target_n_routes=None,
         curriculum_fn=None, val_curriculum_fn=None,
-        history_checkpoint_path=None, tensorboard_logdir=None):
+        history_checkpoint_path=None, tensorboard_logdir=None,
+        tensorboard_scalars=None):
     """Train LC improvement with the construction PPO machinery adapted to edits.
 
     ``curriculum_fn(iteration) -> (indices, stage_label)`` optionally restricts
@@ -2665,6 +2666,8 @@ def train_lc_improvement_cfg_ppo(
         if tb_writer is not None:
             _step = int(row.get("iteration", len(history)))
             for _k, _v in row.items():
+                if tensorboard_scalars is not None and _k not in tensorboard_scalars:
+                    continue
                 if isinstance(_v, bool):
                     _v = int(_v)
                 if isinstance(_v, (int, float)) and _v == _v:  # skip NaN
