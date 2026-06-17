@@ -2087,12 +2087,19 @@ class MyCostModule(CostModule):
             n_intermediate = is_intermediate.sum()
             
             if n_intermediate > 0:
-                # Generate random weights using uniform distribution on the simplex
-                weights = torch.rand(n_intermediate, 3, device=device)
-                weights = weights / weights.sum(dim=1, keepdim=True)  # Normalize to sum to 1
-                dtw[is_intermediate] = weights[:, 0]
-                rtw[is_intermediate] = weights[:, 1]
-                mcw[is_intermediate] = weights[:, 2]
+                # Uniform on the simplex over the ENABLED cost components only,
+                # so disabled components (e.g. demand) never receive weight and
+                # the variation is restricted to the remaining objectives (e.g.
+                # RTT/WMC). With all three enabled this is the original
+                # 3-component simplex.
+                enabled_idx = [i for i, on in enumerate(self._enabled_components)
+                               if on]
+                cols = [dtw, rtw, mcw]
+                weights = torch.rand(int(n_intermediate), len(enabled_idx),
+                                     device=device)
+                weights = weights / weights.sum(dim=1, keepdim=True)
+                for _j, _ci in enumerate(enabled_idx):
+                    cols[_ci][is_intermediate] = weights[:, _j]
 
         return self._mask_weight_dict({
             'demand_time_weight': dtw,

@@ -2038,7 +2038,7 @@ def train_lc_improvement_cfg_ppo(
         best_model_path=None,
         max_rollout_samples=8192, target_n_routes=None,
         curriculum_fn=None, val_curriculum_fn=None,
-        history_checkpoint_path=None):
+        history_checkpoint_path=None, tensorboard_logdir=None):
     """Train LC improvement with the construction PPO machinery adapted to edits.
 
     ``curriculum_fn(iteration) -> (indices, stage_label)`` optionally restricts
@@ -2059,6 +2059,14 @@ def train_lc_improvement_cfg_ppo(
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    tb_writer = None
+    if tensorboard_logdir is not None:
+        from torch.utils.tensorboard import SummaryWriter
+        tb_writer = SummaryWriter(log_dir=str(tensorboard_logdir))
+        print(f"[tensorboard] logging training metrics to {tensorboard_logdir}\n"
+              f"              view live: tensorboard --logdir "
+              f"{Path(tensorboard_logdir).parent}")
 
     if min_route_len is None:
         min_route_len = int(cfg.eval.min_route_len)
@@ -2654,6 +2662,15 @@ def train_lc_improvement_cfg_ppo(
         history.append(row)
         _write_history_checkpoint(history, history_checkpoint_path)
 
+        if tb_writer is not None:
+            _step = int(row.get("iteration", len(history)))
+            for _k, _v in row.items():
+                if isinstance(_v, bool):
+                    _v = int(_v)
+                if isinstance(_v, (int, float)) and _v == _v:  # skip NaN
+                    tb_writer.add_scalar(_k, float(_v), _step)
+            tb_writer.flush()
+
         # Unified, comparable progress metrics: the per-episode reward is the
         # mean cost reduction over an episode (seed - final), computed the SAME
         # way for train and validation, so train_ep_rew, val_ep_rew and their
@@ -2694,6 +2711,9 @@ def train_lc_improvement_cfg_ppo(
             "values": ppo_stats["critic_last_values"].numpy(),
             "targets": ppo_stats["critic_last_targets"].numpy(),
         }
+
+    if tb_writer is not None:
+        tb_writer.close()
 
     return {
         "best_model_path": best_model_path,
