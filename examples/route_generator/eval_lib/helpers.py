@@ -465,6 +465,39 @@ def run_lc(cfg, init_routes=None, revisit_routes=None, *,
     return run_name, metrics, unserved_demand, routes_tensor, list(step_counts)
 
 
+def run_lc_batch(cfg, tensors_list, *, run_name_prefix="lc_", n_samples=None,
+                 batch_size=None):
+    """Batched learned-construction over many graphs (one GPU forward per batch).
+
+    Unlike :func:`run_lc` (one graph, ``batch_size=1``), this builds one
+    ``CityGraphData`` per tensors dict, batches them through a single
+    ``DataLoader``, and runs the construction model on the whole batch -- so the
+    GPU does K graphs at once instead of K launch-overhead-bound singletons.
+
+    ``tensors_list`` is a list of ``{node_locs, street_adj, demand}`` dicts (all
+    with the same node count, so they collate into one batch). Returns a route
+    tensor ``[K, n_routes, max_len]`` in input order.
+    """
+    from connectpt.routes_generator.citygraph_dataset import (
+        get_dataset_from_config)
+    device, run_name, _, cost_obj, model = lrnu.process_standard_experiment_cfg(
+        cfg, run_name_prefix=run_name_prefix, weights_required=True)
+    if hasattr(model, "clear_step_counts_log"):
+        model.clear_step_counts_log()
+    datalist = []
+    for tn in tensors_list:
+        ds = get_dataset_from_config(cfg.eval.dataset, tensors=tn)
+        datalist.append(ds[0] if isinstance(ds, (list, tuple)) else ds)
+    bs = int(batch_size or len(datalist))
+    dataloader = DataLoader(datalist, batch_size=bs)
+    effective_n_samples = LC_SAMPLES if n_samples is None else int(n_samples)
+    _, _unserved, _metrics, routes = eval_model(
+        model, dataloader, cfg.eval, cost_obj,
+        n_samples=effective_n_samples, sample_batch_size=bs,
+        return_routes=True, silent=True, device=device)
+    return as_route_tensor(routes)
+
+
 def build_rpc_routes(spec, tensors, run_name=None, n_samples=1):
     """Generate benchmark initial routes with RPC/pi_random.
 
