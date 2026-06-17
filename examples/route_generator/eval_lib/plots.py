@@ -389,15 +389,24 @@ def plot_demand_graph(ax, demand, graph_or_coords, street_adj=None,
 def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
                     street_adj=None, title=None, subtitle=None, *,
                     palette="tab20", with_overlap_curves=True,
-                    show_node_labels=True, node_size=45):
+                    show_node_labels=True, node_size=45,
+                    show_removed_edges=True,
+                    highlight_changed_routes=False,
+                    show_node_changes=True):
     """Draw ``routes`` overlaid with diff markings vs ``reference_routes``.
 
     Edge coverage that the candidate dropped relative to the seed is drawn as
-    dashed grey lines -- this is multiplicity-aware, so trimming a duplicated
-    edge from several routes down to fewer (or zero) shows one dashed copy per
-    lost coverage, not just full removals. Shared edges are dimmed in the route
-    color; edges new to the network are emphasized in the route color. Nodes
-    added/removed are marked distinctly.
+    dashed grey lines by default -- this is multiplicity-aware, so trimming a
+    duplicated edge from several routes down to fewer (or zero) shows one
+    dashed copy per lost coverage, not just full removals. Shared edges are
+    dimmed in the route color; edges new to the network are emphasized in the
+    route color. Nodes added/removed are marked distinctly.
+
+    Set ``show_removed_edges=False`` to suppress dashed removed-edge markers.
+    Set ``highlight_changed_routes=True`` to draw unchanged route slots faintly
+    and route slots whose stop sequence changed brightly; this is useful for
+    compact paper grids where dashed markers would clutter the map.
+    Set ``show_node_changes=False`` to hide added/removed stop markers.
 
     Like :func:`plot_plain_route_set`, accepts either the PyG-graph
     convention ``(..., graph, title, ...)`` or the raw-arrays convention
@@ -449,28 +458,46 @@ def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
 
     # removed COPIES: any edge whose candidate coverage dropped below the seed
     # coverage (full removal, or a duplicate trimmed away) -> dashed grey arcs.
-    for key, ref_n in ref_counts.items():
-        cand_n = cand_counts.get(key, 0)
-        edge = ref_rep[key]
-        start_xy, end_xy = coords[edge[0]], coords[edge[1]]
-        for j in range(ref_n - cand_n):
-            rad = _removed_rad(cand_n + j)
-            if abs(rad) < 1e-9:
-                ax.plot([start_xy[0], end_xy[0]], [start_xy[1], end_xy[1]],
-                        color="dimgray", linewidth=2.2, alpha=0.85,
-                        linestyle="--", solid_capstyle="round", zorder=2)
-            else:
-                ax.add_patch(FancyArrowPatch(
-                    posA=start_xy, posB=end_xy, arrowstyle="-",
-                    connectionstyle=f"arc3,rad={rad:.4f}", color="dimgray",
-                    linewidth=2.2, alpha=0.85, linestyle="--",
-                    shrinkA=0, shrinkB=0, mutation_scale=1, zorder=2))
+    if show_removed_edges:
+        for key, ref_n in ref_counts.items():
+            cand_n = cand_counts.get(key, 0)
+            edge = ref_rep[key]
+            start_xy, end_xy = coords[edge[0]], coords[edge[1]]
+            for j in range(ref_n - cand_n):
+                rad = _removed_rad(cand_n + j)
+                if abs(rad) < 1e-9:
+                    ax.plot([start_xy[0], end_xy[0]], [start_xy[1], end_xy[1]],
+                            color="dimgray", linewidth=2.2, alpha=0.85,
+                            linestyle="--", solid_capstyle="round", zorder=2)
+                else:
+                    ax.add_patch(FancyArrowPatch(
+                        posA=start_xy, posB=end_xy, arrowstyle="-",
+                        connectionstyle=f"arc3,rad={rad:.4f}", color="dimgray",
+                        linewidth=2.2, alpha=0.85, linestyle="--",
+                        shrinkA=0, shrinkB=0, mutation_scale=1, zorder=2))
 
     # candidate edges, per route, classified added (new to the network) vs
     # shared (also in the seed network), coloured by route.
     for route_idx, route_tensor in enumerate(routes):
         route = route_to_list(route_tensor)
         color = colors[route_idx % len(colors)]
+        if highlight_changed_routes:
+            reference = route_to_list(reference_routes[route_idx]) \
+                if route_idx < reference_routes.shape[0] else []
+            route_changed = route != reference
+            if route:
+                plot_edges(
+                    ax,
+                    coords,
+                    route_edge_list(route),
+                    color=color,
+                    linewidth=4.0 if route_changed else 1.8,
+                    alpha=0.95 if route_changed else 0.22,
+                    route_idx=route_idx,
+                    overlap_map=overlap_map,
+                    zorder=4 if route_changed else 3,
+                )
+            continue
         shared_edges = [e for e in route_edge_list(route)
                         if undirected_edge_key(e) in ref_edge_map]
         added_edges = [e for e in route_edge_list(route)
@@ -489,11 +516,11 @@ def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
     cand_nodes = {n for r in routes for n in route_to_list(r)}
     added_nodes = sorted(cand_nodes - ref_nodes)
     removed_nodes = sorted(ref_nodes - cand_nodes)
-    if added_nodes:
+    if show_node_changes and added_nodes:
         ax.scatter(coords[added_nodes, 0], coords[added_nodes, 1],
                    s=45, facecolors="lime", edgecolors="black", linewidths=0.6,
                    zorder=6)
-    if removed_nodes:
+    if show_node_changes and removed_nodes:
         ax.scatter(coords[removed_nodes, 0], coords[removed_nodes, 1],
                    s=55, c="crimson", marker="x", linewidths=1.6, zorder=6)
 
