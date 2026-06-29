@@ -20,6 +20,7 @@ from .actions import (
 from .route_state import RouteGenBatchState
 from .runtime import RunContext, resolve_device, seed_everything
 from .artifacts import ArtifactStore
+from .runs import ExperimentRun, RunArtifact
 
 
 __all__ = [
@@ -35,4 +36,6 @@ __all__ = [
     "resolve_device",
     "seed_everything",
     "ArtifactStore",
+    "ExperimentRun",
+    "RunArtifact",
 ]
