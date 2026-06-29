@@ -55,7 +55,7 @@ class EditTrainingRun(ExperimentRun):
         # data module (not loaded yet -- loading happens in run())
         dataset_dir = DATASETS_DIR / cfg.data.dataset_dirname
         self.data = TrainingDataModule(
-            raw_graphs_path=dataset_dir / "raw_graphs_subset.pkl",
+            raw_graphs_path=dataset_dir / "raw_graphs_1000.pkl",
             lc_results_dir=dataset_dir,
             device=device,
             min_route_len=int(cfg.data.min_route_len),

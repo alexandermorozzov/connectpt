@@ -267,10 +267,10 @@ def _summary_from_tier_rows(model_label: str, rows: list[dict]) -> dict:
 def run_validation(args):
     dataset_dir = Path(args.dataset)
     meta_path = dataset_dir / "meta.csv"
-    raw_path = dataset_dir / "raw_graphs_subset.pkl"
+    raw_path = dataset_dir / "raw_graphs_1000.pkl"
     if not meta_path.exists() or not raw_path.exists():
         raise FileNotFoundError(
-            f"Expected meta.csv and raw_graphs_subset.pkl under {dataset_dir}")
+            f"Expected meta.csv and raw_graphs_1000.pkl under {dataset_dir}")
 
     print(f"[validation] dataset={_repo_rel(dataset_dir)}")
     t0 = time.perf_counter()

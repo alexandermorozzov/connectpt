@@ -26,6 +26,6 @@ class BenchmarkDataModule:
     def setup(self) -> "BenchmarkDataModule":
         from ..improvement_learning import load_raw_graphs_and_lc_routes
         self.graphs, self.seed_routes = load_raw_graphs_and_lc_routes(
-            self.benchmark_dir / "raw_graphs_subset.pkl", self.benchmark_dir
+            self.benchmark_dir / "raw_graphs_1000.pkl", self.benchmark_dir
         )
         return self
