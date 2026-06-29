@@ -15,6 +15,25 @@ _TYPE_LABELS = {
 }
 
 
+def make_search_comparison_table(summaries: dict[str, dict]) -> pd.DataFrame:
+    """Compare bee-type search runs from their saved summaries.
+
+    ``summaries`` maps a run label to its loaded ``*_search.json`` dict
+    (mean_cost + metrics + plan). One row per run: cost, key metrics, bee mix.
+    """
+    rows = []
+    for label, summary in summaries.items():
+        row = {"run": label, "mean_cost": summary.get("mean_cost")}
+        row.update(summary.get("metrics") or {})
+        counts = (summary.get("plan") or {}).get("counts", {})
+        row["bee_mix"] = ", ".join(f"{k}={v}" for k, v in counts.items() if v)
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    if "mean_cost" in df.columns:
+        df = df.sort_values("mean_cost").reset_index(drop=True)
+    return df
+
+
 def make_search_plan_table(plan: dict) -> pd.DataFrame:
     """Turn a BeeColonyPlan summary dict into a readable bee-mix table."""
     counts = plan.get("counts", {})
