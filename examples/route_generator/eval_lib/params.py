@@ -20,32 +20,41 @@ from .context import CFG_DIR
 #     0.5 * RTT  +  0.5 * WMC  +  ADJ_WEIGHT * |adj - ADJ_TARGET|
 # with the demand component disabled and WMC = the demand-weighted median
 # connectivity (modified-Cp, ``median_weighted``).
-CONNECTIVITY_MODE = "median_weighted"
-DISABLED_COST_COMPONENTS = ["demand"]
+#
+# The objective constants now live in ``cfg/objective/rtt_wmc_no_demand.yaml``
+# (the single source of truth). This module just re-exports them under their
+# historical names so the notebook / eval_lib helpers keep working. The SEARCH
+# (BCO acceptance, E1u/E2 experiments) uses the two-sided "target" adjustment
+# objective ADJ_WEIGHT * |adj - ADJ_TARGET|; TRAINING reward shaping uses the
+# one-sided "cap" max(0, adj - ADJ_TARGET) instead -- a two-sided term as a
+# *reward* pays the agent for arbitrary changes up to the target (and rewards
+# corrupting clean networks), drowning the RTT/WMC signal; as a budget upper
+# bound it leaves the improvement reward untouched below the target. Both
+# penalize the NETWORK-mean degree.
+_OBJ = _OmegaConf.to_container(
+    _OmegaConf.load(CFG_DIR / "objective" / "rtt_wmc_no_demand.yaml"), resolve=True
+)
+_OBJ_WEIGHTS = _OBJ["weights"]
+_OBJ_ADJ = _OBJ["adjustment"]
 
-DEMAND_TIME_WEIGHT = 0.0
-ROUTE_TIME_WEIGHT = 0.5
-MEDIAN_CONNECTIVITY_WEIGHT = 0.5
+CONNECTIVITY_MODE = _OBJ["connectivity_mode"]
+DISABLED_COST_COMPONENTS = list(_OBJ["disabled_components"])
+
+DEMAND_TIME_WEIGHT = float(_OBJ_WEIGHTS["demand_time_weight"])
+ROUTE_TIME_WEIGHT = float(_OBJ_WEIGHTS["route_time_weight"])
+MEDIAN_CONNECTIVITY_WEIGHT = float(_OBJ_WEIGHTS["median_connectivity_weight"])
 UNIFIED_COST_WEIGHTS = dict(
     demand_time_weight=DEMAND_TIME_WEIGHT,
     route_time_weight=ROUTE_TIME_WEIGHT,
     median_connectivity_weight=MEDIAN_CONNECTIVITY_WEIGHT,
 )
 
-# Adjustment-degree penalty. The SEARCH (BCO acceptance, E1u/E2 experiments)
-# uses the two-sided "target" objective ADJ_WEIGHT * |adj - ADJ_TARGET|: the
-# front is anchored at the prescribed modification budget. TRAINING reward
-# shaping uses the one-sided "cap" max(0, adj - ADJ_TARGET) instead -- a
-# two-sided term as a *reward* pays the agent for arbitrary changes up to the
-# target (and rewards corrupting clean networks), drowning the RTT/WMC signal;
-# as a budget upper bound it leaves the improvement reward untouched below the
-# target. Both penalize the NETWORK-mean degree.
-ADJ_WEIGHT = 10.0
-ADJ_TARGET = 0.2
-ADJ_OBJECTIVE = "target"        # eval / BCO search acceptance
-ADJ_TRAIN_OBJECTIVE = "cap"     # PPO reward shaping (training only)
-ADJ_GAP = 0.1
-ADJ_MODE = "paper"
+ADJ_WEIGHT = float(_OBJ_ADJ["weight"])
+ADJ_TARGET = float(_OBJ_ADJ["target"])
+ADJ_OBJECTIVE = _OBJ_ADJ["objective"]              # eval / BCO search acceptance
+ADJ_TRAIN_OBJECTIVE = _OBJ_ADJ["train_objective"]  # PPO reward shaping (training only)
+ADJ_GAP = float(_OBJ_ADJ["gap"])
+ADJ_MODE = _OBJ_ADJ["mode"]
 
 # === Problem-size defaults (config builders) ================================
 CITY_NAME = "Mumford0"

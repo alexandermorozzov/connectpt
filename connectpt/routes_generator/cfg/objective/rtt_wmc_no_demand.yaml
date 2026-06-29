@@ -1,0 +1,30 @@
+# Unified paper objective -- the single source of truth for the cost objective.
+#
+#     0.5 * RTT  +  0.5 * WMC  +  ADJ_WEIGHT * |adj - ADJ_TARGET|
+#
+# with the demand component disabled and WMC = the demand-weighted median
+# connectivity (modified-Cp, ``median_weighted``). Both PART 1 (training) and
+# PART 2 (experiments) of paper_combined.ipynb optimize exactly this.
+#
+# eval_lib.params re-exports these values under their historical constant names;
+# eval_lib.paper.UNIFIED_ADJ is built from the adjustment block. Change a value
+# HERE and training, the eval-lib config builders and the notebook all follow.
+connectivity_mode: median_weighted
+disabled_components: [demand]
+
+weights:
+  demand_time_weight: 0.0
+  route_time_weight: 0.5
+  median_connectivity_weight: 0.5
+
+# Adjustment-degree penalty (network-mean degree change vs the seed network).
+# SEARCH (BCO acceptance / E1u / E2) uses the two-sided "target" objective;
+# TRAINING reward shaping uses the one-sided "cap" instead -- see eval_lib.params
+# for the full rationale. Both penalize the network-mean degree.
+adjustment:
+  weight: 10.0
+  target: 0.2
+  objective: target        # eval / BCO search acceptance (two-sided |adj - target|)
+  train_objective: cap     # PPO reward shaping (one-sided max(0, adj - target))
+  gap: 0.1
+  mode: paper
