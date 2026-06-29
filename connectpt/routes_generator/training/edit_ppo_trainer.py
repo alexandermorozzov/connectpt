@@ -7,6 +7,7 @@ arguments from cfg + the data module so the run layer stays small.
 from __future__ import annotations
 
 import pandas as pd
+import torch
 
 from ..improvement_learning import train_lc_improvement_cfg
 
@@ -27,7 +28,16 @@ class EditPPOTrainer:
             curriculum_fn=None, val_curriculum_fn=None) -> pd.DataFrame:
         """Run training and return the history as a DataFrame."""
         data_cfg = self.cfg.data
+        trainer_cfg = self.cfg.get("train_loop", {}) or {}
+        # gpu-aware graph batch size (was the notebook's BATCH_SIZE = 16 if cuda
+        # else 4); n_iterations from the trainer block (was N_ITERATIONS).
+        batch_size = int(trainer_cfg.get("batch_size_cuda", 16)
+                         if torch.cuda.is_available()
+                         else trainer_cfg.get("batch_size_cpu", 4))
+        n_iterations = int(trainer_cfg.get("n_iterations", self.cfg.ppo.n_iterations))
         result = train_lc_improvement_cfg(
+            batch_size=batch_size,
+            n_iterations=n_iterations,
             model=self.model,
             cost_obj=self.cost_obj,
             graphs=self.data.graphs,

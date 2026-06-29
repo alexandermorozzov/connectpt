@@ -1,0 +1,13 @@
+# @package _global_
+# The paper's from-scratch edit-model run (was the notebook's RUN_NAME /
+# TRAIN_FROM_SCRATCH / N_ITERATIONS magic constants). Overlays train/edit.yaml.
+defaults:
+  - /train/edit
+  - _self_
+
+run:
+  name: NEW_lc_copytiers_curric_noadj_v1
+
+paths:
+  checkpoint_path: artifacts/model_weights/improvement/NEW_lc_copytiers_curric_noadj_v1.pt
+  init_checkpoint_path: null   # from scratch (random init)

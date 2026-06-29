@@ -94,6 +94,15 @@ data:
 checkpoint:
   strict_load: true
 
+# Train-loop knobs (was the notebook's N_ITERATIONS / BATCH_SIZE magic
+# constants). batch_size is gpu-aware (16 on CUDA, 4 on CPU); n_iterations also
+# drives the curriculum schedule fractions below. (Named train_loop, not
+# trainer, because root `trainer: ppo` is the dispatcher selector.)
+train_loop:
+  n_iterations: 700
+  batch_size_cpu: 4
+  batch_size_cuda: 16
+
 # Cost tuning applied after the objective (was build_edit_run's magic constants:
 # VARY_WEIGHTS / OP_FRACTION / MCW_FRACTION / ignore_stops_oob). Per-batch
 # sampled cost weights (30% route-only, 30% conn-only, 40% random mix) fed to

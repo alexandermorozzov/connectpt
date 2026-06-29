@@ -91,8 +91,8 @@ class EditTrainingRun(ExperimentRun):
             tier_of, tiers, train_fraction=float(self.cfg.data.train_fraction),
             n_val_per_tier=int(cur.get("n_val_per_tier", 4)),
             seed=int(self.cfg.data.split_seed))
-        n_iter = int(self.cfg.trainer.get("n_iterations", self.cfg.ppo.n_iterations)) \
-            if self.cfg.get("trainer") else int(self.cfg.ppo.n_iterations)
+        n_iter = int(self.cfg.get("train_loop", {}).get("n_iterations",
+                                                        self.cfg.ppo.n_iterations))
         schedule = [(round(float(frac) * n_iter), list(t), label)
                     for frac, t, label in cur.schedule]
         cfn, vfn = self.data.build_curriculum(schedule, train_by_tier, val_by_tier)
