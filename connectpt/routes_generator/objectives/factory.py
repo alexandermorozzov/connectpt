@@ -22,6 +22,7 @@ from ..transit_time_estimator import get_cost_module_from_cfg
 
 CFG_DIR = Path(__file__).resolve().parents[1] / "cfg"
 OBJECTIVE_DIR = CFG_DIR / "objective"
+COST_BASE_DIR = CFG_DIR / "experiment" / "cost_function"
 
 
 class CostFactory:
@@ -34,6 +35,21 @@ class CostFactory:
         if not path.exists():
             raise FileNotFoundError(f"objective config not found: {path}")
         return OmegaConf.load(path)
+
+    @staticmethod
+    def build_unified(objective_name: str = "rtt_wmc_no_demand", *,
+                      cost_base: str = "mine", for_training: bool = False,
+                      symmetric_routes: bool = True, low_memory_mode: bool = False):
+        """Build + configure a cost module config-first (no OmegaConf.create).
+
+        Loads the cost base from ``cfg/experiment/cost_function/<cost_base>.yaml``
+        and applies the named objective. Used by the search / evaluation runs so
+        they do not assemble a cost config in Python.
+        """
+        cost_cfg = OmegaConf.load(COST_BASE_DIR / f"{cost_base}.yaml")
+        cost = CostFactory.build(cost_cfg, low_memory_mode, symmetric_routes)
+        CostFactory.apply_objective(cost, objective_name, for_training=for_training)
+        return cost
 
     @staticmethod
     def build(cost_cfg, low_memory_mode: bool = False, symmetric_routes: bool = True):

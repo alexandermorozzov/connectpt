@@ -14,8 +14,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from omegaconf import OmegaConf
-
 from ..core.checkpoints import CheckpointStore
 from ..core.paths import ROOT_DIR
 from ..core.runs import ExperimentRun, RunArtifact
@@ -54,12 +52,9 @@ class BeeColonySearchRun(ExperimentRun):
         )
         device = self.context.device
 
-        # cost: built from a minimal cost cfg, then configured from the unified
-        # objective in its search/eval form (two-sided adjustment "target").
-        cost_cfg = OmegaConf.create({"type": "mine",
-                                     "kwargs": {"use_weighted_connectivity": True}})
-        self.cost_obj = CostFactory.build(cost_cfg)
-        CostFactory.apply_objective(self.cost_obj, "rtt_wmc_no_demand", for_training=False)
+        # cost: built config-first from the YAML cost base + unified objective
+        # in its search/eval form (two-sided adjustment "target").
+        self.cost_obj = CostFactory.build_unified("rtt_wmc_no_demand", for_training=False)
         self.cost_obj.to(device)
 
         # models: build (role-checked) + strict-load the checkpoint into the class

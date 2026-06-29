@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from omegaconf import OmegaConf
-
 from ..core.artifacts import ArtifactStore
 from ..core.checkpoints import CheckpointStore
 from ..core.paths import ROOT_DIR
@@ -42,10 +40,7 @@ class ModelEvaluationRun(ExperimentRun):
         )
         self.model.to(device)
 
-        cost_cfg = OmegaConf.create({"type": "mine",
-                                     "kwargs": {"use_weighted_connectivity": True}})
-        self.cost_obj = CostFactory.build(cost_cfg)
-        CostFactory.apply_objective(self.cost_obj, "rtt_wmc_no_demand", for_training=False)
+        self.cost_obj = CostFactory.build_unified("rtt_wmc_no_demand", for_training=False)
         self.cost_obj.to(device)
 
         self.data = BenchmarkDataModule(

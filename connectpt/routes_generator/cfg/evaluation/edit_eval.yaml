@@ -12,7 +12,7 @@ paths:
   output_dir: artifacts/runs/edit_eval_v1
 
 model:
-  config: bestsofar_feb2023_trim
+  config: edit_trim_paper
   checkpoint_path: artifacts/model_weights/improvement/improvement_lc_redundancy_rttwmc_v1_PRESERVED.pt
   strict_load: true
 
