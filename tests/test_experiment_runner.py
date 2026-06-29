@@ -92,5 +92,5 @@ def test_multi_method_sweep_iterates_methods_x_alpha():
     result = run_experiment(spec, method_fn=mock_method, metrics_fn=mock_metrics)
     # 2 methods x 3 alphas = 6 runs/rows
     assert len(result.table) == 6
-    assert set(result.table["method"]) == {"neural BCO", "Our NBCO (GNN + trim/extend)"}
+    assert set(result.table["method"]) == {"neural BCO", "Our NBCO (GNN rebuild + trim/extend)"}
     assert list(result.table["alpha"]).count(0.0) == 2  # both methods at alpha 0
