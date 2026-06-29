@@ -35,7 +35,8 @@ def test_sweep_applies_alpha_from_yaml():
     assert list(result.table["adj_target"]) == [0.3, 0.3, 0.3]
     assert result.name == "ekb_sweep"
     # init + one route set per alpha
-    assert "Initial" in result.routes and "alpha=0.5" in result.routes
+    assert "Initial" in result.routes
+    assert any("alpha=0.5" in k for k in result.routes)
 
 
 def test_ekb_data_source_loads():
@@ -73,3 +74,23 @@ def test_render_report_pareto_from_table():
     rep = render_report(res)
     assert len(rep.table) == 2
     assert "pareto" in rep.figures
+
+
+def test_multi_method_sweep_iterates_methods_x_alpha():
+    """methods x alpha grid -> one row per (method, alpha); the comparison the
+    experiment cells did by hand."""
+    from eval_lib.experiment_runner import run_experiment, load_experiment_spec
+    spec = load_experiment_spec("e1_mandl")
+
+    calls = []
+    def mock_method(cfg, init, tensors, run_name_scope):
+        calls.append(run_name_scope)
+        return ("run", {"m": 1}, None, init, {})
+    def mock_metrics(m, routes, init):
+        return {"cost": 1.0}
+
+    result = run_experiment(spec, method_fn=mock_method, metrics_fn=mock_metrics)
+    # 2 methods x 3 alphas = 6 runs/rows
+    assert len(result.table) == 6
+    assert set(result.table["method"]) == {"neural BCO", "Our NBCO (GNN + trim/extend)"}
+    assert list(result.table["alpha"]).count(0.0) == 2  # both methods at alpha 0

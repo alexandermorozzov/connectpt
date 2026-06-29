@@ -66,14 +66,13 @@ def run_experiment(spec, *, method_fn: Callable = None,
             return _default_metrics(m, routes, init, keep=keep)
 
     inst = create_data_source(spec.data).load()
-    base_cfg = load_experiment_cfg(spec.method.config)
 
-    # static method options that are not swept
-    if spec.method.get("force_cpu") is not None:
-        set_cfg_value(base_cfg, "experiment.cpu", bool(spec.method.force_cpu))
-    if spec.method.get("process_neural_bees_sequentially") is not None:
-        set_cfg_value(base_cfg, "process_neural_bees_sequentially",
-                      bool(spec.method.process_neural_bees_sequentially))
+    # one or many methods to compare (each a captured config + label). A single
+    # ``method`` block is treated as a one-element list.
+    methods = spec.get("methods")
+    if methods is None:
+        methods = [OmegaConf.create({"label": spec.get("method_label", "method"),
+                                     **dict(spec.method)})]
 
     sweep = spec.sweep
     alphas = list(sweep.get("alpha", [None]))
@@ -81,23 +80,32 @@ def run_experiment(spec, *, method_fn: Callable = None,
     n_iterations = int(sweep.n_iterations)
 
     rows, routes = [], {"Initial": inst.init_routes}
-    for alpha in alphas:
-        cfg = copy.deepcopy(base_cfg)
-        if alpha is not None:
-            for key, value in _alpha_weights(alpha).items():
-                set_cfg_value(cfg, f"experiment.cost_function.kwargs.{key}", value)
-        bco_cfg_set(cfg, n_iterations=n_iterations,
-                    **dict(UNIFIED_ADJ, adjustment_degree_target=adj_target))
+    for method in methods:
+        base_cfg = load_experiment_cfg(method.config)
+        if method.get("force_cpu") is not None:
+            set_cfg_value(base_cfg, "experiment.cpu", bool(method.force_cpu))
+        if method.get("process_neural_bees_sequentially") is not None:
+            set_cfg_value(base_cfg, "process_neural_bees_sequentially",
+                          bool(method.process_neural_bees_sequentially))
+        label = method.get("label", "method")
 
-        out = method_fn(cfg, inst.init_routes, tensors=inst.tensors,
-                        run_name_scope=f"{inst.label}_alpha{alpha}_")
-        _run_name, m, _unserved, out_routes, *_ = out
+        for alpha in alphas:
+            cfg = copy.deepcopy(base_cfg)
+            if alpha is not None:
+                for key, value in _alpha_weights(alpha).items():
+                    set_cfg_value(cfg, f"experiment.cost_function.kwargs.{key}", value)
+            bco_cfg_set(cfg, n_iterations=n_iterations,
+                        **dict(UNIFIED_ADJ, adjustment_degree_target=adj_target))
 
-        row = dict(metrics_fn(m, out_routes, inst.init_routes))
-        row.update(method=spec.get("method_label", "Our NBCO"),
-                   alpha=alpha, adj_target=adj_target, n_iterations=n_iterations)
-        rows.append(row)
-        routes[f"alpha={alpha}"] = out_routes
+            out = method_fn(cfg, inst.init_routes, tensors=inst.tensors,
+                            run_name_scope=f"{inst.label}_{label}_alpha{alpha}_")
+            _run_name, m, _unserved, out_routes, *_ = out
+
+            row = dict(metrics_fn(m, out_routes, inst.init_routes))
+            row.update(method=label, alpha=alpha, adj_target=adj_target,
+                       n_iterations=n_iterations)
+            rows.append(row)
+            routes[f"{label} alpha={alpha}"] = out_routes
 
     return ExperimentResult(
         name=spec.name, table=pd.DataFrame(rows), routes=routes, instance=inst,

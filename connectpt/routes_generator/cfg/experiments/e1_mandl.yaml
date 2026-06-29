@@ -1,15 +1,18 @@
-# Unified experiment spec: E1 narrow on Mandl (benchmark city).
+# Unified experiment: E1 narrow on Mandl -- compare neural BCO vs Our NBCO over
+# the alpha grid (was the notebook's run_city_e1u_nbco_our_alpha loop).
 name: e1_mandl
 data:
   source: benchmark
   city: Mandl
-method:
-  config: nbco_variants/our_nbco_mandl
-method_label: Our NBCO (GNN + trim/extend)
+methods:
+  - label: neural BCO
+    config: nbco_variants/neural_bco_mandl
+  - label: Our NBCO (GNN + trim/extend)
+    config: nbco_variants/our_nbco_mandl
 sweep:
   alpha: [0.0, 0.5, 1.0]
   adj_target: 0.3
   n_iterations: 200
 metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
 report:
-  routes_plot: network
+  routes_plot: pareto
