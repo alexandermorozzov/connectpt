@@ -1,0 +1,18 @@
+# Unified experiment: Mumford0 NBCO variants (Our NBCO vs trim12+extend12),
+# alpha=0.5, target=0.3, 200 iters (was cell 41's inline build_bco_cfg variants).
+name: m0_variants
+data:
+  source: benchmark
+  city: Mumford0
+methods:
+  - label: Our NBCO (GNN + trim/extend)
+    config: nbco_variants/our_nbco_mumford0
+  - label: Trim 12 + extend 12
+    config: nbco_variants/trim12_extend12_mumford0
+sweep:
+  alpha: [0.5]
+  adj_target: 0.3
+  n_iterations: 200
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
+report:
+  routes_plot: network
