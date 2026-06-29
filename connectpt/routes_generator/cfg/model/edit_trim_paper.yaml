@@ -1,0 +1,24 @@
+# Edit / trim route model (TrimPathCombiningRouteGenerator), paper config.
+defaults:
+  - route_generator: paper_biased_trim
+  - _self_
+
+common:
+  dropout: 0.0
+  nonlin_type: ReLU
+  embed_dim: 64
+
+route_generator:
+  kwargs:
+    force_linking_unlinked: false
+    logit_clip: null
+
+backbone_gn:
+  net_type: graph attn
+  kwargs:
+    n_layers: 5
+    in_node_dim: 4
+    in_edge_dim: 18
+    use_norm: false
+    n_heads: 4
+    dense: false

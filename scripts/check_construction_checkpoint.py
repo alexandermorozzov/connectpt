@@ -24,7 +24,7 @@ DEFAULT_CHECKPOINT = (
     / "model_weights"
     / "inductive_random_graphs_weighted_connectivity.pt"
 )
-MODEL_CONFIG = "bestsofar_feb2023"  # PathCombiningRouteGenerator
+MODEL_CONFIG = "construction"  # PathCombiningRouteGenerator
 
 
 def build_construction_model():

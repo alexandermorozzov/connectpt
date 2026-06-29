@@ -1,0 +1,18 @@
+type: TrimPathCombiningRouteGenerator
+
+kwargs:
+  n_nodepair_layers: 3
+  n_pathscorer_layers: 3
+  pathscorer_hidden_dim: 16
+  n_trim_scorer_layers: 3
+  trim_scorer_hidden_dim: 16
+  n_halt_layers: 3
+  halt_scorer_type: endpoints
+
+  serial_halting: true
+  forbid_halt_when_overlong: false
+  use_redundancy_features: true
+  # paper edit model: trimming below min allowed (halt stays masked until
+  # extend restores min); no adjustment-target conditioning feature.
+  allow_trim_below_min: true
+  n_adjustment_cond_feats: 0

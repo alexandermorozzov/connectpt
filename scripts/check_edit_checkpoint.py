@@ -25,7 +25,7 @@ DEFAULT_CHECKPOINT = (
     / "improvement"
     / "improvement_lc_redundancy_rttwmc_v1_PRESERVED.pt"
 )
-MODEL_CONFIG = "bestsofar_feb2023_trim"  # TrimPathCombiningRouteGenerator, in_edge_dim=18
+MODEL_CONFIG = "edit_trim_paper"  # TrimPathCombiningRouteGenerator, in_edge_dim=18
 
 
 def build_edit_model():

@@ -64,11 +64,15 @@ class RouteModelFactory:
     # -- compose-by-name helpers (used by the search/eval runs) --------------
 
     @staticmethod
-    def compose_and_build(model_name: str, *, base_config: str = "ppo_50nodes.yaml",
-                          cfg_dir: Path | str = CFG_DIR):
-        """Compose ``base_config`` with ``model=<model_name>`` and build the model."""
+    def compose_and_build(model_name: str, *, cfg_dir: Path | str = CFG_DIR):
+        """Build a model from its standalone ``model_build/<model_name>`` config.
+
+        Config-first: no ``model=...`` Hydra override. ``model_build/<name>.yaml``
+        pulls in the experiment group + the model group, so the composed cfg has
+        both ``.model`` and ``.experiment``.
+        """
         with initialize_config_dir(config_dir=str(cfg_dir), version_base=None):
-            cfg = compose(config_name=base_config, overrides=[f"model={model_name}"])
+            cfg = compose(config_name=f"model_build/{model_name}")
         return build_model_from_cfg(cfg.model, cfg.experiment)
 
     @staticmethod

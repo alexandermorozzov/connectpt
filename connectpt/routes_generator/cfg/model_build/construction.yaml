@@ -1,0 +1,9 @@
+# @package _global_
+# Standalone build config for the construction model: pulls in the experiment
+# group (for symmetric_routes / cost mean_stop_time_s) + the construction model,
+# so RouteModelFactory can build it via compose("model_build/construction")
+# WITHOUT a model=... Hydra override.
+defaults:
+  - /experiment: standard
+  - /model: construction
+  - _self_
