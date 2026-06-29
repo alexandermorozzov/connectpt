@@ -75,6 +75,29 @@ class EditTrainingRun(ExperimentRun):
             best_model_path=self.best_path,
         )
 
+    def _build_curriculum(self):
+        """Build (train_idx, val_idx, curriculum_fn, val_curriculum_fn) from the
+        cfg.curriculum block (config-driven; replaces the notebook's inline tier
+        split + CURRICULUM schedule). Returns Nones when no curriculum is set."""
+        cur = self.cfg.get("curriculum")
+        if not cur:
+            return None, None, None, None
+        import pandas as pd
+        dataset_dir = DATASETS_DIR / self.cfg.data.dataset_dirname
+        meta = pd.read_csv(dataset_dir / "meta.csv")
+        tier_of = dict(zip(meta["graph_index"].astype(int), meta["tier"]))
+        tiers = list(cur.tiers)
+        train_idx, val_idx, _monitor, train_by_tier, val_by_tier = self.data.stratified_split(
+            tier_of, tiers, train_fraction=float(self.cfg.data.train_fraction),
+            n_val_per_tier=int(cur.get("n_val_per_tier", 4)),
+            seed=int(self.cfg.data.split_seed))
+        n_iter = int(self.cfg.trainer.get("n_iterations", self.cfg.ppo.n_iterations)) \
+            if self.cfg.get("trainer") else int(self.cfg.ppo.n_iterations)
+        schedule = [(round(float(frac) * n_iter), list(t), label)
+                    for frac, t, label in cur.schedule]
+        cfn, vfn = self.data.build_curriculum(schedule, train_by_tier, val_by_tier)
+        return train_idx, val_idx, cfn, vfn
+
     def run(self, *, dry_run: bool = False) -> TrainingArtifact:
         self.setup()
         if dry_run:
@@ -87,7 +110,10 @@ class EditTrainingRun(ExperimentRun):
             )
 
         self.data.setup()
-        history = self.trainer.fit()
+        train_idx, val_idx, curriculum_fn, val_curriculum_fn = self._build_curriculum()
+        history = self.trainer.fit(
+            train_indices=train_idx, val_indices=val_idx,
+            curriculum_fn=curriculum_fn, val_curriculum_fn=val_curriculum_fn)
 
         CheckpointStore.save_model_weights(self.model, self.best_path, cfg=self.cfg)
         return TrainingArtifact(

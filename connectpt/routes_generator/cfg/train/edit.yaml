@@ -105,6 +105,20 @@ cost:
   mcw_fraction: 0.3
   ignore_stops_oob: true
 
+# Cumulative tier curriculum (was the notebook's inline CURRICULUM list). Each
+# row is [fraction_of_iterations, active_tiers, label]; EditTrainingRun builds
+# the per-iteration train/val index functions from the dataset's meta.csv via
+# TrainingDataModule. Remove this block to train on all tiers uniformly.
+curriculum:
+  tiers: [copy_full, copy_boundary, copy_mixed, covered_dup, lc_clean]
+  n_val_per_tier: 4
+  schedule:
+    - [0.15, [copy_full], full]
+    - [0.30, [copy_full, copy_boundary], "+boundary"]
+    - [0.55, [copy_full, copy_boundary, copy_mixed], "+mixed"]
+    - [0.75, [copy_full, copy_boundary, copy_mixed, covered_dup], "+covered"]
+    - [1.00, [copy_full, copy_boundary, copy_mixed, covered_dup, lc_clean], "+clean"]
+
 eval:
   min_route_len: 2
   max_route_len: 12
