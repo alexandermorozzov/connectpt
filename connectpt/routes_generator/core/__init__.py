@@ -21,6 +21,7 @@ from .route_state import RouteGenBatchState
 from .runtime import RunContext, resolve_device, seed_everything
 from .artifacts import ArtifactStore
 from .runs import ExperimentRun, RunArtifact
+from .batches import ExperimentBatch, ExperimentRunFactory, BatchArtifact
 
 
 __all__ = [
@@ -38,4 +39,7 @@ __all__ = [
     "ArtifactStore",
     "ExperimentRun",
     "RunArtifact",
+    "ExperimentBatch",
+    "ExperimentRunFactory",
+    "BatchArtifact",
 ]
