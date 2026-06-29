@@ -94,6 +94,17 @@ data:
 checkpoint:
   strict_load: true
 
+# Cost tuning applied after the objective (was build_edit_run's magic constants:
+# VARY_WEIGHTS / OP_FRACTION / MCW_FRACTION / ignore_stops_oob). Per-batch
+# sampled cost weights (30% route-only, 30% conn-only, 40% random mix) fed to
+# the agent as conditioning so one policy serves the whole alpha range.
+cost:
+  variable_weights: true
+  pp_fraction: 0.0
+  op_fraction: 0.3
+  mcw_fraction: 0.3
+  ignore_stops_oob: true
+
 eval:
   min_route_len: 2
   max_route_len: 12

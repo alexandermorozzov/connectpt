@@ -50,6 +50,10 @@ class EditTrainingRun(ExperimentRun):
             symmetric_routes=bool(cfg.experiment.symmetric_routes),
         )
         CostFactory.apply_objective(self.cost_obj, "rtt_wmc_no_demand", for_training=True)
+        # config-driven cost tuning (replaces build_edit_run's variable_weights /
+        # op/mcw fractions / ignore_stops_oob magic constants).
+        for attr, value in dict(cfg.get("cost", {}) or {}).items():
+            setattr(self.cost_obj, attr, value)
         self.cost_obj.to(device)
 
         # data module (not loaded yet -- loading happens in run())
