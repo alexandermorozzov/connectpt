@@ -1,0 +1,39 @@
+# @package _global_
+# Base bee-colony search config. Experiment configs compose this + a model
+# availability group (search/models/*) + a bee set group (search/bee_sets/*).
+defaults:
+  - /objective: rtt_wmc_no_demand
+  - /data: lc_copytiers_benchmark
+  - _self_
+
+run:
+  type: bee_colony_search
+  name: bco_base
+  seed: 0
+  cpu: false
+
+paths:
+  output_dir: artifacts/runs/${run.name}
+
+search:
+  algorithm: bee_colony
+  n_iterations: 100
+  n_bees: 20
+  max_passes: 10
+
+# Defaults: no models enabled, no bees. The model/bee-set groups override these.
+models:
+  construction:
+    enabled: false
+    config: construction
+    checkpoint_path: null
+    strict_load: true
+  edit:
+    enabled: false
+    config: edit_trim_paper
+    checkpoint_path: null
+    strict_load: true
+
+policies: {}
+
+bees: []

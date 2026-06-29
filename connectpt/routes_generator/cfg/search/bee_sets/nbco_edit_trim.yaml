@@ -1,0 +1,9 @@
+# @package _global_
+bees:
+  - name: neural_edit_trim
+    count: 20
+    operator: neural_route_action
+    policy: edit
+    allowed_actions: [trim_start, trim_end]
+    route_selection: low_demand
+    acceptance: trim_grace

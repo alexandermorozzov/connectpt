@@ -1,0 +1,16 @@
+# @package _global_
+bees:
+  - name: compound_trim_then_construct
+    count: 20
+    operator: compound
+    acceptance: greedy
+    steps:
+      - operator: neural_route_action
+        policy: edit
+        allowed_actions: [trim_start, trim_end]
+        route_selection: low_demand
+
+      - operator: neural_route_action
+        policy: construction
+        allowed_actions: [extend, halt]
+        route_selection: same_route

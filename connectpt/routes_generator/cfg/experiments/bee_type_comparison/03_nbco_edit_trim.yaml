@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - /search: bee_colony_base
+  - /search/models: edit_only
+  - /search/bee_sets: nbco_edit_trim
+  - _self_
+
+run:
+  name: bee_type_comparison/03_nbco_edit_trim
+  seed: 0
+
+paths:
+  output_dir: artifacts/runs/bee_type_comparison/03_nbco_edit_trim

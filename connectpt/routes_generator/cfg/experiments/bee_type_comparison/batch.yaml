@@ -1,0 +1,17 @@
+# @package _global_
+batch:
+  name: bee_type_comparison
+  output_dir: artifacts/runs/bee_type_comparison
+
+  runs:
+    - experiments/bee_type_comparison/00_classic_bco
+    - experiments/bee_type_comparison/01_nbco_construction
+    - experiments/bee_type_comparison/02_nbco_edit_extend
+    - experiments/bee_type_comparison/03_nbco_edit_trim
+    - experiments/bee_type_comparison/04_nbco_edit_full
+    - experiments/bee_type_comparison/05_nbco_construction_plus_edit
+    - experiments/bee_type_comparison/06_nbco_compound_trim_then_construct
+
+report:
+  enabled: true
+  config: report/bee_type_comparison_report

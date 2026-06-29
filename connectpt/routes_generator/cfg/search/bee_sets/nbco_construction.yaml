@@ -1,0 +1,9 @@
+# @package _global_
+bees:
+  - name: neural_construction
+    count: 20
+    operator: neural_route_action
+    policy: construction
+    allowed_actions: [extend, halt]
+    route_selection: uniform
+    acceptance: greedy

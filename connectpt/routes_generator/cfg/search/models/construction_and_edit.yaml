@@ -1,0 +1,20 @@
+# @package _global_
+models:
+  construction:
+    enabled: true
+    config: construction
+    checkpoint_path: artifacts/model_weights/inductive_random_graphs_weighted_connectivity.pt
+    strict_load: true
+  edit:
+    enabled: true
+    config: edit_trim_paper
+    checkpoint_path: artifacts/model_weights/improvement/improvement_lc_redundancy_rttwmc_v1_PRESERVED.pt
+    strict_load: true
+
+policies:
+  construction:
+    model_ref: construction
+    adapter: construction_search_policy
+  edit:
+    model_ref: edit
+    adapter: edit_search_policy

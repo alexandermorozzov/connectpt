@@ -21,6 +21,8 @@ class BeeSpec:
     route_selection: str = "uniform"
     acceptance: str = "greedy"
     steps: list[dict[str, Any]] | None = None
+    # heuristic_mutation kind (e.g. "classic_bco", "shorten"); ignored otherwise.
+    mutation_kind: str | None = None
 
 
 def parse_bee_specs(bees_cfg) -> list[BeeSpec]:
@@ -37,5 +39,6 @@ def parse_bee_specs(bees_cfg) -> list[BeeSpec]:
             route_selection=d.get("route_selection", "uniform"),
             acceptance=d.get("acceptance", "greedy"),
             steps=[dict(s) for s in d["steps"]] if d.get("steps") else None,
+            mutation_kind=d.get("mutation_kind"),
         ))
     return specs

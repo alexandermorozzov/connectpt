@@ -72,7 +72,7 @@ def build_bee(spec, policies: dict):
 
     if spec.operator == "heuristic_mutation":
         return HeuristicMutationBee(
-            kind=spec.route_selection,  # heuristic kind carried in the field
+            kind=spec.mutation_kind or spec.route_selection,
             route_selector=get_route_selector(spec.route_selection),
             acceptance_policy=acceptance,
         )

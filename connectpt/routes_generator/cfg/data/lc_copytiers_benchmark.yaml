@@ -1,0 +1,4 @@
+# Benchmark data the search runs against (consumed by BenchmarkDataModule).
+benchmark_dirname: lc_copytiers_n1000_n50_r12_len8_15_v1
+min_route_len: 8
+max_route_len: 15

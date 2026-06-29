@@ -1,0 +1,14 @@
+# @package _global_
+models:
+  construction:
+    enabled: false
+    config: construction
+    checkpoint_path: null
+    strict_load: true
+  edit:
+    enabled: false
+    config: edit_trim_paper
+    checkpoint_path: null
+    strict_load: true
+
+policies: {}

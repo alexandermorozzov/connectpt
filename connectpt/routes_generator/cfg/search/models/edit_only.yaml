@@ -1,0 +1,17 @@
+# @package _global_
+models:
+  construction:
+    enabled: false
+    config: construction
+    checkpoint_path: null
+    strict_load: true
+  edit:
+    enabled: true
+    config: edit_trim_paper
+    checkpoint_path: artifacts/model_weights/improvement/improvement_lc_redundancy_rttwmc_v1_PRESERVED.pt
+    strict_load: true
+
+policies:
+  edit:
+    model_ref: edit
+    adapter: edit_search_policy

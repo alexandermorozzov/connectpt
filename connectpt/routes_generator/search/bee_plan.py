@@ -58,7 +58,7 @@ class BeeColonyPlan:
         if spec.operator == "compound":
             return "n_type7"
         if spec.operator == "heuristic_mutation":
-            kind = (spec.route_selection or "").lower()
+            kind = (spec.mutation_kind or spec.route_selection or "").lower()
             return "n_type2" if "shorten" in kind else "n_type1"
         if spec.operator == "neural_route_action":
             role = policies[spec.policy].role
