@@ -1,14 +1,14 @@
-# Unified experiment: E1 narrow on Mandl -- neural BCO vs Our NBCO alpha sweep
+# Unified experiment: E1 narrow on Mumford2 -- neural BCO vs Our NBCO alpha sweep
 # (was run_city_e1u_nbco_our_alpha). adj_target/iterations match E1U_* defaults.
-name: e1_mandl
+name: e1_mumford2
 data:
   source: benchmark
-  city: Mandl
+  city: Mumford2
 methods:
   - label: neural BCO
-    config: nbco_variants/neural_bco_mandl
+    config: nbco_variants/neural_bco_mumford2
   - label: Our NBCO (GNN rebuild + trim/extend)
-    config: nbco_variants/our_nbco_mandl
+    config: nbco_variants/our_nbco_mumford2
 sweep:
   alpha: [0.0, 0.5, 1.0]
   adj_target: 0.3
