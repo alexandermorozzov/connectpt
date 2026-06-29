@@ -12,7 +12,20 @@ namespace. Experiment parameters that the user tunes per run live in the
 algorithm YAMLs (``connectpt/routes_generator/cfg``) and in
 :mod:`eval_lib.params`.
 """
+import warnings
 from pathlib import Path
+
+# The canonical repo paths now live in the library at
+# connectpt.routes_generator.core.paths; this module re-exports the shared ones
+# and is kept only as a compatibility surface for the notebook / eval_lib
+# helpers. New code should import from core.paths instead.
+from connectpt.routes_generator.core import paths as _core_paths
+
+warnings.warn(
+    "eval_lib.context is deprecated; use connectpt.routes_generator.core.paths",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 def find_repo_root(start: Path | None = None) -> Path:
@@ -24,26 +37,19 @@ def find_repo_root(start: Path | None = None) -> Path:
         "Could not find repo root from current working directory")
 
 
-ROOT_DIR = find_repo_root()
-CFG_DIR = ROOT_DIR / "connectpt" / "routes_generator" / "cfg"
-
-# === input data / datasets (repo-root datasets/) ===
-# datasets/ holds only input data (graphs / demand / benchmark text files /
-# LC-NX results); model checkpoints live under artifacts/ (see below).
-DATASETS_DIR = ROOT_DIR / "datasets"
-BENCHMARK_DIR = DATASETS_DIR / "benchmark"
-MACSA_DATA_DIR = DATASETS_DIR / "MACSA_data"
-
-# === run artifacts + model checkpoints (repo-root artifacts/) ===
-ARTIFACTS_DIR = ROOT_DIR / "artifacts"
-MODEL_WEIGHTS_DIR = ARTIFACTS_DIR / "model_weights"
-EDIT_MODEL_WEIGHTS_DIR = MODEL_WEIGHTS_DIR / "improvement"
-MODEL_OUTPUTS_DIR = ARTIFACTS_DIR / "lc_improvement_outputs"
-OUTPUT_ROUTES_DIR = ARTIFACTS_DIR / "output_routes"
+# Shared paths sourced from core.paths (single source of truth).
+ROOT_DIR = _core_paths.ROOT_DIR
+CFG_DIR = _core_paths.CFG_DIR
+DATASETS_DIR = _core_paths.DATASETS_DIR
+BENCHMARK_DIR = _core_paths.BENCHMARK_DIR
+MACSA_DATA_DIR = _core_paths.MACSA_DATA_DIR
+ARTIFACTS_DIR = _core_paths.ARTIFACTS_DIR
+MODEL_WEIGHTS_DIR = _core_paths.MODEL_WEIGHTS_DIR
+EDIT_MODEL_WEIGHTS_DIR = _core_paths.EDIT_MODEL_WEIGHTS_DIR
+MODEL_OUTPUTS_DIR = _core_paths.MODEL_OUTPUTS_DIR
+OUTPUT_ROUTES_DIR = _core_paths.OUTPUT_ROUTES_DIR
 # pretrained neural-BCO bee model (input checkpoint, ships with the repo)
-MODEL_WEIGHTS_PATH = (
-    MODEL_WEIGHTS_DIR / "inductive_random_graphs_weighted_connectivity.pt"
-)
+MODEL_WEIGHTS_PATH = _core_paths.CONSTRUCTION_MODEL_WEIGHTS_PATH
 # trained LC edit / improvement model weights -- produced by the training
 # notebook, kept under model_weights/improvement/ alongside the other weights.
 EDIT_MODEL_WEIGHTS_PATH = (
