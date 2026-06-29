@@ -71,6 +71,29 @@ critic_huber: true
 critic_huber_delta: 1.0
 critic_value_clip: 0.2
 
+# --- run / paths / data (consumed by EditTrainingRun, ignored by the trainer) ---
+run:
+  name: edit_training_v1
+  seed: 0
+  cpu: false
+
+paths:
+  output_dir: artifacts/runs/edit_training_v1
+  checkpoint_path: artifacts/model_weights/improvement/edit_training_v1.pt
+  init_checkpoint_path: null
+
+data:
+  dataset_dirname: lc_copytiers_n1000_n50_r12_len8_15_v1
+  train_fraction: 0.9
+  split_seed: 0
+  min_route_len: 8
+  max_route_len: 15
+  target_n_routes: 12
+  n_val_per_tier: 4
+
+checkpoint:
+  strict_load: true
+
 eval:
   min_route_len: 2
   max_route_len: 12
