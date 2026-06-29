@@ -1,0 +1,15 @@
+# Unified experiment spec: E1 narrow on Mandl (benchmark city).
+name: e1_mandl
+data:
+  source: benchmark
+  city: Mandl
+method:
+  config: nbco_variants/our_nbco_mandl
+method_label: Our NBCO (GNN + trim/extend)
+sweep:
+  alpha: [0.0, 0.5, 1.0]
+  adj_target: 0.3
+  n_iterations: 200
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
+report:
+  routes_plot: network
