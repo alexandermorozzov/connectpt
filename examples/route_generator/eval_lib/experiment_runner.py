@@ -87,6 +87,12 @@ def run_experiment(spec, *, method_fn: Callable = None,
     rows, routes = [], {"Initial": inst.init_routes}
     for method in methods:
         base_cfg = load_experiment_cfg(method.config)
+        # route bounds come from the loaded instance (the data source knows the
+        # right n_routes / lengths -- e.g. a MACSA scenario differs from any
+        # benchmark city), so one captured bee-mix config works across sources.
+        for key in ("n_routes", "min_route_len", "max_route_len"):
+            if key in inst.spec:
+                set_cfg_value(base_cfg, f"eval.{key}", int(inst.spec[key]))
         if method.get("force_cpu") is not None:
             set_cfg_value(base_cfg, "experiment.cpu", bool(method.force_cpu))
         if method.get("process_neural_bees_sequentially") is not None:
