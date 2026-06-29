@@ -234,10 +234,8 @@ def test_paper_combined_streams_csv_rows_with_duration():
     # on the volatile per-experiment call sites / signatures.
     assert "append_paper_row" in text
     assert "paper_row as _row" in text
-    assert "def _e2_row(" in text
     assert "save_paper_table" in text
     assert "reset_paper_table" in text
-    assert "_run_rttwmc" in text
 
 
 def test_paper_combined_uses_two_sided_adj_objective():
