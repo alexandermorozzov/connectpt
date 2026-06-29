@@ -1,0 +1,103 @@
+# @package _global_
+# Edit / trim model training -- the static configuration that was previously
+# built as a ~25-entry Hydra override list inside paper_combined.ipynb
+# (build_edit_run). Compose this instead:
+#
+#     cfg = compose(config_name="train/edit")
+#
+# Only the per-run sweep variables stay as overrides / function args:
+#   run_name, adjustment_degree_weight, adjustment_degree_target,
+#   adjustment_degree_objective, keep_rollout_on_device (device-dependent).
+# Sweep experiments overlay this file via their own defaults (see edit_*.yaml).
+#
+# Schema mirrors ppo_50nodes.yaml (the schema train_lc_improvement_cfg reads);
+# `_self_` is listed LAST so these values win over the model/experiment groups.
+
+ppo:
+  n_iterations: 200
+  val_period: 10
+  n_epochs: 1
+  minibatch_size: 256
+  horizon: 200
+  epsilon: 0.2
+  use_gae: true
+  gae_lambda: 0.95
+
+trainer: ppo
+discount_rate: 1.0
+diff_reward: true
+incumbent_reward: false
+return_best_routes: false
+# Notebook overrode ppo_50nodes' `true` -> false (ZERO_TRIM_REWARD).
+zero_trim_reward: false
+positive_only_trim_reward: false
+# Device-dependent at runtime (True on GPU); keep the static default off.
+keep_rollout_on_device: false
+max_trim_actions_per_route: 1
+shared_critic: false
+baseline_lr: 0.0005
+# Notebook raised 0.01 -> 0.05 (ENTROPY_WEIGHT): keep exploring past the
+# forced-nonhalt window so the policy does not collapse to halt.
+entropy_weight: 0.05
+batch_size: 512
+reward_scale: 1.0
+edit_step_penalty: 0
+forced_halt_penalty: 0
+lr: 0.0003
+decay: 0.00001
+optimizer: Adam
+normalize_advantages: true
+
+# --- anti-halt-collapse / trim shaping (notebook root overrides) ---
+force_nonhalt_first_step_until_iter: 150
+
+# --- adjustment-degree shaping (training defaults; sweeps override these) ---
+# Training reward shaping uses the one-sided "cap" objective; weight defaults to
+# 0 (adj OFF in training -- eval/BCO still apply the full ADJ penalty).
+adjustment_degree_weight: 0.0
+adjustment_degree_target: 0.2
+adjustment_degree_objective: cap
+adjustment_degree_gap: 0.1
+adjustment_degree_mode: paper
+adjustment_conditioning: false
+adjustment_condition_current: false
+adjustment_condition_weight: false
+adjustment_target_min: 0.2
+adjustment_target_max: 1.0
+
+# --- critic: normalize returns + Huber + value clip ---
+critic_normalize_returns: true
+critic_huber: true
+critic_huber_delta: 1.0
+critic_value_clip: 0.2
+
+eval:
+  min_route_len: 2
+  max_route_len: 12
+  n_routes: 10
+
+dataset:
+  type: pickle
+  kwargs:
+    path: datasets/mixed_50
+    space_scale: 0.6
+    demand_scale: 0.2
+
+# Deep-merged over the loaded groups (experiment: standard, model: trim).
+experiment:
+  logdir: null
+  cost_function:
+    kwargs:
+      connectivity_mode: median_weighted
+
+model:
+  route_generator:
+    kwargs:
+      serial_halting: true
+      allow_trim_below_min: true
+      n_adjustment_cond_feats: 0
+
+defaults:
+  - /experiment: standard
+  - /model: bestsofar_feb2023_trim
+  - _self_

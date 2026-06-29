@@ -1,0 +1,22 @@
+# @package _global_
+# Sweep variant: train the edit model WITH adjustment-target conditioning on.
+#
+# Overlays cfg/train/edit.yaml and flips on the adjustment shaping + the extra
+# gated conditioning feature (n_adjustment_cond_feats=1), so one policy serves a
+# range of adjustment targets. This is the template for adding further training
+# sweeps: list `/train/edit` first, then override only what differs.
+#
+#     cfg = compose(config_name="train/edit_adj_conditioned")
+
+defaults:
+  - /train/edit
+  - _self_
+
+# Turn the training-reward adjustment penalty on (cap objective, from edit.yaml).
+adjustment_degree_weight: 10.0
+adjustment_conditioning: true
+
+model:
+  route_generator:
+    kwargs:
+      n_adjustment_cond_feats: 1
