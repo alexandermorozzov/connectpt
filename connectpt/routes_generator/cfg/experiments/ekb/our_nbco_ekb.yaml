@@ -1,0 +1,98 @@
+n_bees: 10
+n_type1_bees: 5
+n_type4_bees: 0
+n_type5_bees: 5
+n_type6_bees: 0
+n_type7_bees: 0
+n_iterations: 200
+batch_size: 1
+neural_bees: true
+force_linking_unlinked: false
+adjustment_degree_weight: 10.0
+adjustment_degree_gap: 0.1
+adjustment_degree_mode: paper
+adjustment_degree_objective: target
+adjustment_degree_target: 0.2
+ignore_type4_max_route_len: false
+ignore_type5_max_route_len: false
+ignore_type6_max_route_len: false
+ignore_type7_max_route_len: false
+use_demand_weighted_route_selection: false
+worse_accept_temperature: 0.0
+worse_accept_decay: 0.995
+worse_accept_min_temperature: 0.001
+worse_selection_temperature: 0.0
+worse_selection_decay: 0.995
+worse_selection_min_temperature: 0.001
+worse_selection_uniform_mix: 0.05
+worse_selection_elite_count: 1
+trim_grace_period: 0
+experiment:
+  logdir: null
+  anomaly: false
+  cpu: true
+  seed: 0
+  symmetric_routes: true
+  cost_function:
+    type: mine
+    kwargs:
+      mean_stop_time_s: 0
+      avg_transfer_wait_time_s: 300
+      demand_time_weight: 0.0
+      route_time_weight: 0.5
+      median_connectivity_weight: 0.5
+      constraint_violation_weight: 5.0
+      use_weighted_connectivity: true
+      connectivity_mode: median_weighted
+      variable_weights: true
+      pp_fraction: 0.15
+      op_fraction: 0.15
+      mcw_fraction: 0.15
+      disabled_components:
+      - demand
+model:
+  common:
+    dropout: 0.0
+    nonlin_type: ReLU
+    embed_dim: 64
+  route_generator:
+    kwargs:
+      force_linking_unlinked: false
+      logit_clip: null
+      n_nodepair_layers: 3
+      n_pathscorer_layers: 3
+      pathscorer_hidden_dim: 16
+      n_halt_layers: 3
+      halt_scorer_type: endpoints
+      serial_halting: true
+    type: PathCombiningRouteGenerator
+  backbone_gn:
+    net_type: graph attn
+    kwargs:
+      n_layers: 5
+      in_node_dim: 4
+      in_edge_dim: 14
+      use_norm: false
+      n_heads: 4
+      dense: false
+  weights: D:\PythonProjects\connectpt\artifacts\model_weights\inductive_random_graphs_weighted_connectivity.pt
+init:
+  method: load
+  path: null
+eval:
+  csv: true
+  n_routes: 67
+  min_route_len: 11
+  max_route_len: 54
+  dataset:
+    type: tensor
+    path: /root/connectpt/datasets/benchmark
+    city: Mumford0
+run_name: EKB_our_nbco_gnn_rebuild_trimext
+n_type2_bees: 0
+type4_allow_halt: false
+type5_allow_halt: false
+type6_allow_halt: false
+type7_allow_halt: false
+process_neural_bees_sequentially: false
+early_stop_min_delta: 0.0

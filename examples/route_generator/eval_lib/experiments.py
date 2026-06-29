@@ -34,6 +34,19 @@ class ExperimentContext:
     include_edit_rebuild: bool
 
 
+def load_experiment_cfg(name):
+    """Load a captured config-first experiment YAML (config-first, no builder).
+
+    ``name`` is relative to ``cfg/experiments`` without the .yaml suffix, e.g.
+    "nbco_variants/our_nbco_mumford0" or "ekb/our_nbco_ekb". The notebook loads
+    these instead of calling the Python config builders; per-run sweep overrides
+    (alpha weights, adj target, n_iterations) are still applied on top.
+    """
+    from omegaconf import OmegaConf
+    from .context import CFG_DIR
+    return OmegaConf.load(CFG_DIR / "experiments" / f"{name}.yaml")
+
+
 def sa_cfg(ctx, city, run_name, n_routes, min_route_len, max_route_len):
     s = ctx.algo_settings(city)
     cfg = build_sa_cfg(run_name, n_routes, min_route_len, max_route_len,

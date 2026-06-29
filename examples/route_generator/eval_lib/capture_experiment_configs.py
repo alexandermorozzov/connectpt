@@ -108,7 +108,20 @@ def capture():
         cfg = ex.variant_bco_cfg(CTX, city, spec, TRIM12_EXTEND12_VARIANT)
         _save(cfg, "nbco_variants", f"trim12_extend12_{city.lower()}")
         n += 1
-    print(f"captured {n} config-first experiment YAMLs -> {OUT_DIR / 'nbco_variants'}")
+
+    # EKB (Ekaterinburg) -- the active case study; spec is data-derived.
+    try:
+        from .ekb import ekb_spec, load_ekb_routes
+        ekb = ekb_spec(load_ekb_routes())
+        cfg = ex.our_model_cfg(CTX, "EKB", ekb, adj_target=ADJ_TARGET,
+                               use_gnn=True, force_cpu=True)
+        _save(cfg, "ekb", "our_nbco_ekb")
+        n += 1
+        print(f"[EKB] captured our_nbco (spec={ekb})")
+    except Exception as exc:  # pragma: no cover - data may be absent
+        print(f"[EKB] skipped (data unavailable): {exc!r}")
+
+    print(f"captured {n} config-first experiment YAMLs -> {OUT_DIR}")
     return n
 
 
