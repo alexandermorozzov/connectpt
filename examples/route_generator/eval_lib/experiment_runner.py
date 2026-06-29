@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import pandas as pd
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, ListConfig
 
 from .context import CFG_DIR
 from .data_sources import create_data_source
@@ -76,13 +76,13 @@ def run_experiment(spec, *, method_fn: Callable = None,
 
     sweep = spec.sweep
     alphas = list(sweep.get("alpha", [None]))
-    adj_target = float(sweep.adj_target)
+    # adj_target may be a scalar or a list (2D alpha x target Pareto sweep).
+    _at = sweep.adj_target
+    adj_targets = [float(t) for t in _at] if isinstance(_at, (list, ListConfig)) \
+        else [float(_at)]
     n_iterations = int(sweep.n_iterations)
-    # adjustment kwargs default to the unified penalty; sweep.adj_weight can
-    # override the weight (e.g. 0 for the adj-off Pareto-front experiment).
-    adj_kwargs = dict(UNIFIED_ADJ, adjustment_degree_target=adj_target)
-    if sweep.get("adj_weight") is not None:
-        adj_kwargs["adjustment_degree_weight"] = float(sweep.adj_weight)
+    adj_weight_override = (float(sweep.adj_weight)
+                           if sweep.get("adj_weight") is not None else None)
 
     rows, routes = [], {"Initial": inst.init_routes}
     for method in methods:
@@ -101,21 +101,25 @@ def run_experiment(spec, *, method_fn: Callable = None,
         label = method.get("label", "method")
 
         for alpha in alphas:
-            cfg = copy.deepcopy(base_cfg)
-            if alpha is not None:
-                for key, value in _alpha_weights(alpha).items():
-                    set_cfg_value(cfg, f"experiment.cost_function.kwargs.{key}", value)
-            bco_cfg_set(cfg, n_iterations=n_iterations, **adj_kwargs)
+            for adj_target in adj_targets:
+                cfg = copy.deepcopy(base_cfg)
+                if alpha is not None:
+                    for key, value in _alpha_weights(alpha).items():
+                        set_cfg_value(cfg, f"experiment.cost_function.kwargs.{key}", value)
+                adj_kwargs = dict(UNIFIED_ADJ, adjustment_degree_target=adj_target)
+                if adj_weight_override is not None:
+                    adj_kwargs["adjustment_degree_weight"] = adj_weight_override
+                bco_cfg_set(cfg, n_iterations=n_iterations, **adj_kwargs)
 
-            out = method_fn(cfg, inst.init_routes, tensors=inst.tensors,
-                            run_name_scope=f"{inst.label}_{label}_alpha{alpha}_")
-            _run_name, m, _unserved, out_routes, *_ = out
+                out = method_fn(cfg, inst.init_routes, tensors=inst.tensors,
+                                run_name_scope=f"{inst.label}_{label}_a{alpha}_t{adj_target}_")
+                _run_name, m, _unserved, out_routes, *_ = out
 
-            row = dict(metrics_fn(m, out_routes, inst.init_routes))
-            row.update(method=label, alpha=alpha, adj_target=adj_target,
-                       n_iterations=n_iterations)
-            rows.append(row)
-            routes[f"{label} alpha={alpha}"] = out_routes
+                row = dict(metrics_fn(m, out_routes, inst.init_routes))
+                row.update(method=label, alpha=alpha, adj_target=adj_target,
+                           n_iterations=n_iterations)
+                rows.append(row)
+                routes[f"{label} a={alpha} t={adj_target}"] = out_routes
 
     return ExperimentResult(
         name=spec.name, table=pd.DataFrame(rows), routes=routes, instance=inst,

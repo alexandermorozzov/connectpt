@@ -36,7 +36,7 @@ def test_sweep_applies_alpha_from_yaml():
     assert result.name == "ekb_sweep"
     # init + one route set per alpha
     assert "Initial" in result.routes
-    assert any("alpha=0.5" in k for k in result.routes)
+    assert any("a=0.5" in k for k in result.routes)
 
 
 def test_ekb_data_source_loads():
