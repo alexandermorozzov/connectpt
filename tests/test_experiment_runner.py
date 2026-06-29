@@ -57,3 +57,19 @@ def test_spec_yaml_shapes():
         assert spec.data.source == source
         assert list(spec.sweep.alpha) == [0.0, 0.5, 1.0]
         assert spec.metrics  # non-empty
+
+
+def test_render_report_pareto_from_table():
+    import matplotlib
+    matplotlib.use("Agg")
+    import pandas as pd
+    from types import SimpleNamespace
+    from eval_lib.experiment_report import render_report
+
+    res = SimpleNamespace(
+        table=pd.DataFrame([{"RTT": 1.0, "WMC": 2.0, "alpha": 0.0},
+                            {"RTT": 1.5, "WMC": 1.2, "alpha": 1.0}]),
+        routes={}, instance=None, spec={"report": {"routes_plot": "pareto"}})
+    rep = render_report(res)
+    assert len(rep.table) == 2
+    assert "pareto" in rep.figures
