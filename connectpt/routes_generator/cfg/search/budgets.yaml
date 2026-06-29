@@ -1,0 +1,23 @@
+# Per-city algorithm budgets (was the notebook's DEFAULT/MANDL_ALGO_SETTINGS +
+# *_ITERS_BY_CITY magic tables). eval_lib.budgets.make_algo_settings reads this.
+full:
+  default: {sa: 15000, hh: 15000, ga: 500, ga_pop: 20, nsgaii: [800, 100], bco: 500, bco_bees: 10}
+smoke:
+  default: {sa: 120, hh: 120, ga: 5, ga_pop: 6, nsgaii: [8, 6], bco: 8, bco_bees: 10}
+quick: {sa: 40, hh: 40, ga: 5, ga_pop: 6, nsgaii: [10, 8], bco: 8, bco_bees: 10}
+mandl_bco_args:
+  worse_accept_temperature: 0.02
+  worse_accept_decay: 0.985
+  worse_accept_min_temperature: 0.001
+  worse_selection_temperature: 0.02
+  worse_selection_decay: 0.985
+  worse_selection_uniform_mix: 0.10
+  worse_selection_elite_count: 2
+by_city:
+  sa:     {Mandl: 15000, Mumford0: 25000, Mumford1: 40000, Mumford2: 120000, Mumford3: 180000}
+  hh:     {Mandl: 15000, Mumford0: 25000, Mumford1: 50000, Mumford2: 90000,  Mumford3: 130000}
+  ga:     {Mandl: 500,   Mumford0: 700,   Mumford1: 900,   Mumford2: 1400,   Mumford3: 1800}
+  ga_pop: {Mandl: 20,    Mumford0: 24,    Mumford1: 32,    Mumford2: 48,     Mumford3: 64}
+  hh_max_repair_iters: {Mandl: 5000, Mumford0: 10000, Mumford1: 30000, Mumford2: 80000, Mumford3: 120000}
+hh_max_repair_iters_default: 5000
+e2_bco_iterations: 200
