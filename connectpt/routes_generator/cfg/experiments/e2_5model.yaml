@@ -1,0 +1,20 @@
+# Unified experiment: E2 Fig-2 5-model ablation (GNN/RPC x trim-extend/type2 +
+# trim12+extend12) on Mumford1, alpha-swept, adjustment OFF (adj_weight=0).
+name: e2_5model
+data:
+  source: benchmark
+  city: Mumford1
+methods:
+  - {label: GNN + trim/extend,  config: nbco_variants/our_nbco_mumford1}
+  - {label: RPC + trim/extend,  config: e2_ablation/rpc_trim_extend_mumford1}
+  - {label: GNN + type2,        config: e2_ablation/gnn_type2_mumford1}
+  - {label: RPC + type2,        config: e2_ablation/rpc_type2_mumford1}
+  - {label: trim 12 + extend 12, config: nbco_variants/trim12_extend12_mumford1}
+sweep:
+  alpha: [0.0, 0.25, 0.5, 0.75, 1.0]
+  adj_target: 0.2
+  adj_weight: 0.0
+  n_iterations: 200
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
+report:
+  routes_plot: pareto

@@ -109,6 +109,15 @@ def capture():
         _save(cfg, "nbco_variants", f"trim12_extend12_{city.lower()}")
         n += 1
 
+    # E2 5-model ablation (GNN/RPC x trim-extend/type2) on Mumford1.
+    for construct, edit, name in [("RPC", "trim/extend", "rpc_trim_extend"),
+                                  ("GNN", "type2", "gnn_type2"),
+                                  ("RPC", "type2", "rpc_type2")]:
+        variant = ex.abl_variant(construct, edit, 10)
+        cfg = ex.variant_bco_cfg(CTX, "Mumford1", SPECS["Mumford1"], variant)
+        _save(cfg, "e2_ablation", f"{name}_mumford1")
+        n += 1
+
     # EKB (Ekaterinburg) -- the active case study; spec is data-derived.
     try:
         from .ekb import ekb_spec, load_ekb_routes

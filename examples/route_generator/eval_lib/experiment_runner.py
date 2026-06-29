@@ -78,6 +78,11 @@ def run_experiment(spec, *, method_fn: Callable = None,
     alphas = list(sweep.get("alpha", [None]))
     adj_target = float(sweep.adj_target)
     n_iterations = int(sweep.n_iterations)
+    # adjustment kwargs default to the unified penalty; sweep.adj_weight can
+    # override the weight (e.g. 0 for the adj-off Pareto-front experiment).
+    adj_kwargs = dict(UNIFIED_ADJ, adjustment_degree_target=adj_target)
+    if sweep.get("adj_weight") is not None:
+        adj_kwargs["adjustment_degree_weight"] = float(sweep.adj_weight)
 
     rows, routes = [], {"Initial": inst.init_routes}
     for method in methods:
@@ -94,8 +99,7 @@ def run_experiment(spec, *, method_fn: Callable = None,
             if alpha is not None:
                 for key, value in _alpha_weights(alpha).items():
                     set_cfg_value(cfg, f"experiment.cost_function.kwargs.{key}", value)
-            bco_cfg_set(cfg, n_iterations=n_iterations,
-                        **dict(UNIFIED_ADJ, adjustment_degree_target=adj_target))
+            bco_cfg_set(cfg, n_iterations=n_iterations, **adj_kwargs)
 
             out = method_fn(cfg, inst.init_routes, tensors=inst.tensors,
                             run_name_scope=f"{inst.label}_{label}_alpha{alpha}_")
