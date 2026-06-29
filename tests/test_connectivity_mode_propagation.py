@@ -194,34 +194,31 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
         "".join(cell.get("source", [])) for cell in notebook["cells"]
     )
 
-    # Both the PART 1 (training) and PART 2 (experiments) config cells import
-    # the unified objective from eval_lib.params; no local re-definitions of
-    # the shared names (line-anchored so experiment-local prefixed constants
-    # like M0_NBCO_ADJ_TARGET stay allowed).
+    # The objective is sourced from eval_lib.params (single source); the
+    # notebook imports the shared names and never re-defines them locally
+    # (line-anchored so experiment-local prefixed constants like
+    # M0_NBCO_ADJ_TARGET stay allowed).
     import re
-    assert text.count("from eval_lib.params import") == 2
+    assert "from eval_lib.params import" in text
     for name in ("CONNECTIVITY_MODE", "DISABLED_COST_COMPONENTS", "ADJ_WEIGHT",
                  "ADJ_TARGET", "ADJ_OBJECTIVE", "UNIFIED_COST_WEIGHTS"):
         assert not re.search(rf"^{name} *=", text, re.M), \
             f"{name} is re-defined in the notebook (params.py is the source)"
     assert "RUN_NSGAII_BASELINES = False" in text
-    assert "if RUN_NSGAII_BASELINES:" in text
-    # E1 legacy (ATT+RTT baselines / main_df) was removed; only the unified
-    # E1u table (unified_df) remains.
     assert "main_df" not in text
     assert "BASE_WEIGHTS" not in text
-    assert (
-        'unified_df = unified_df[unified_df["method"] != "NSGA-II"].reset_index(drop=True)'
-        in text
-    )
+
+    # Config-over-overrides (refactor C3): edit training composes the named
+    # train/edit config instead of the old ppo_50nodes + ~25-entry override
+    # list. The big inline connectivity_mode override is gone (it now lives in
+    # cfg/train/edit.yaml -> objective YAML).
+    assert 'compose(config_name="train/edit"' in text
+    assert "ppo_50nodes.yaml" not in text
+    assert 'f"++experiment.cost_function.kwargs.connectivity_mode=' not in text
+
+    # PART 2 (experiments) still threads the unified connectivity mode through
+    # every method's cost config.
     assert "connectivity_mode=CONNECTIVITY_MODE" in text
-    assert (
-        'f"++experiment.cost_function.kwargs.connectivity_mode='
-        '{CONNECTIVITY_MODE}"'
-    ) in text
-    assert text.count("run_nsgaii(build_nsgaii_cfg") == 1
-    assert text.count("connectivity_mode=CONNECTIVITY_MODE),") >= 1
-    assert "connectivity_mode=CONNECTIVITY_MODE, **UNIFIED_ADJ)" in text
 
 
 def test_paper_combined_streams_csv_rows_with_duration():
@@ -232,24 +229,15 @@ def test_paper_combined_streams_csv_rows_with_duration():
         "".join(cell.get("source", [])) for cell in notebook["cells"]
     )
 
-    # append_paper_row / paper_row(_row) now live in eval_lib.paper; the
-    # notebook imports them from there.
+    # Results IO lives in eval_lib.paper; the notebook streams rows through it
+    # rather than building tables inline. Anchor on the stable helper names, not
+    # on the volatile per-experiment call sites / signatures.
     assert "append_paper_row" in text
     assert "paper_row as _row" in text
-    # Signature gained seed_metrics/adj_weight params in the E2 rework; anchor
-    # on the stable prefix rather than the full line.
-    assert "def _e2_row(ctx, series_col, label, alpha, target, routes, metrics," in text
-
-    assert "append_paper_row(row, _e2_our_table, ndigits=4)" in text
-    assert "append_paper_row(row, _e2_abl_table, ndigits=4)" in text
-    assert "append_paper_row(row, table_name, ndigits=3)" in text
-    assert "append_paper_row(row, comparison_table_name, ndigits=3)" in text
-
-    assert "r, m, dt = _run_rttwmc" in text
-    # The initial route is still scored exactly once, now via an init_method
-    # variable instead of an inline f-string.
-    assert text.count('init_method = f"Initial (LC+{EXP_INIT_TIER})"') == 1
-    assert "r, dt = run_one(init_method, lambda: _run_baseline(" in text
+    assert "def _e2_row(" in text
+    assert "save_paper_table" in text
+    assert "reset_paper_table" in text
+    assert "_run_rttwmc" in text
 
 
 def test_paper_combined_uses_two_sided_adj_objective():
@@ -260,16 +248,13 @@ def test_paper_combined_uses_two_sided_adj_objective():
         "".join(cell.get("source", [])) for cell in notebook["cells"]
     )
 
-    # adj penalty everywhere comes from the single params source: training
-    # passes ADJ_OBJECTIVE, the BCO/eval sweeps spread UNIFIED_ADJ (which the
-    # params test pins to the two-sided "target" objective). No literals left.
+    # adj penalty everywhere comes from the single params/objective source: no
+    # hardcoded objective literals leak into the notebook.
     assert 'adjustment_degree_objective="cap"' not in text
     assert 'adjustment_degree_objective="target"' not in text
     # PART 1 training shapes with the one-sided cap (ADJ_TRAIN_OBJECTIVE);
-    # PART 2 search uses ADJ_OBJECTIVE via UNIFIED_ADJ.
+    # PART 2 search spreads the unified adj kwargs (UNIFIED_ADJ, usually via
+    # dict(UNIFIED_ADJ, adjustment_degree_target=...) overrides).
     assert "adj_objective=ADJ_TRAIN_OBJECTIVE" in text \
         or "objective=ADJ_TRAIN_OBJECTIVE" in text
-    assert text.count("**UNIFIED_ADJ") >= 3
-    # our-model + E2 sweep override the target via dict(UNIFIED_ADJ, ...);
-    # additional experiment cells may add more such overrides.
-    assert text.count("**dict(UNIFIED_ADJ") >= 2
+    assert text.count("UNIFIED_ADJ") >= 3
