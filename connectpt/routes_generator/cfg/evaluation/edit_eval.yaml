@@ -1,0 +1,22 @@
+# @package _global_
+# Evaluate the edit model checkpoint into structured artifacts (no plotting).
+#
+#     cfg = compose(config_name="evaluation/edit_eval")
+
+run:
+  name: edit_eval_v1
+  seed: 0
+  cpu: false
+
+paths:
+  output_dir: artifacts/runs/edit_eval_v1
+
+model:
+  config: bestsofar_feb2023_trim
+  checkpoint_path: artifacts/model_weights/improvement/improvement_lc_redundancy_rttwmc_v1_PRESERVED.pt
+  strict_load: true
+
+data:
+  benchmark_dirname: lc_copytiers_n1000_n50_r12_len8_15_v1
+  min_route_len: 8
+  max_route_len: 15
