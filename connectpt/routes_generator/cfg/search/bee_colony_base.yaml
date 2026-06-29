@@ -3,7 +3,7 @@
 # availability group (search/models/*) + a bee set group (search/bee_sets/*).
 defaults:
   - /objective: rtt_wmc_no_demand
-  - /data: lc_copytiers_benchmark
+  - /data: mandl_benchmark
   - _self_
 
 run:

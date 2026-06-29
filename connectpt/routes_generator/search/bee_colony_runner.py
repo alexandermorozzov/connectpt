@@ -1,47 +1,88 @@
 """BeeColonyRunner -- drive the existing bee_colony from a translated plan.
 
 The runner holds the cost, the loaded models, the policy adapters and the
-``BeeColonyPlan`` (per-type bee counts). ``run_suite`` is the integration point
-that calls the existing ``bee_colony(...)`` with those counts + models; it is
-invoked only on a real (non-dry) run, which needs a loaded benchmark state.
-
-This layer must NOT import the training application.
+``BeeColonyPlan`` (per-type bee counts). ``run_suite`` builds the benchmark
+dataloader + the bee_colony kwargs from the plan and runs the existing
+``bee_colony`` through ``test_method`` -- the trained models are passed straight
+in (no wrapper owns their state_dict). This layer must NOT import training.
 """
 from __future__ import annotations
+
+from ..objectives import CostFactory
 
 
 class BeeColonyRunner:
     def __init__(self, cfg, *, cost_obj, models: dict, policies: dict, plan,
-                 data_module):
+                 data_module, device):
         self.cfg = cfg
         self.cost_obj = cost_obj
         self.models = models
         self.policies = policies
         self.plan = plan
         self.data = data_module
+        self.device = device
 
     def plan_summary(self) -> dict:
-        """The translated per-type counts + which models are needed."""
+        search = self.cfg.get("search", {})
         return {
             "counts": dict(self.plan.counts),
             "needs_construction": self.plan.needs_construction,
             "needs_edit": self.plan.needs_edit,
-            "n_bees": int(self.cfg.get("n_bees", sum(self.plan.counts.values()))),
+            "n_bees": int(search.get("n_bees", sum(self.plan.counts.values()))),
         }
 
-    def run_suite(self):
-        """Run the full bee-colony search (real run only).
-
-        Wires the translated bee counts + loaded models into the existing
-        bee_colony executor. Requires ``self.data.setup()`` to have loaded the
-        benchmark state.
-        """
-        from ..bee_colony import bee_colony  # local import: heavy, real-run only
-
-        if not self.data.graphs:
-            self.data.setup()
-        raise NotImplementedError(
-            "Full bee_colony execution wiring is finalized alongside the notebook "
-            "search cells (C10); the dry-run path validates models/policies/plan. "
-            f"bee_colony={bee_colony.__name__}, plan={self.plan_summary()}"
+    def _bco_kwargs(self) -> dict:
+        """Translate the plan + objective into bee_colony keyword arguments."""
+        counts = self.plan.counts
+        obj = CostFactory.load_objective("rtt_wmc_no_demand")
+        adj = obj.adjustment
+        # bee_colony accepts n_type1/2/4/5/6/7 (type3 is not a kwarg).
+        kwargs = {f"n_type{i}_bees": int(counts[f"n_type{i}"])
+                  for i in (1, 2, 4, 5, 6, 7)}
+        kwargs.update(
+            bee_model=self.models.get("construction"),  # type1/type4 neural rebuild/extend
+            edit_model=self.models.get("edit"),         # type5/6/7 edit bees
+            adjustment_degree_weight=float(adj.weight),
+            adjustment_degree_target=float(adj.target),
+            adjustment_degree_objective=str(adj.objective),  # search -> two-sided "target"
+            adjustment_degree_gap=float(adj.gap),
+            adjustment_degree_mode=str(adj.mode),
         )
+        return kwargs
+
+    def run_suite(self):
+        """Run the full bee-colony search on the benchmark instance."""
+        from omegaconf import OmegaConf
+        from torch_geometric.loader import DataLoader
+
+        from ..bee_colony import bee_colony
+        from ..utils import test_method
+
+        if not self.data.dataset:
+            self.data.setup()
+        dataloader = DataLoader(self.data.dataset, batch_size=1)
+
+        search = self.cfg.search
+        eval_cfg = OmegaConf.create({
+            "n_routes": int(self.data.n_routes),
+            "min_route_len": int(self.data.min_route_len),
+            "max_route_len": int(self.data.max_route_len),
+            "csv": False,
+        })
+        # from-scratch initial network (no precomputed routes needed)
+        init_cfg = OmegaConf.create(
+            {"method": "john", "alpha": 0.0, "prioritize_direct_connections": True}
+        )
+
+        out = test_method(
+            bee_colony, dataloader, eval_cfg, init_cfg, self.cost_obj,
+            silent=True, return_routes=True, device=self.device,
+            n_bees=int(search.n_bees), n_iterations=int(search.n_iterations),
+            **self._bco_kwargs(),
+        )
+        mean_cost, std_cost, unserved, metrics, routes = out
+        return {
+            "mean_cost": float(mean_cost),
+            "routes": routes.detach().cpu() if hasattr(routes, "detach") else routes,
+            "metrics": {k: float(v.mean()) for k, v in metrics.items()},
+        }

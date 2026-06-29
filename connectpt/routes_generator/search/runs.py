@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..core.artifacts import ArtifactStore
 from ..core.checkpoints import CheckpointStore
 from ..core.paths import ROOT_DIR
 from ..core.runs import ExperimentRun, RunArtifact
@@ -76,13 +77,15 @@ class BeeColonySearchRun(ExperimentRun):
         self.plan = BeeColonyPlan.from_specs(self.specs, self.policies)
 
         self.data = BenchmarkDataModule(
-            benchmark_dirname=cfg.data.benchmark_dirname,
+            city=cfg.data.city,
+            n_routes=int(cfg.data.n_routes),
             min_route_len=int(cfg.data.min_route_len),
             max_route_len=int(cfg.data.max_route_len),
         )
         self.runner = BeeColonyRunner(
             cfg, cost_obj=self.cost_obj, models=self.models,
             policies=self.policies, plan=self.plan, data_module=self.data,
+            device=device,
         )
 
     def run(self, *, dry_run: bool = False) -> SearchArtifact:
@@ -98,7 +101,18 @@ class BeeColonySearchRun(ExperimentRun):
             )
 
         result = self.runner.run_suite()
+
+        # persist artifacts so the reports layer can read them back without
+        # re-running the search.
+        store = ArtifactStore(self.context.output_dir)
+        store.save_json({"mean_cost": result["mean_cost"], "metrics": result["metrics"],
+                         "plan": summary}, f"{self.cfg.run.name.replace('/', '_')}_search")
+        if result.get("routes") is not None:
+            store.save_routes({"routes": result["routes"]},
+                              f"{self.cfg.run.name.replace('/', '_')}_routes")
+
         return SearchArtifact(
             run_name=self.cfg.run.name, output_dir=self.context.output_dir,
             result=result, plan=summary,
+            metadata={"mean_cost": result["mean_cost"]},
         )

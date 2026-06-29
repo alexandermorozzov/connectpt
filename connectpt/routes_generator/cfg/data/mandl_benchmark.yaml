@@ -1,0 +1,6 @@
+# Mandl benchmark city (smallest standard instance) for bee-colony search.
+# Loaded directly from datasets/benchmark/Mandl*.txt via from_mumford_data.
+city: Mandl
+n_routes: 6
+min_route_len: 2
+max_route_len: 8

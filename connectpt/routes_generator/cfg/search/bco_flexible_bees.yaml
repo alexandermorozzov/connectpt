@@ -17,9 +17,10 @@ paths:
   output_dir: artifacts/runs/bco_flexible_bees_v1
 
 data:
-  benchmark_dirname: lc_copytiers_n1000_n50_r12_len8_15_v1
-  min_route_len: 8
-  max_route_len: 15
+  city: Mandl
+  n_routes: 6
+  min_route_len: 2
+  max_route_len: 8
 
 n_iterations: 200
 n_bees: 14

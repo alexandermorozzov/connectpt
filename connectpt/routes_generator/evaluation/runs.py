@@ -1,21 +1,23 @@
 """ModelEvaluationRun -- evaluate a checkpoint into structured artifacts.
 
 setup() builds the edit model (factory) + strict-loads the checkpoint + cost
-(unified objective, eval form) + benchmark data module. run(dry_run=True)
-validates the wiring; a real run evaluates and saves an EvaluationResult.
+(unified objective, eval form). run(dry_run=True) validates the wiring; a real
+run loads the eval graphs/seed routes, evaluates and saves an EvaluationResult.
+Evaluation consumes the LC graphs/seed routes directly (it does not use the
+search benchmark data module -- a different data shape).
 """
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from ..core.artifacts import ArtifactStore
 from ..core.checkpoints import CheckpointStore
-from ..core.paths import ROOT_DIR
+from ..core.paths import DATASETS_DIR, ROOT_DIR
 from ..core.runs import ExperimentRun, RunArtifact
 from ..core.runtime import RunContext
 from ..model_factory import RouteModelFactory
 from ..objectives import CostFactory
-from ..search.benchmark_data import BenchmarkDataModule
 from .evaluators import EditModelEvaluator
 
 
@@ -43,11 +45,7 @@ class ModelEvaluationRun(ExperimentRun):
         self.cost_obj = CostFactory.build_unified("rtt_wmc_no_demand", for_training=False)
         self.cost_obj.to(device)
 
-        self.data = BenchmarkDataModule(
-            benchmark_dirname=cfg.data.benchmark_dirname,
-            min_route_len=int(cfg.data.min_route_len),
-            max_route_len=int(cfg.data.max_route_len),
-        )
+        self.dataset_dir = DATASETS_DIR / cfg.data.dataset_dirname
         self.evaluator = EditModelEvaluator()
         self.store = ArtifactStore(self.context.output_dir)
 
@@ -59,10 +57,13 @@ class ModelEvaluationRun(ExperimentRun):
                 metadata={"dry_run": True, "model_class": type(self.model).__name__},
             )
 
-        self.data.setup()
-        indices = list(range(len(self.data.graphs)))
+        from ..improvement_learning import load_raw_graphs_and_lc_routes
+        graphs, seed_routes = load_raw_graphs_and_lc_routes(
+            self.dataset_dir / "raw_graphs_1000.pkl", self.dataset_dir)
+        data = SimpleNamespace(graphs=graphs, seed_routes=seed_routes)
+        indices = list(range(len(graphs)))
         result = self.evaluator.evaluate(
-            self.model, self.cost_obj, self.data, indices,
+            self.model, self.cost_obj, data, indices,
             min_route_len=int(self.cfg.data.min_route_len),
             max_route_len=int(self.cfg.data.max_route_len),
             metadata={"run_name": self.cfg.run.name},

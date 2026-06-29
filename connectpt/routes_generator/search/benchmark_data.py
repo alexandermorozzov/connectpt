@@ -1,31 +1,31 @@
-"""BenchmarkDataModule -- benchmark graphs/routes the search runs against.
+"""BenchmarkDataModule -- the benchmark city the search runs against.
 
-A thin config holder today: it records the benchmark location and route-length
-bounds. ``setup()`` is where benchmark loading is wired when the search runner
-executes the full BCO; the dry-run path does not load data.
+Loads a standard benchmark instance (Mandl / Mumford0-3) straight from the
+``datasets/benchmark/<city>*.txt`` files via the connectpt loader -- no eval_lib
+dependency. ``setup()`` builds the single-graph dataset the bee-colony runner
+feeds through ``test_method``.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..core.paths import DATASETS_DIR
+from ..core.paths import BENCHMARK_DIR
 
 
 @dataclass
 class BenchmarkDataModule:
-    benchmark_dirname: str
+    city: str
+    n_routes: int
     min_route_len: int
     max_route_len: int
-    graphs: list = field(default_factory=list, init=False)
-    seed_routes: object = field(default=None, init=False)
-
-    @property
-    def benchmark_dir(self):
-        return DATASETS_DIR / self.benchmark_dirname
+    dataset: list = field(default_factory=list, init=False)
 
     def setup(self) -> "BenchmarkDataModule":
-        from ..improvement_learning import load_raw_graphs_and_lc_routes
-        self.graphs, self.seed_routes = load_raw_graphs_and_lc_routes(
-            self.benchmark_dir / "raw_graphs_1000.pkl", self.benchmark_dir
+        from omegaconf import OmegaConf
+        from ..citygraph_dataset import get_dataset_from_config
+
+        ds_cfg = OmegaConf.create(
+            {"type": "mumford", "path": str(BENCHMARK_DIR), "city": self.city}
         )
+        self.dataset = get_dataset_from_config(ds_cfg)
         return self
