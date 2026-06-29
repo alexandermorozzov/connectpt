@@ -1,0 +1,72 @@
+n_bees: 10
+n_type1_bees: 5
+n_type4_bees: 0
+n_type5_bees: 0
+n_type6_bees: 0
+n_type7_bees: 0
+n_iterations: 200
+batch_size: 1
+force_linking_unlinked: false
+adjustment_degree_weight: 0.0
+adjustment_degree_gap: 0.1
+adjustment_degree_mode: current
+adjustment_degree_objective: raw
+adjustment_degree_target: 0.2
+ignore_type4_max_route_len: false
+ignore_type5_max_route_len: false
+ignore_type6_max_route_len: false
+ignore_type7_max_route_len: false
+use_demand_weighted_route_selection: false
+worse_accept_temperature: 0.0
+worse_accept_decay: 0.995
+worse_accept_min_temperature: 0.001
+worse_selection_temperature: 0.0
+worse_selection_decay: 0.995
+worse_selection_min_temperature: 0.001
+worse_selection_uniform_mix: 0.05
+worse_selection_elite_count: 1
+trim_grace_period: 0
+worse_accept_trim_grace_period: 3
+experiment:
+  logdir: null
+  anomaly: false
+  cpu: false
+  seed: 0
+  symmetric_routes: true
+  cost_function:
+    type: mine
+    kwargs:
+      mean_stop_time_s: 0
+      avg_transfer_wait_time_s: 300
+      demand_time_weight: 0.0
+      route_time_weight: 0.5
+      median_connectivity_weight: 0.5
+      constraint_violation_weight: 5.0
+      use_weighted_connectivity: true
+      connectivity_mode: median_weighted
+      variable_weights: true
+      pp_fraction: 0.15
+      op_fraction: 0.15
+      mcw_fraction: 0.15
+      disabled_components:
+      - demand
+init:
+  method: load
+  path: null
+eval:
+  csv: true
+  n_routes: 60
+  min_route_len: 12
+  max_route_len: 25
+  dataset:
+    type: tensor
+    path: /root/connectpt/datasets/benchmark
+    city: Mumford0
+run_name: Mumford3_classic_bco
+n_type2_bees: 5
+type4_allow_halt: true
+type5_allow_halt: true
+type6_allow_halt: true
+type7_allow_halt: true
+process_neural_bees_sequentially: false
+early_stop_min_delta: 0.0
