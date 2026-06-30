@@ -1,0 +1,52 @@
+# @package _global_
+# Experiment-suite configuration: which experiments run, on which cities, with
+# which shared parameters. The notebook loads ONE of these (suite / suite_smoke)
+# via eval_lib.suite.load_suite_config and reads everything from it -- no
+# experiment selection / parameter constants live in the notebook anymore.
+profile: full
+smoke: false
+quick: false
+output_prefix: ""          # set to "TEMP_" (smoke profile) for throwaway runs
+seeds: [0]
+cities: [Mandl, Mumford0, Mumford1, Mumford2, Mumford3]
+
+model:
+  edit_checkpoint: improvement_lc_rttconn_adj_w10_t02_finetune100.pt
+  edit_adj_cond_feats: 0   # the finetune100 checkpoint is unconditioned
+benchmark_init_mode: nx
+include_edit_rebuild: false
+early_stop_patience: null
+
+# Which experiment blocks run. (PART 1 training + clean-LC baseline live here too
+# so the whole notebook is driven by one profile.)
+run:
+  training: false
+  clean_lc_baseline: false
+  e2_our_pareto: true
+  e2_5model: true
+  e2_route_viz: false
+  m0_nbco_variants: true
+  macsa: true
+  nsgaii_baselines: false
+  ekb_case_study: false
+  ekb_nbco: false
+  ekb_alpha_sweep: false
+
+# E1 narrow (neural BCO vs Our NBCO alpha sweep) parameters.
+e1:
+  full_cities: [Mandl, Mumford0, Mumford1, Mumford2, Mumford3]
+  cities: [Mandl]
+  trim12_only_cities: []
+  table_suffix: "_nbco_only_target03_iter200"
+  run_neural_bco: false
+  run_our_model: false
+  alpha_grid: [0.0, 0.5, 1.0]
+  adj_target: 0.3
+  bco_iterations: 200
+  init_source_stem: "_our_only_target03_iter500"
+  reuse_baseline_cache: true
+  rerun_baselines: false
+  rerun_our_model: true
+
+e2:
+  table_suffix: "_mumford1_5model"

@@ -1,0 +1,38 @@
+# @package _global_
+# Smoke training profile: tiny dataset, 1 iteration, TEMP_ outputs. Overlays
+# edit_scratch.yaml -- just verifies the config-driven training path (dataset gen
+# -> data module -> PPO -> checkpoint) runs end to end WITHOUT touching the real
+# dataset or the real checkpoint.
+defaults:
+  - /train/edit_scratch
+  - _self_
+
+run:
+  name: TEMP_smoke_edit_scratch
+
+paths:
+  checkpoint_path: artifacts/model_weights/improvement/TEMP_smoke_edit_scratch.pt
+
+ppo:
+  n_iterations: 1
+  val_period: 1
+
+train_loop:
+  n_iterations: 1
+
+data:
+  dataset_dirname: TEMP_smoke_lc_copytiers
+  n_val_per_tier: 1
+
+curriculum:
+  n_val_per_tier: 1
+
+dataset_gen:
+  n_graphs: 10
+
+report:
+  eval_n_per_tier: 1
+  baseline:
+    batch: 4
+  post_train:
+    iters: 1

@@ -204,7 +204,15 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
                  "ADJ_TARGET", "ADJ_OBJECTIVE", "UNIFIED_COST_WEIGHTS"):
         assert not re.search(rf"^{name} *=", text, re.M), \
             f"{name} is re-defined in the notebook (params.py is the source)"
-    assert "RUN_NSGAII_BASELINES = False" in text
+    # Experiment selection is now config-driven via the suite profile
+    # (cfg/experiments/suite*.yaml), loaded once as SUITE -- not inline RUN_*
+    # constants. The notebook drives the experiment switches from SUITE.run, and
+    # the full-run default keeps the (heaviest) NSGA-II baseline off.
+    assert "SUITE = load_suite_config(" in text
+    assert "SUITE.run." in text
+    suite_yaml = (REPO_ROOT / "connectpt" / "routes_generator" / "cfg"
+                  / "experiments" / "suite.yaml").read_text(encoding="utf-8")
+    assert "nsgaii_baselines: false" in suite_yaml
     assert "main_df" not in text
     assert "BASE_WEIGHTS" not in text
 
