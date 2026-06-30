@@ -17,6 +17,76 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def load_train_config(name="edit_scratch", *, overrides=None, cfg_dir=None):
+    """Compose a training config from ``cfg/train/<name>.yaml`` (the single
+    source of truth for every training/report knob). Mirrors the reference
+    ``load_experiment_config`` -- the notebook loads this once and passes the
+    composed cfg to the factory helpers below; no constants in the notebook."""
+    from hydra import compose, initialize_config_dir
+
+    from eval_lib.context import CFG_DIR
+
+    cfg_dir = cfg_dir or CFG_DIR
+    with initialize_config_dir(config_dir=str(cfg_dir), version_base=None):
+        return compose(config_name=f"train/{name}", overrides=list(overrides or []))
+
+
+def copytier_config(cfg) -> "CopyTierConfig":
+    """Build the dataset-generation config from a composed train cfg (factory:
+    reads cfg.dataset_gen / cfg.data / cfg.curriculum, not notebook constants)."""
+    from omegaconf import OmegaConf
+
+    from eval_lib.context import DATASETS_DIR
+    from eval_lib.route_copies import COPY_TIER_CFG
+
+    dg, data = cfg.dataset_gen, cfg.data
+    ddir = DATASETS_DIR / data.dataset_dirname
+    tiers = list(cfg.curriculum.tiers) if cfg.get("curriculum") else list(COPY_TIER_CFG)
+    combos = [list(c) for c in OmegaConf.to_container(dg.lc_combos, resolve=True)]
+    corrupt_target = (int(data.target_n_routes) if bool(dg.get("corrupt_all_routes"))
+                      else dg.get("n_routes_to_corrupt"))
+    return CopyTierConfig(
+        new_dataset_dir=ddir, subset_pkl=ddir / "raw_graphs_1000.pkl",
+        meta_csv=ddir / "meta.csv", raw_graph_seed=int(dg.raw_graph_seed),
+        raw_n_nodes=int(dg.raw_n_nodes), raw_graph_type=str(dg.raw_graph_type),
+        n_graphs=int(dg.n_graphs), tiers=tiers, lc_combos=combos,
+        target_n_routes=int(data.target_n_routes), min_route_len=int(data.min_route_len),
+        max_route_len=int(data.max_route_len),
+        connectivity_mode=str(cfg.experiment.cost_function.kwargs.connectivity_mode),
+        lc_n_samples=int(dg.lc_n_samples), tier_cfg=COPY_TIER_CFG,
+        corrupt_target=corrupt_target, force_regen=bool(dg.get("force_regen", False)))
+
+
+def _pad_routes_to(routes, n_routes, max_route_len):
+    """Pad/clip a route tensor to (n_routes, max_route_len) with -1 fill.
+    Shared by dataset generation and the clean-LC baseline (was duplicated)."""
+    import torch
+
+    from eval_lib import as_route_tensor
+
+    t = as_route_tensor(routes).long()
+    if t.ndim == 3:
+        t = t[0]
+    if t.shape[0] < n_routes:
+        t = torch.cat([t, torch.full((n_routes - t.shape[0], t.shape[1]), -1, dtype=t.dtype)], 0)
+    else:
+        t = t[:n_routes]
+    if t.shape[1] < max_route_len:
+        t = torch.cat([t, torch.full((t.shape[0], max_route_len - t.shape[1]), -1, dtype=t.dtype)], 1)
+    elif t.shape[1] > max_route_len:
+        t = t[:, :max_route_len]
+    return t
+
+
+def _graph_tensors(g):
+    """node_locs / street_adj / demand dict for one graph (shared helper)."""
+    from connectpt.routes_generator.citygraph_dataset import STOP_KEY
+
+    return {"node_locs": g[STOP_KEY].pos.detach().cpu().clone(),
+            "street_adj": g.street_adj.detach().cpu().clone(),
+            "demand": g.demand.detach().cpu().clone()}
+
+
 @dataclass
 class CopyTierConfig:
     """Geometry, paths and tier schedule for the copy-tier training dataset.
@@ -62,30 +132,15 @@ def build_copytier_dataset(cfg: CopyTierConfig):
     import torch
     from tqdm.auto import tqdm
 
-    from connectpt.routes_generator.citygraph_dataset import (
-        STOP_KEY, DynamicCityGraphDataset)
-    from eval_lib import as_route_tensor, build_lc_cfg, dump_routes, run_lc_batch
+    from connectpt.routes_generator.citygraph_dataset import DynamicCityGraphDataset
+    from eval_lib import build_lc_cfg, dump_routes, run_lc_batch
     from eval_lib.route_copies import (count_changed_routes, inject_route_copies,
                                        redundancy_stats, uncovered_demand_pct)
 
     def _to_fixed(routes):
-        t = as_route_tensor(routes).long()
-        if t.ndim == 3:
-            t = t[0]
-        if t.shape[0] < cfg.target_n_routes:
-            t = torch.cat([t, torch.full((cfg.target_n_routes - t.shape[0], t.shape[1]), -1, dtype=t.dtype)], 0)
-        else:
-            t = t[:cfg.target_n_routes]
-        if t.shape[1] < cfg.max_route_len:
-            t = torch.cat([t, torch.full((t.shape[0], cfg.max_route_len - t.shape[1]), -1, dtype=t.dtype)], 1)
-        elif t.shape[1] > cfg.max_route_len:
-            t = t[:, :cfg.max_route_len]
-        return t
+        return _pad_routes_to(routes, cfg.target_n_routes, cfg.max_route_len)
 
-    def _tensors(g):
-        return {"node_locs": g[STOP_KEY].pos.detach().cpu().clone(),
-                "street_adj": g.street_adj.detach().cpu().clone(),
-                "demand": g.demand.detach().cpu().clone()}
+    _tensors = _graph_tensors
 
     def generate_dataset():
         if cfg.new_dataset_dir.exists():
@@ -173,49 +228,41 @@ def build_copytier_dataset(cfg: CopyTierConfig):
     return (_time.perf_counter() - _tg) / max(1, cfg.n_graphs)
 
 
-def clean_lc_baseline(ct_cfg: CopyTierConfig, *, graphs, seed_routes, meta_df,
-                      device, baseline_path, batch=16, n_per_tier=200,
-                      adj_weight=0.0, use_curriculum=True, curriculum=None,
-                      n_iterations=700):
+def clean_lc_baseline(cfg, *, graphs, seed_routes, meta_df, device, baseline_path):
     """Per-curriculum-stage clean-LC baseline cost CSV for the history figure.
 
-    Verbatim move of the dormant notebook cell: builds clean LC routes per LC
-    combo, scores them under the unified objective (adj penalty off) and writes
-    one standalone CSV. Returns the baseline DataFrame.
+    Config-driven: geometry/combos/curriculum + baseline knobs all read from the
+    composed train ``cfg`` (cfg.report.baseline, cfg.curriculum, cfg.dataset_gen).
+    Returns the baseline DataFrame.
     """
     import pandas as pd
     import torch
 
-    from connectpt.routes_generator.citygraph_dataset import STOP_KEY
     from connectpt.routes_generator.improvement_learning import (
         RouteGenBatchState, make_improvement_batch, _clone_cost_weights)
     from connectpt.routes_generator.objectives import CostFactory
-    from eval_lib import as_route_tensor, build_lc_cfg, run_lc_batch
+    from eval_lib import build_lc_cfg, run_lc_batch
+
+    ct_cfg = copytier_config(cfg)
+    batch = int(cfg.report.baseline.batch)
+    adj_weight = float(cfg.report.baseline.adj_weight)
+    n_per_tier = int(cfg.dataset_gen.n_graphs) // len(ct_cfg.tiers)
+    n_iterations = int(cfg.train_loop.n_iterations)
+    use_curriculum = cfg.get("curriculum") is not None
+    curriculum = ([(round(float(frac) * n_iterations), list(t), label)
+                   for frac, t, label in cfg.curriculum.schedule]
+                  if use_curriculum else [])
+
+    def _to_fixed(routes):
+        return _pad_routes_to(routes, ct_cfg.target_n_routes, ct_cfg.max_route_len)
+
+    _tensors = _graph_tensors
 
     tiers, lc_combos = ct_cfg.tiers, ct_cfg.lc_combos
     _baseline_pool_by_tier = {
         tier: meta_df.loc[meta_df["tier"] == tier, "graph_index"].astype(int).tolist()
         for tier in tiers
     }
-
-    def _to_fixed(routes):
-        t = as_route_tensor(routes).long()
-        if t.ndim == 3:
-            t = t[0]
-        if t.shape[0] < ct_cfg.target_n_routes:
-            t = torch.cat([t, torch.full((ct_cfg.target_n_routes - t.shape[0], t.shape[1]), -1, dtype=t.dtype)], 0)
-        else:
-            t = t[:ct_cfg.target_n_routes]
-        if t.shape[1] < ct_cfg.max_route_len:
-            t = torch.cat([t, torch.full((t.shape[0], ct_cfg.max_route_len - t.shape[1]), -1, dtype=t.dtype)], 1)
-        elif t.shape[1] > ct_cfg.max_route_len:
-            t = t[:, :ct_cfg.max_route_len]
-        return t
-
-    def _tensors(g):
-        return {"node_locs": g[STOP_KEY].pos.detach().cpu().clone(),
-                "street_adj": g.street_adj.detach().cpu().clone(),
-                "demand": g.demand.detach().cpu().clone()}
 
     # Clean-LC baseline cost: the unified objective (RTT+WMC, demand off, fixed
     # 0.5/0.5 weights) with the adjustment penalty off, via the library
@@ -331,13 +378,17 @@ def stitch_history(*, prior_history_files=(), history_df=None,
     return h, spans
 
 
-def plot_training_history(h, spans, *, full_history_run, model_outputs_dir,
-                          tensorboard_scalars=None, run_name=None):
+def plot_training_history(h, spans, cfg, *, model_outputs_dir):
     """Actor curves + curriculum shading (inline figure) and mirror every scalar
-    column to a TensorBoard run. Verbatim move of the dormant notebook cell."""
+    column to a TensorBoard run. Config-driven: run name + the scalar allow-list
+    come from cfg (cfg.run.name, cfg.report.tensorboard_scalars)."""
     import matplotlib.pyplot as plt
     import pandas as pd
     from torch.utils.tensorboard import SummaryWriter
+
+    run_name = full_history_run = cfg.run.name
+    _tbs = cfg.report.get("tensorboard_scalars") if cfg.get("report") else None
+    tensorboard_scalars = list(_tbs) if _tbs else None
 
     def _num(col):
         return pd.to_numeric(h[col], errors="coerce") if col in h.columns else None
@@ -418,13 +469,11 @@ def plot_critic_metrics(h, shade):
     return h[["epoch", "curriculum_stage"] + crit_cols].iloc[::max(1, len(h) // 15)].round(4)
 
 
-def balanced_eval_by_tier(*, model, cost_obj, device, graphs, seed_routes,
-                          val_by_tier, tiers, eval_n_per_tier, balanced_weights,
-                          target_n_routes, min_route_len, max_route_len,
-                          max_route_edit_steps, max_trim_actions_per_route,
-                          adj_gap, adj_mode):
+def balanced_eval_by_tier(cfg, *, model, cost_obj, device, graphs, seed_routes,
+                          val_by_tier):
     """Greedy balanced-weight rollout per curriculum tier; returns
-    ``(eval_df, visual_examples)``. Verbatim move of the dormant eval cell."""
+    ``(eval_df, visual_examples)``. Config-driven: tiers, eval count, balanced
+    weights, geometry and adjustment gap/mode all read from the train ``cfg``."""
     import numpy as np
     import pandas as pd
     import torch
@@ -434,6 +483,17 @@ def balanced_eval_by_tier(*, model, cost_obj, device, graphs, seed_routes,
     from connectpt.routes_generator.improvement_learning import (
         get_batch_tensor_from_routes, make_improvement_batch, rollout_lc_improvement)
     from eval_lib.route_copies import redundancy_stats as _redundancy_stats
+
+    tiers = list(cfg.curriculum.tiers)
+    eval_n_per_tier = int(cfg.report.eval_n_per_tier)
+    balanced_weights = tuple(cfg.report.balanced_eval_weights)
+    target_n_routes = int(cfg.data.target_n_routes)
+    min_route_len = int(cfg.data.min_route_len)
+    max_route_len = int(cfg.data.max_route_len)
+    max_route_edit_steps = max_route_len  # was MAX_ROUTE_EDIT_STEPS = MAX_ROUTE_LEN
+    max_trim_actions_per_route = int(cfg.get("max_trim_actions_per_route", 1))
+    adj_gap = float(cfg.adjustment_degree_gap)
+    adj_mode = str(cfg.adjustment_degree_mode)
 
     def _redun_t(routes_2d):
         return _redundancy_stats(routes_2d)["redundancy"]
@@ -555,12 +615,11 @@ def plot_balanced_examples(visual_examples, graphs, tiers):
     plt.show(); plt.close(fig)
 
 
-def post_training_convergence(*, best_model_path, city, iters, alpha,
-                              condition_on_adj_target, benchmark_specs,
-                              load_benchmark_graph, connectivity_mode):
+def post_training_convergence(cfg, *, best_model_path, benchmark_specs,
+                              load_benchmark_graph):
     """Two 5-model BCO variants (RPC+trim/extend, RPC+type2) on one benchmark
-    city, driven by the just-trained edit checkpoint. Returns ``(rows_df,
-    convergence)``. Verbatim move of the dormant post-training cell."""
+    city, driven by the just-trained edit checkpoint. Config-driven: city/iters/
+    alpha from cfg.report.post_train. Returns ``(rows_df, convergence)``."""
     import time as _time
 
     import numpy as np
@@ -569,6 +628,13 @@ def post_training_convergence(*, best_model_path, city, iters, alpha,
 
     import eval_lib.helpers as _eh
     from eval_lib import build_bco_cfg, run_bco
+
+    city = str(cfg.report.post_train.city)
+    iters = int(cfg.report.post_train.iters)
+    alpha = float(cfg.report.post_train.alpha)
+    connectivity_mode = str(cfg.experiment.cost_function.kwargs.connectivity_mode)
+    condition_on_adj_target = bool(int(
+        cfg.model.route_generator.kwargs.get("n_adjustment_cond_feats", 0)) > 0)
 
     _eh.EDIT_MODEL_WEIGHTS_PATH = best_model_path
     _eh.EDIT_MODEL_N_ADJ_COND_FEATS = (1 if condition_on_adj_target else 0)
@@ -582,17 +648,17 @@ def post_training_convergence(*, best_model_path, city, iters, alpha,
               dict(label="RPC + type2", n_type2=5, n_type5=0)]
     conv, rows = {}, []
     for m in models:
-        cfg = build_bco_cfg(
+        bco_cfg = build_bco_cfg(
             run_name=f"posttrain_{city}_{m['label']}".replace(" ", "_").replace("/", "_"),
             n_routes=spec["n_routes"], min_route_len=spec["min_route_len"],
             max_route_len=spec["max_route_len"], use_neural_bees=False, n_bees=10,
             n_type1_bees=0, n_type2_bees=m["n_type2"], n_type5_bees=m["n_type5"],
             route_time_weight=alpha, median_connectivity_weight=1.0 - alpha,
             connectivity_mode=connectivity_mode)
-        OmegaConf.update(cfg, "n_iterations", int(iters), force_add=True)
+        OmegaConf.update(bco_cfg, "n_iterations", int(iters), force_add=True)
         hist_out = {}
         t0 = _time.perf_counter()
-        run_bco(cfg, init, tensors=tensors, run_name_scope=f"{city}_",
+        run_bco(bco_cfg, init, tensors=tensors, run_name_scope=f"{city}_",
                 cost_history_out=hist_out)
         dt = _time.perf_counter() - t0
         h = hist_out.get("history")

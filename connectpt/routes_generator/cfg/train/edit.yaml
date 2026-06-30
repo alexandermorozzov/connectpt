@@ -128,6 +128,45 @@ curriculum:
     - [0.75, [copy_full, copy_boundary, copy_mixed, covered_dup], "+covered"]
     - [1.00, [copy_full, copy_boundary, copy_mixed, covered_dup, lc_clean], "+clean"]
 
+# Dataset generation (was the notebook's N_GRAPHS / RAW_* / LC_COMBOS /
+# FORCE_REGEN / CORRUPT_* constants). Only needed to (re)build the copy-tier
+# training dataset via experiments.training_lc.build_copytier_dataset; the
+# trainer itself just loads dataset_dirname above.
+dataset_gen:
+  n_graphs: 1000
+  raw_n_nodes: 50
+  raw_graph_type: mixed
+  raw_graph_seed: 0
+  lc_n_samples: 1
+  lc_combos:
+    - [1.0, 0.0, 0.0, demand]
+    - [0.0, 1.0, 0.0, route]
+    - [0.0, 0.0, 1.0, conn]
+  corrupt_all_routes: false
+  n_routes_to_corrupt: null
+  force_regen: false
+
+# Training-history / evaluation reporting (was BALANCED_EVAL_WEIGHTS /
+# EVAL_N_PER_TIER / TENSORBOARD_SCALARS / CLEAN_LC_BASELINE_* / POST_TRAIN_*
+# constants). Consumed only by the dormant report cells (training_lc helpers).
+report:
+  balanced_eval_weights: [0.5, 0.5]
+  eval_n_per_tier: 10
+  tensorboard_scalars:
+    - train_reward_mean
+    - val_delta
+    - val_win_rate
+    - train_action_avg_actions_per_route
+    - val_component_delta_route
+    - val_component_delta_connectivity
+  baseline:
+    batch: 16
+    adj_weight: 0.0   # 0 -> pure route/connectivity clean-LC baseline
+  post_train:
+    city: Mumford1
+    iters: 100
+    alpha: 0.5
+
 eval:
   min_route_len: 2
   max_route_len: 12
