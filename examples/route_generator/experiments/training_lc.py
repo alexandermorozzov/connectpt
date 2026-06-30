@@ -173,6 +173,251 @@ def build_copytier_dataset(cfg: CopyTierConfig):
     return (_time.perf_counter() - _tg) / max(1, cfg.n_graphs)
 
 
+def clean_lc_baseline(ct_cfg: CopyTierConfig, *, graphs, seed_routes, meta_df,
+                      device, baseline_path, batch=16, n_per_tier=200,
+                      adj_weight=0.0, use_curriculum=True, curriculum=None,
+                      n_iterations=700):
+    """Per-curriculum-stage clean-LC baseline cost CSV for the history figure.
+
+    Verbatim move of the dormant notebook cell: builds clean LC routes per LC
+    combo, scores them under the unified objective (adj penalty off) and writes
+    one standalone CSV. Returns the baseline DataFrame.
+    """
+    import pandas as pd
+    import torch
+
+    from connectpt.routes_generator.citygraph_dataset import STOP_KEY
+    from connectpt.routes_generator.improvement_learning import (
+        RouteGenBatchState, make_improvement_batch, _clone_cost_weights)
+    from connectpt.routes_generator.objectives import CostFactory
+    from eval_lib import as_route_tensor, build_lc_cfg, run_lc_batch
+
+    tiers, lc_combos = ct_cfg.tiers, ct_cfg.lc_combos
+    _baseline_pool_by_tier = {
+        tier: meta_df.loc[meta_df["tier"] == tier, "graph_index"].astype(int).tolist()
+        for tier in tiers
+    }
+
+    def _to_fixed(routes):
+        t = as_route_tensor(routes).long()
+        if t.ndim == 3:
+            t = t[0]
+        if t.shape[0] < ct_cfg.target_n_routes:
+            t = torch.cat([t, torch.full((ct_cfg.target_n_routes - t.shape[0], t.shape[1]), -1, dtype=t.dtype)], 0)
+        else:
+            t = t[:ct_cfg.target_n_routes]
+        if t.shape[1] < ct_cfg.max_route_len:
+            t = torch.cat([t, torch.full((t.shape[0], ct_cfg.max_route_len - t.shape[1]), -1, dtype=t.dtype)], 1)
+        elif t.shape[1] > ct_cfg.max_route_len:
+            t = t[:, :ct_cfg.max_route_len]
+        return t
+
+    def _tensors(g):
+        return {"node_locs": g[STOP_KEY].pos.detach().cpu().clone(),
+                "street_adj": g.street_adj.detach().cpu().clone(),
+                "demand": g.demand.detach().cpu().clone()}
+
+    # Clean-LC baseline cost: the unified objective (RTT+WMC, demand off, fixed
+    # 0.5/0.5 weights) with the adjustment penalty off, via the library
+    # CostFactory + objective YAML.
+    _cost_base = CostFactory.build_unified("rtt_wmc_no_demand", for_training=True)
+    _cost_base.variable_weights = False
+    _cost_base.adjustment_degree_weight = float(adj_weight)
+    _cost_base.ignore_stops_oob = True
+    _cost_base.to(device)
+    _eval_weights = _cost_base.get_weights(device)
+
+    _baseline_by_tier = {
+        tier: [int(i) for i in _baseline_pool_by_tier[tier][:n_per_tier]]
+        for tier in tiers
+    }
+    _baseline_indices = sorted({gi for _idxs in _baseline_by_tier.values() for gi in _idxs})
+    print("clean LC baseline graphs per tier:", {tier: len(_idxs) for tier, _idxs in _baseline_by_tier.items()})
+    _clean_routes = seed_routes.clone()
+    for _ci, (_d, _rt, _cn, _ctag) in enumerate(lc_combos):
+        _idxs = [gi for gi in _baseline_indices if gi % len(lc_combos) == _ci]
+        if not _idxs:
+            continue
+        _lc_cfg = build_lc_cfg(
+            run_name=f"clean_lc_baseline_{_ctag}", n_routes=ct_cfg.target_n_routes,
+            min_route_len=ct_cfg.min_route_len, max_route_len=ct_cfg.max_route_len,
+            demand_time_weight=_d, route_time_weight=_rt,
+            median_connectivity_weight=_cn, connectivity_mode=ct_cfg.connectivity_mode)
+        for _s in range(0, len(_idxs), batch):
+            _chunk = _idxs[_s:_s + batch]
+            _routes_b = run_lc_batch(
+                _lc_cfg, [_tensors(graphs[gi]) for gi in _chunk],
+                run_name_prefix="clean_lc_baseline_", n_samples=ct_cfg.lc_n_samples,
+                batch_size=len(_chunk))
+            for _j, gi in enumerate(_chunk):
+                _clean_routes[gi] = _to_fixed(_routes_b[_j])
+
+    def _mean_cost(routes_src, idxs):
+        idxs = torch.as_tensor(list(map(int, idxs)), dtype=torch.long)
+        if len(idxs) == 0:
+            return float("nan")
+        costs = []
+        for _chunk in idxs.split(batch):
+            _gb, _rb = make_improvement_batch(
+                graphs, routes_src, _chunk, device, training=False,
+                target_n_routes=ct_cfg.target_n_routes)
+            _state = RouteGenBatchState(
+                _gb, _cost_base, _rb.shape[1], ct_cfg.min_route_len, ct_cfg.max_route_len,
+                cost_weights=_clone_cost_weights(_eval_weights))
+            _state.add_new_routes(_rb)
+            _res = _cost_base(_state)
+            costs.append(_res.cost.detach().cpu())
+        return torch.cat(costs).mean().item()
+
+    _tier_of = dict(zip(meta_df["graph_index"].astype(int), meta_df["tier"]))
+    if use_curriculum:
+        _stage_rows = []
+        for _until, _tiers, _label in curriculum:
+            _idxs = [gi for tier in _tiers for gi in _baseline_by_tier.get(tier, [])]
+            _stage_rows.append({
+                "until_epoch": int(_until), "curriculum_stage": _label,
+                "active_tiers": ";".join(_tiers), "n_graphs": len(_idxs),
+                "n_per_tier_target": int(n_per_tier),
+                "clean_lc_cost": _mean_cost(_clean_routes, _idxs),
+                "seed_cost": _mean_cost(seed_routes, _idxs)})
+    else:
+        _idxs = _baseline_indices
+        _stage_rows = [{
+            "until_epoch": int(n_iterations), "curriculum_stage": "all",
+            "active_tiers": ";".join(sorted({_tier_of[i] for i in _idxs})),
+            "n_graphs": len(_idxs), "n_per_tier_target": int(n_per_tier),
+            "clean_lc_cost": _mean_cost(_clean_routes, _idxs),
+            "seed_cost": _mean_cost(seed_routes, _idxs)}]
+
+    clean_lc_baseline_df = pd.DataFrame(_stage_rows)
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    clean_lc_baseline_df.to_csv(baseline_path, index=False)
+    print(f"clean LC baseline -> {baseline_path}")
+    return clean_lc_baseline_df
+
+
+def stitch_history(*, prior_history_files=(), history_df=None,
+                   full_history_checkpoint=None):
+    """Concatenate prior history part(s) + this run's continuation into one
+    epoch-indexed frame, and derive the curriculum-stage spans. Returns (h, spans)."""
+    from pathlib import Path
+
+    import pandas as pd
+
+    parts, labels = [], []
+    for f in (prior_history_files or []):
+        f = Path(f)
+        if f.exists():
+            parts.append(pd.read_csv(f)); labels.append(f"{f.name}({len(parts[-1])})")
+    if history_df is not None:
+        parts.append(history_df.copy()); labels.append(f"in-memory({len(history_df)})")
+    elif full_history_checkpoint is not None and Path(full_history_checkpoint).exists():
+        parts.append(pd.read_csv(full_history_checkpoint))
+        labels.append(f"{Path(full_history_checkpoint).name}({len(parts[-1])})")
+    if not parts:
+        raise FileNotFoundError("No history found. Train at least one epoch first.")
+    h = pd.concat(parts, ignore_index=True)
+    h["epoch"] = range(1, len(h) + 1)  # continuous axis across stitched parts
+    print(f"history stitched: {' + '.join(labels)} => {len(h)} epochs")
+
+    spans = []
+    if "curriculum_stage" in h.columns and h["curriculum_stage"].notna().any():
+        for epoch, label in h[["epoch", "curriculum_stage"]].dropna().itertuples(index=False, name=None):
+            epoch = int(epoch)
+            if spans and spans[-1][2] == label:
+                spans[-1] = (spans[-1][0], epoch, label)
+            else:
+                spans.append((epoch, epoch, label))
+    return h, spans
+
+
+def plot_training_history(h, spans, *, full_history_run, model_outputs_dir,
+                          tensorboard_scalars=None, run_name=None):
+    """Actor curves + curriculum shading (inline figure) and mirror every scalar
+    column to a TensorBoard run. Verbatim move of the dormant notebook cell."""
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    from torch.utils.tensorboard import SummaryWriter
+
+    def _num(col):
+        return pd.to_numeric(h[col], errors="coerce") if col in h.columns else None
+
+    colors = ["#eaf3ff", "#eafbea", "#fff6e6", "#fdeaea", "#f0eaff"]
+
+    def _shade(ax):
+        for k, (s, e, lab) in enumerate(spans):
+            ax.axvspan(s, e, color=colors[k % len(colors)], alpha=0.6, zorder=0)
+            ax.axvline(s, color="gray", lw=0.6, ls=":")
+
+    fig, ax = plt.subplots(2, 3, figsize=(17, 8), constrained_layout=True)
+    panels = [("train_reward_mean", "train reward"), ("val_delta", "val cost delta"),
+              ("val_win_rate", "val win rate"), ("train_action_avg_actions_per_route", "avg edits/route"),
+              ("val_component_delta_route", "val route delta"),
+              ("val_component_delta_connectivity", "val conn delta")]
+    for a, (col, title) in zip(ax.flat, panels):
+        _shade(a); y = _num(col)
+        if y is not None and y.notna().any():
+            a.plot(h["epoch"], y, marker="o", ms=2, color="tab:blue", zorder=3)
+        a.axhline(0, color="k", lw=0.7); a.set_title(title); a.set_xlabel("epoch"); a.grid(alpha=0.2)
+    for s, e, lab in spans:
+        ax[0, 0].text((s + e) / 2, ax[0, 0].get_ylim()[1], lab, ha="center", va="bottom", fontsize=8)
+    fig.suptitle("Actor curves + curriculum stages", fontsize=13, fontweight="bold")
+    plt.show()
+
+    def _tb_tag(col):
+        for pre, grp in (("train_ppo_", "ppo/"), ("train_critic_", "critic/"),
+                         ("train_action_", "action/"), ("train_component_", "component/train_"),
+                         ("val_component_", "component/val_"), ("train_", "train/"), ("val_", "val/")):
+            if col.startswith(pre):
+                return grp + col[len(pre):]
+        return "misc/" + col
+
+    tb_dir = model_outputs_dir / "tensorboard" / (full_history_run or run_name)
+    tb_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(log_dir=str(tb_dir))
+    epochs = h["epoch"].astype(int).tolist()
+    n_scalars = 0
+    for col in h.columns:
+        if col == "epoch" or (tensorboard_scalars is not None and col not in tensorboard_scalars):
+            continue
+        y = pd.to_numeric(h[col], errors="coerce")
+        if not y.notna().any():
+            continue
+        for ep, v in zip(epochs, y.tolist()):
+            if v == v:  # skip NaN
+                writer.add_scalar(col, float(v), ep)
+        n_scalars += 1
+    writer.add_figure("actor_curves", fig, global_step=epochs[-1])
+    writer.flush(); writer.close()
+    plt.close(fig)
+    print(f"[tensorboard] {n_scalars} scalar series ({len(epochs)} epochs) -> {tb_dir}")
+    return _shade
+
+
+def plot_critic_metrics(h, shade):
+    """Critic diagnostic panels with curriculum shading (dormant cell)."""
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    crit_cols = [c for c in h.columns if "critic" in c.lower()]
+    print("critic columns:", crit_cols)
+    if not crit_cols:
+        return
+    n = len(crit_cols)
+    fig, ax = plt.subplots(1, n, figsize=(5 * n, 4), squeeze=False, constrained_layout=True)
+    for a, col in zip(ax[0], crit_cols):
+        shade(a)
+        y = pd.to_numeric(h[col], errors="coerce") if col in h.columns else None
+        if y is not None and y.notna().any():
+            a.plot(h["epoch"], y, marker="o", ms=2, color="tab:orange", zorder=3)
+        a.set_title(col, fontsize=9); a.set_xlabel("epoch"); a.grid(alpha=0.2)
+        if "explained" in col:
+            a.axhline(0, color="k", lw=0.7)
+    fig.suptitle("Critic metrics + curriculum stages", fontsize=13, fontweight="bold")
+    plt.show(); plt.close(fig)
+    return h[["epoch", "curriculum_stage"] + crit_cols].iloc[::max(1, len(h) // 15)].round(4)
+
+
 def build_edit_model_and_cost(run_name, *, device, vary_weights=True,
                               route_time_weight=None, adj_weight=0.0,
                               cfg_dir=None, weights_dir=None):
