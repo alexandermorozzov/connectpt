@@ -1,0 +1,32 @@
+# Smoke variant (minimum load: 1 iteration, single alpha/target) -- just
+# checks that this experiment turns on and runs end to end.
+name: e2_5model_smoke
+data:
+  source: benchmark
+  city: Mumford1
+methods:
+- label: GNN + trim/extend
+  config: nbco_variants/our_nbco_mumford1
+- label: RPC + trim/extend
+  config: e2_ablation/rpc_trim_extend_mumford1
+- label: GNN + type2
+  config: e2_ablation/gnn_type2_mumford1
+- label: RPC + type2
+  config: e2_ablation/rpc_type2_mumford1
+- label: trim 12 + extend 12
+  config: nbco_variants/trim12_extend12_mumford1
+sweep:
+  alpha:
+  - 0.5
+  adj_target: 0.2
+  adj_weight: 0.0
+  n_iterations: 1
+metrics:
+- RTT
+- WMC
+- ATT
+- adj_vs_seed
+- redun%
+- cost
+report:
+  routes_plot: pareto

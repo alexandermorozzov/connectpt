@@ -1,0 +1,25 @@
+# Smoke variant (minimum load: 1 iteration, single alpha/target) -- just
+# checks that this experiment turns on and runs end to end.
+name: m0_variants_smoke
+data:
+  source: benchmark
+  city: Mumford0
+methods:
+- label: Our NBCO (GNN + trim/extend)
+  config: nbco_variants/our_nbco_mumford0
+- label: Trim 12 + extend 12
+  config: nbco_variants/trim12_extend12_mumford0
+sweep:
+  alpha:
+  - 0.5
+  adj_target: 0.3
+  n_iterations: 1
+metrics:
+- RTT
+- WMC
+- ATT
+- adj_vs_seed
+- redun%
+- cost
+report:
+  routes_plot: network
