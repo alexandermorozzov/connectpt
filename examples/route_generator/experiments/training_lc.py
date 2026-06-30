@@ -418,6 +418,197 @@ def plot_critic_metrics(h, shade):
     return h[["epoch", "curriculum_stage"] + crit_cols].iloc[::max(1, len(h) // 15)].round(4)
 
 
+def balanced_eval_by_tier(*, model, cost_obj, device, graphs, seed_routes,
+                          val_by_tier, tiers, eval_n_per_tier, balanced_weights,
+                          target_n_routes, min_route_len, max_route_len,
+                          max_route_edit_steps, max_trim_actions_per_route,
+                          adj_gap, adj_mode):
+    """Greedy balanced-weight rollout per curriculum tier; returns
+    ``(eval_df, visual_examples)``. Verbatim move of the dormant eval cell."""
+    import numpy as np
+    import pandas as pd
+    import torch
+    from tqdm.auto import tqdm
+
+    from connectpt.routes_generator.bee_colony import get_adjustment_degrees
+    from connectpt.routes_generator.improvement_learning import (
+        get_batch_tensor_from_routes, make_improvement_batch, rollout_lc_improvement)
+    from eval_lib.route_copies import redundancy_stats as _redundancy_stats
+
+    def _redun_t(routes_2d):
+        return _redundancy_stats(routes_2d)["redundancy"]
+
+    def _mean_metric(result, key):
+        return float(result.get_metrics()[key].detach().float().mean().item())
+
+    val_by_tier = {tier: indices[:eval_n_per_tier] for tier, indices in val_by_tier.items()}
+
+    base_w = cost_obj.get_weights(device)
+
+    def mkw(route_weight, conn_weight):
+        weights = {key: (value.clone() if torch.is_tensor(value) else value)
+                   for key, value in base_w.items()}
+        weights["demand_time_weight"] = torch.as_tensor(0.0, device=device)
+        weights["route_time_weight"] = torch.as_tensor(float(route_weight), device=device)
+        weights["median_connectivity_weight"] = torch.as_tensor(float(conn_weight), device=device)
+        return weights
+
+    rows, visual_examples = [], {}
+    conn_metric_key = ("median_connectivity_weighted"
+                       if cost_obj.use_weighted_connectivity else "median_connectivity")
+    transfer_metric_keys = {"d0": "$d_0$", "d1": "$d_1$", "d2": "$d_2$", "d_un": "$d_{un}$"}
+    model.eval()
+    weights = mkw(*balanced_weights)
+    rollout_kwargs = rollout_adjustment_kwargs(model)
+    for tier in tiers:
+        idxs = val_by_tier[tier]
+        if not idxs:
+            continue
+        metrics = {f"{m}_{w}": [] for m in
+                   ("redun", "ATT", "RTT", "CONN", "d0", "d1", "d2", "d_un")
+                   for w in ("before", "after")}
+        for gi in tqdm(idxs, desc=f"eval balanced/{tier}", leave=False):
+            graph_batch, route_batch = make_improvement_batch(
+                graphs, seed_routes, torch.tensor([gi]), device,
+                training=False, target_n_routes=target_n_routes)
+            with torch.no_grad():
+                output = rollout_lc_improvement(
+                    model, cost_obj, graph_batch, route_batch,
+                    min_route_len, max_route_len, greedy=True, cost_weights=weights,
+                    max_route_edit_steps=max_route_edit_steps,
+                    max_trim_actions_per_route=max_trim_actions_per_route,
+                    **rollout_kwargs)
+            final_state, seed_result, final_result = output[:3]
+            improved = get_batch_tensor_from_routes(
+                final_state.routes, device, max_route_len=route_batch.shape[-1])
+            metrics["redun_before"].append(_redun_t(route_batch[0]))
+            metrics["redun_after"].append(_redun_t(improved[0]))
+            metrics["ATT_before"].append(_mean_metric(seed_result, "ATT"))
+            metrics["ATT_after"].append(_mean_metric(final_result, "ATT"))
+            metrics["RTT_before"].append(_mean_metric(seed_result, "RTT"))
+            metrics["RTT_after"].append(_mean_metric(final_result, "RTT"))
+            metrics["CONN_before"].append(_mean_metric(seed_result, conn_metric_key))
+            metrics["CONN_after"].append(_mean_metric(final_result, conn_metric_key))
+            for metric_name, metric_key in transfer_metric_keys.items():
+                metrics[f"{metric_name}_before"].append(_mean_metric(seed_result, metric_key))
+                metrics[f"{metric_name}_after"].append(_mean_metric(final_result, metric_key))
+
+            if tier not in visual_examples:
+                nr = min(improved.shape[1], route_batch.shape[1])
+                width = min(improved.shape[-1], route_batch.shape[-1])
+                adj = get_adjustment_degrees(
+                    improved[:, :nr, :width], route_batch[:, :nr, :width],
+                    cost_obj.symmetric_routes, gap=adj_gap, mode=adj_mode).mean().item()
+                visual_examples[tier] = {
+                    "graph_index": gi,
+                    "seed": route_batch[0].detach().cpu(),
+                    "improved": improved[0].detach().cpu(), "Adj": adj,
+                    "cost_before": float(seed_result.cost.detach().float().mean().item()),
+                    "cost_after": float(final_result.cost.detach().float().mean().item()),
+                    "redun_before": metrics["redun_before"][-1],
+                    "redun_after": metrics["redun_after"][-1],
+                    "ATT_before": metrics["ATT_before"][-1], "ATT_after": metrics["ATT_after"][-1],
+                    "RTT_before": metrics["RTT_before"][-1], "RTT_after": metrics["RTT_after"][-1],
+                    "CONN_before": metrics["CONN_before"][-1], "CONN_after": metrics["CONN_after"][-1]}
+
+        means = {key: float(np.mean(values)) for key, values in metrics.items()}
+        rows.append({"tier": tier, "n": len(idxs), **means})
+
+    return pd.DataFrame(rows).round(4), visual_examples
+
+
+def plot_balanced_examples(visual_examples, graphs, tiers):
+    """Per-tier seed vs edited-network diff panels (dormant viz cell)."""
+    import matplotlib.pyplot as plt
+    from tqdm.auto import tqdm
+
+    from eval_lib import plots as route_plots
+
+    if not visual_examples:
+        print("Run the evaluation cell first.")
+        return
+    tiers_to_plot = [tier for tier in tiers if tier in visual_examples]
+    fig, axes = plt.subplots(len(tiers_to_plot), 2,
+                             figsize=(18, 7 * len(tiers_to_plot)),
+                             squeeze=False, constrained_layout=True)
+    for row_idx, tier in enumerate(tqdm(tiers_to_plot, desc="render tiers")):
+        example = visual_examples[tier]
+        graph = graphs[example["graph_index"]]
+        route_plots.plot_plain_route_set(
+            axes[row_idx, 0], example["seed"], graph,
+            title=f"{tier}: corrupted seed (graph {example['graph_index']})",
+            subtitle=(f"cost={example.get('cost_before', float('nan')):.3f}; "
+                      f"redun={example['redun_before']:.3f}; "
+                      f"ATT={example['ATT_before']:.2f}; RTT={example['RTT_before']:.2f}; "
+                      f"CONN={example['CONN_before']:.2f}"))
+        route_plots.plot_route_diff(
+            axes[row_idx, 1], example["improved"], example["seed"], graph,
+            title=f"{tier}: edited network vs seed",
+            subtitle=(f"cost {example.get('cost_before', float('nan')):.3f}->{example.get('cost_after', float('nan')):.3f}; "
+                      f"redun {example['redun_before']:.3f}->{example['redun_after']:.3f}; "
+                      f"Adj={example['Adj']:.3f}\n"
+                      f"ATT {example['ATT_before']:.2f}->{example['ATT_after']:.2f}; "
+                      f"RTT {example['RTT_before']:.2f}->{example['RTT_after']:.2f}; "
+                      f"CONN {example['CONN_before']:.2f}->{example['CONN_after']:.2f}"))
+    fig.suptitle("Balanced validation: copy/subcopy corruption repair",
+                 fontsize=15, fontweight="bold")
+    plt.show(); plt.close(fig)
+
+
+def post_training_convergence(*, best_model_path, city, iters, alpha,
+                              condition_on_adj_target, benchmark_specs,
+                              load_benchmark_graph, connectivity_mode):
+    """Two 5-model BCO variants (RPC+trim/extend, RPC+type2) on one benchmark
+    city, driven by the just-trained edit checkpoint. Returns ``(rows_df,
+    convergence)``. Verbatim move of the dormant post-training cell."""
+    import time as _time
+
+    import numpy as np
+    import pandas as pd
+    from omegaconf import OmegaConf
+
+    import eval_lib.helpers as _eh
+    from eval_lib import build_bco_cfg, run_bco
+
+    _eh.EDIT_MODEL_WEIGHTS_PATH = best_model_path
+    _eh.EDIT_MODEL_N_ADJ_COND_FEATS = (1 if condition_on_adj_target else 0)
+    print(f"[post-train] edit bee model <- {best_model_path.name} "
+          f"(adj_cond_feats={_eh.EDIT_MODEL_N_ADJ_COND_FEATS})")
+
+    spec = next(s for s in benchmark_specs if s["city"] == city)
+    tensors, init = load_benchmark_graph(spec)
+
+    models = [dict(label="RPC + trim/extend", n_type2=0, n_type5=5),
+              dict(label="RPC + type2", n_type2=5, n_type5=0)]
+    conv, rows = {}, []
+    for m in models:
+        cfg = build_bco_cfg(
+            run_name=f"posttrain_{city}_{m['label']}".replace(" ", "_").replace("/", "_"),
+            n_routes=spec["n_routes"], min_route_len=spec["min_route_len"],
+            max_route_len=spec["max_route_len"], use_neural_bees=False, n_bees=10,
+            n_type1_bees=0, n_type2_bees=m["n_type2"], n_type5_bees=m["n_type5"],
+            route_time_weight=alpha, median_connectivity_weight=1.0 - alpha,
+            connectivity_mode=connectivity_mode)
+        OmegaConf.update(cfg, "n_iterations", int(iters), force_add=True)
+        hist_out = {}
+        t0 = _time.perf_counter()
+        run_bco(cfg, init, tensors=tensors, run_name_scope=f"{city}_",
+                cost_history_out=hist_out)
+        dt = _time.perf_counter() - t0
+        h = hist_out.get("history")
+        y = (np.asarray(h.numpy() if hasattr(h, "numpy") else h).reshape(-1)
+             if h is not None else None)
+        if y is not None and y.size:
+            conv[m["label"]] = y
+            final, best = float(y[-1]), float(np.min(y))
+        else:
+            final = best = float("nan")
+        rows.append(dict(model=m["label"], final_cost=round(final, 4),
+                         best_cost=round(best, 4), iters=int(iters), seconds=round(dt, 1)))
+        print(f"[post-train] {m['label']:18} final={final:.4f} best={best:.4f} ({dt:.0f}s)")
+    return pd.DataFrame(rows), conv
+
+
 def build_edit_model_and_cost(run_name, *, device, vary_weights=True,
                               route_time_weight=None, adj_weight=0.0,
                               cfg_dir=None, weights_dir=None):
