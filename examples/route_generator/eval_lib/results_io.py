@@ -24,7 +24,10 @@ def save_table(df, name: str, *, subdir: str | None = None):
         out_dir.mkdir(parents=True, exist_ok=True)
     else:
         out_dir = RESULTS_DIR
-    path = out_dir / f"{_safe_name(name)}.csv"
+    # Honour the global TEMP/smoke output prefix (single source: eval_lib.paper)
+    # so throwaway runs never overwrite real result files.
+    from . import paper as _paper
+    path = out_dir / f"{_safe_name(_paper.PAPER_PREFIX + name)}.csv"
     df.to_csv(path, index=False)
     print(f"[results] table ({len(df)} rows) -> {path}")
     return path

@@ -301,7 +301,8 @@ def _macsa_draw_grid(*, routes, rows_by_method, coords, street_adj, demand,
 
 
 def _macsa_save_fig(fig, stem, suffix):
-    path = PAPER_DIR / f"{stem}_{suffix}.png"
+    import eval_lib.paper as _paper
+    path = PAPER_DIR / f"{_paper.PAPER_PREFIX}{stem}_{suffix}.png"
     fig.savefig(path, dpi=MACSA_DPI, bbox_inches="tight")
     plt.close(fig)
     print(f"[paper] figure -> {path}")
