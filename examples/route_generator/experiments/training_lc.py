@@ -697,7 +697,10 @@ def build_edit_model_and_cost(run_name, *, device, vary_weights=True,
 def rollout_adjustment_kwargs(model, *, target=None):
     """Adjustment-conditioning rollout kwargs (empty when the model has no
     adjustment-target conditioning feature, which is the paper default)."""
-    from eval_lib.params import ADJ_TARGET, ADJ_WEIGHT, ADJ_GAP, ADJ_MODE
+    from connectpt.routes_generator.objectives import load_unified_objective
+    _obj = load_unified_objective()
+    ADJ_TARGET, ADJ_WEIGHT = _obj.adj_target, _obj.adj_weight
+    ADJ_GAP, ADJ_MODE = _obj.adj_gap, _obj.adj_mode
 
     n_adj_feats = int(getattr(model, "n_adjustment_cond_feats", 0) or 0)
     if n_adj_feats <= 0:

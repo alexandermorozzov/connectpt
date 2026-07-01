@@ -52,7 +52,8 @@ from eval_lib.paper import (  # noqa: E402
     set_cfg_value,
     unify_weights,
 )
-from eval_lib.params import CONNECTIVITY_MODE  # noqa: E402
+from connectpt.routes_generator.objectives import load_unified_objective  # noqa: E402
+CONNECTIVITY_MODE = load_unified_objective().connectivity_mode
 
 
 SCENARIO_NAME = "mandl_8"

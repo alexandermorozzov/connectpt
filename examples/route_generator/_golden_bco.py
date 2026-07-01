@@ -14,8 +14,12 @@ import eval_lib.helpers as _eh
 from eval_lib.baselines import load_benchmark_tensors, BENCHMARK_SPECS
 from eval_lib.helpers import build_bco_cfg, run_bco
 from eval_lib.context import EDIT_MODEL_WEIGHTS_DIR, ARTIFACTS_DIR
-from eval_lib.params import CONNECTIVITY_MODE, UNIFIED_COST_WEIGHTS
+from connectpt.routes_generator.objectives import load_unified_objective as _load_obj
 from eval_lib.paper import bco_cfg_set, UNIFIED_ADJ, set_cfg_value
+
+_OBJ = _load_obj()
+CONNECTIVITY_MODE = _OBJ.connectivity_mode
+UNIFIED_COST_WEIGHTS = _OBJ.weights
 
 _eh.EDIT_MODEL_WEIGHTS_PATH = EDIT_MODEL_WEIGHTS_DIR / \
     "improvement_lc_rttconn_adj_w10_t02_finetune100.pt"

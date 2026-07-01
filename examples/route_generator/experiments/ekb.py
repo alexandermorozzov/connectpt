@@ -62,9 +62,9 @@ def case_from_cfg(ekb_cfg) -> EKBCase:
 
 def nbco_adj_target(ekb_cfg):
     """Resolve the NBCO adjustment target (null in cfg -> unified ADJ_TARGET)."""
-    from eval_lib.params import ADJ_TARGET
+    from connectpt.routes_generator.objectives import load_unified_objective
     t = ekb_cfg.nbco.get("adj_target")
-    return float(t) if t is not None else float(ADJ_TARGET)
+    return float(t) if t is not None else float(load_unified_objective().adj_target)
 
 
 def score_routes(case: EKBCase, routes, tag, *, adj_target, force_cpu,
@@ -78,7 +78,8 @@ def score_routes(case: EKBCase, routes, tag, *, adj_target, force_cpu,
     from eval_lib.baselines import _run_baseline
     from eval_lib.paper import (UNIFIED_ADJ, eval_routes_cfg, set_cfg_value,
                                 unify_weights)
-    from eval_lib.params import CONNECTIVITY_MODE
+    from connectpt.routes_generator.objectives import load_unified_objective
+    CONNECTIVITY_MODE = load_unified_objective().connectivity_mode
 
     cfg = unify_weights(eval_routes_cfg("EKB", case.spec))
     set_cfg_value(cfg, "run_name", f"EKB_{case.case_tag}_{tag}")

@@ -24,10 +24,17 @@ from connectpt.routes_generator.bee_colony import (
 from connectpt.routes_generator.improvement_learning import (
     RouteGenBatchState, evaluate_lc_improvement, load_raw_graphs_and_lc_routes,
     make_improvement_batch)
+from connectpt.routes_generator.objectives import load_unified_objective
 from eval_lib.context import CFG_DIR, DATASETS_DIR, EDIT_MODEL_WEIGHTS_DIR, ROOT_DIR
-from eval_lib.params import (
-    ADJ_GAP, ADJ_MODE, ADJ_TARGET, ADJ_TRAIN_OBJECTIVE, ADJ_WEIGHT,
-    CONNECTIVITY_MODE, DISABLED_COST_COMPONENTS)
+
+_OBJ = load_unified_objective()
+CONNECTIVITY_MODE = _OBJ.connectivity_mode
+DISABLED_COST_COMPONENTS = list(_OBJ.disabled_components)
+ADJ_WEIGHT = _OBJ.adj_weight
+ADJ_TARGET = _OBJ.adj_target
+ADJ_TRAIN_OBJECTIVE = _OBJ.adj_train_objective
+ADJ_GAP = _OBJ.adj_gap
+ADJ_MODE = _OBJ.adj_mode
 
 
 DEFAULT_DATASET = (

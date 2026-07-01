@@ -13,22 +13,27 @@ from omegaconf import OmegaConf
 
 from connectpt.routes_generator.bee_colony import get_adjustment_degrees
 
+from connectpt.routes_generator.objectives import load_unified_objective
+
 from .context import ARTIFACTS_DIR
-from .params import (ADJ_GAP, ADJ_MODE, ADJ_OBJECTIVE, ADJ_TARGET, ADJ_WEIGHT,
-                     CONNECTIVITY_MODE, MAX_ROUTE_LEN, MIN_ROUTE_LEN,
-                     UNIFIED_COST_WEIGHTS)
 from .helpers import as_route_tensor, metric_value
 from .baselines import build_sa_cfg
 from .route_copies import redundancy_fraction
 
 # --- unified objective ------------------------------------------------------
+# Read from the single source (cfg/objective YAML) via the library factory.
+_OBJ = load_unified_objective()
+CONNECTIVITY_MODE = _OBJ.connectivity_mode
+UNIFIED_COST_WEIGHTS = _OBJ.weights
+ADJ_GAP = _OBJ.adj_gap
+ADJ_MODE = _OBJ.adj_mode
+# Non-objective route-length defaults (were eval_lib.params knobs).
+MIN_ROUTE_LEN = 2
+MAX_ROUTE_LEN = 12
 
 # Adjustment kwargs shared by every unified-objective run (E1u baselines,
-# NSGA-II, MACSA): two-sided |adj - ADJ_TARGET| penalty at weight ADJ_WEIGHT.
-UNIFIED_ADJ = dict(adjustment_degree_weight=float(ADJ_WEIGHT),
-                   adjustment_degree_target=float(ADJ_TARGET),
-                   adjustment_degree_objective=ADJ_OBJECTIVE,
-                   adjustment_degree_gap=ADJ_GAP, adjustment_degree_mode=ADJ_MODE)
+# NSGA-II, MACSA): two-sided |adj - target| penalty. Sourced from the objective.
+UNIFIED_ADJ = dict(_OBJ.adj_kwargs)
 
 
 def set_cfg_value(cfg, dotted_key, value):

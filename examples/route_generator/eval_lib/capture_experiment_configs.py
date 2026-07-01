@@ -18,10 +18,16 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
+from connectpt.routes_generator.objectives import (
+    load_bco_algo_config as bco_config, load_unified_objective)
+
 from .context import CFG_DIR
-from .params import (bco_config, CONNECTIVITY_MODE, UNIFIED_COST_WEIGHTS,
-                     ADJ_WEIGHT, ADJ_TARGET, ADJ_GAP, ADJ_MODE)
 from .paper import UNIFIED_ADJ
+
+_OBJ = load_unified_objective()
+CONNECTIVITY_MODE = _OBJ.connectivity_mode
+UNIFIED_COST_WEIGHTS = _OBJ.weights
+ADJ_TARGET = _OBJ.adj_target
 from . import experiments as ex
 from .helpers import build_bco_cfg
 from .baselines import BENCHMARK_SPECS

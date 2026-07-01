@@ -161,29 +161,24 @@ def test_run_nsgaii_applies_runtime_connectivity_mode(monkeypatch):
     assert seen["optimizer_cost_obj"] is cost_obj
 
 
-def test_params_is_single_source_of_unified_objective():
-    import eval_lib.params as params
+def test_accessor_is_single_source_of_unified_objective():
+    from connectpt.routes_generator.objectives import load_unified_objective
     import eval_lib.paper as paper
 
-    assert params.CONNECTIVITY_MODE == "median_weighted"
-    assert params.DISABLED_COST_COMPONENTS == ["demand"]
-    assert params.UNIFIED_COST_WEIGHTS == {
+    o = load_unified_objective()
+    assert o.connectivity_mode == "median_weighted"
+    assert list(o.disabled_components) == ["demand"]
+    assert o.weights == {
         "demand_time_weight": 0.0,
         "route_time_weight": 0.5,
         "median_connectivity_weight": 0.5,
     }
-    assert params.ADJ_WEIGHT == 10.0
-    assert params.ADJ_TARGET == 0.2
-    assert params.ADJ_OBJECTIVE == "target"        # search / BCO acceptance
-    assert params.ADJ_TRAIN_OBJECTIVE == "cap"     # PPO reward shaping
-    # UNIFIED_ADJ is built from the params constants.
-    assert paper.UNIFIED_ADJ == {
-        "adjustment_degree_weight": params.ADJ_WEIGHT,
-        "adjustment_degree_target": params.ADJ_TARGET,
-        "adjustment_degree_objective": params.ADJ_OBJECTIVE,
-        "adjustment_degree_gap": params.ADJ_GAP,
-        "adjustment_degree_mode": params.ADJ_MODE,
-    }
+    assert o.adj_weight == 10.0
+    assert o.adj_target == 0.2
+    assert o.adj_objective == "target"        # search / BCO acceptance
+    assert o.adj_train_objective == "cap"     # PPO reward shaping
+    # eval_lib.paper.UNIFIED_ADJ is built from the accessor's adj_kwargs.
+    assert paper.UNIFIED_ADJ == o.adj_kwargs
 
 
 def test_paper_combined_sets_connectivity_mode_everywhere():
@@ -194,16 +189,20 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
         "".join(cell.get("source", [])) for cell in notebook["cells"]
     )
 
-    # The objective is sourced from eval_lib.params (single source); the
-    # notebook imports the shared names and never re-defines them locally
-    # (line-anchored so experiment-local prefixed constants like
-    # M0_NBCO_ADJ_TARGET stay allowed).
+    # The objective is sourced from the single YAML source via the library
+    # factory (load_unified_objective reads cfg/objective/rtt_wmc_no_demand.yaml);
+    # the notebook binds the shared names off that accessor object -- it never
+    # hardcodes objective literal values.
     import re
-    assert "from eval_lib.params import" in text
-    for name in ("CONNECTIVITY_MODE", "DISABLED_COST_COMPONENTS", "ADJ_WEIGHT",
-                 "ADJ_TARGET", "ADJ_OBJECTIVE", "UNIFIED_COST_WEIGHTS"):
-        assert not re.search(rf"^{name} *=", text, re.M), \
-            f"{name} is re-defined in the notebook (params.py is the source)"
+    assert "from connectpt.routes_generator.objectives import load_unified_objective" in text
+    assert "load_unified_objective()" in text
+    assert "from eval_lib.params import" not in text  # params.py is deleted
+    # Objective names may be bound from the accessor object (= _OBJ.<field>) but
+    # never from a hardcoded literal.
+    for name, literal in (("CONNECTIVITY_MODE", '"median_weighted"'),
+                          ("ADJ_WEIGHT", "10.0"), ("ADJ_TARGET", "0.2")):
+        assert not re.search(rf"^{name} *= *{re.escape(literal)}", text, re.M), \
+            f"{name} is bound to a hardcoded objective literal in the notebook"
     # Experiment selection is now config-driven via the suite profile
     # (cfg/experiments/suite*.yaml), loaded once as SUITE -- not inline RUN_*
     # constants. The notebook drives the experiment switches from SUITE.run, and

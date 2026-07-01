@@ -1,7 +1,7 @@
 """The objective YAML is the single source of truth for the cost objective.
 
 ``cfg/objective/rtt_wmc_no_demand.yaml`` holds the unified objective; both
-``eval_lib.params`` (historical constant names) and ``CostFactory`` read from
+``load_unified_objective`` (the Python accessor) and ``CostFactory`` read from
 it. These tests pin the YAML values and prove the two readers agree.
 """
 import sys
@@ -37,23 +37,32 @@ def test_objective_yaml_values():
     assert obj.adjustment.mode == "paper"
 
 
-def test_params_reexports_objective_yaml():
-    import eval_lib.params as params
+def test_accessor_reads_objective_yaml():
+    from connectpt.routes_generator.objectives import load_unified_objective
 
     obj = OmegaConf.load(OBJECTIVE_YAML)
-    assert params.CONNECTIVITY_MODE == obj.connectivity_mode
-    assert params.DISABLED_COST_COMPONENTS == list(obj.disabled_components)
-    assert params.UNIFIED_COST_WEIGHTS == {
+    o = load_unified_objective()
+    assert o.connectivity_mode == obj.connectivity_mode
+    assert list(o.disabled_components) == list(obj.disabled_components)
+    assert o.weights == {
         "demand_time_weight": float(obj.weights.demand_time_weight),
         "route_time_weight": float(obj.weights.route_time_weight),
         "median_connectivity_weight": float(obj.weights.median_connectivity_weight),
     }
-    assert params.ADJ_WEIGHT == float(obj.adjustment.weight)
-    assert params.ADJ_TARGET == float(obj.adjustment.target)
-    assert params.ADJ_OBJECTIVE == obj.adjustment.objective
-    assert params.ADJ_TRAIN_OBJECTIVE == obj.adjustment.train_objective
-    assert params.ADJ_GAP == float(obj.adjustment.gap)
-    assert params.ADJ_MODE == obj.adjustment.mode
+    assert o.adj_weight == float(obj.adjustment.weight)
+    assert o.adj_target == float(obj.adjustment.target)
+    assert o.adj_objective == obj.adjustment.objective
+    assert o.adj_train_objective == obj.adjustment.train_objective
+    assert o.adj_gap == float(obj.adjustment.gap)
+    assert o.adj_mode == obj.adjustment.mode
+    # adj_kwargs is what search/eval runs spread as the two-sided adj penalty.
+    assert o.adj_kwargs == {
+        "adjustment_degree_weight": o.adj_weight,
+        "adjustment_degree_target": o.adj_target,
+        "adjustment_degree_objective": o.adj_objective,
+        "adjustment_degree_gap": o.adj_gap,
+        "adjustment_degree_mode": o.adj_mode,
+    }
 
 
 def test_cost_factory_applies_objective():

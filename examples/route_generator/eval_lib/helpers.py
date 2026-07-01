@@ -2,9 +2,10 @@
 
 Extracted verbatim from the notebook's "Helper Functions" cell so the notebook
 stays readable. Free names the helpers used to resolve against the notebook
-namespace are provided here: repo paths via :mod:`eval_lib.context`, tunable
-experiment constants via :mod:`eval_lib.params`, route-plotting helpers via
-:mod:`eval_lib.plots`, and the benchmark tensors via the module-level
+namespace are provided here: repo paths via :mod:`eval_lib.context`, the unified
+objective read from the single YAML source via
+``connectpt.routes_generator.objectives.load_unified_objective``, route-plotting
+helpers via :mod:`eval_lib.plots`, and the benchmark tensors via the module-level
 ``INPUT_TENSORS`` (registered once by the notebook with
 :func:`set_input_tensors`, replacing the old ``input_tensors`` notebook global).
 """
@@ -32,8 +33,22 @@ import connectpt.routes_generator.utils as lrnu
 from .context import (ROOT_DIR, CFG_DIR, BENCHMARK_DIR, MACSA_DATA_DIR,
                       MODEL_WEIGHTS_PATH, EDIT_MODEL_WEIGHTS_PATH,
                       OUTPUT_ROUTES_DIR)
-from .params import *  # noqa: F401,F403  (notebook experiment constants)
+# Unified objective read from the single source (cfg/objective YAML) via the
+# library factory -- no eval_lib.params constants pile. The builders below take
+# these as default args (they are transitional: build_bco_cfg / build_lc_cfg get
+# replaced by BeeColonySearchRun in the config-first migration).
+from connectpt.routes_generator.objectives import (
+    load_bco_algo_config as bco_config, load_unified_objective as _load_objective)
 from . import plots as _plots
+
+_OBJ = _load_objective()
+DEMAND_TIME_WEIGHT = _OBJ.demand_time_weight
+ROUTE_TIME_WEIGHT = _OBJ.route_time_weight
+MEDIAN_CONNECTIVITY_WEIGHT = _OBJ.median_connectivity_weight
+DISABLED_COST_COMPONENTS = list(_OBJ.disabled_components)
+# Non-objective run defaults (were eval_lib.params knobs, not part of the cost).
+LC_SAMPLES = 100
+USE_NEURAL_BCO = False
 
 
 # Benchmark tensors used by make_test_dataloader. The notebook registers them

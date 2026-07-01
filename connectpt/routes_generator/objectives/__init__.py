@@ -7,6 +7,13 @@ the same cost.
 """
 
 from .factory import CostFactory
+from .unified import (UnifiedObjective, load_bco_algo_config,
+                      load_unified_objective)
 
 
-__all__ = ["CostFactory"]
+__all__ = [
+    "CostFactory",
+    "UnifiedObjective",
+    "load_unified_objective",
+    "load_bco_algo_config",
+]

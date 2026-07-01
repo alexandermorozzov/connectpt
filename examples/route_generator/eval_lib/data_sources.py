@@ -97,11 +97,12 @@ class BenchmarkDataSource(DataSource):
         import random as _random
         from .helpers import build_lc_cfg, run_lc
         from .route_copies import inject_realistic_tier, pad_routes
-        from .params import UNIFIED_COST_WEIGHTS, CONNECTIVITY_MODE
+        from connectpt.routes_generator.objectives import load_unified_objective
+        _obj = load_unified_objective()
         cfg = build_lc_cfg(run_name=f"lc_init_{self.city}", n_routes=spec["n_routes"],
                            min_route_len=spec["min_route_len"],
                            max_route_len=spec["max_route_len"],
-                           connectivity_mode=CONNECTIVITY_MODE, **UNIFIED_COST_WEIGHTS)
+                           connectivity_mode=_obj.connectivity_mode, **_obj.weights)
         clean = run_lc(cfg, tensors=tensors, run_name_prefix=f"lc_init_{self.city}_",
                        n_samples=1)[3]
         clean = pad_routes(clean, spec["n_routes"], spec["max_route_len"])

@@ -9,8 +9,9 @@ Single source of truth for every filesystem path the notebooks touch:
 
 The helper modules import these names instead of relying on the notebook
 namespace. Experiment parameters that the user tunes per run live in the
-algorithm YAMLs (``connectpt/routes_generator/cfg``) and in
-:mod:`eval_lib.params`.
+algorithm YAMLs (``connectpt/routes_generator/cfg``); the unified objective is
+read from ``cfg/objective/*.yaml`` via
+``connectpt.routes_generator.objectives.load_unified_objective``.
 """
 import warnings
 from pathlib import Path

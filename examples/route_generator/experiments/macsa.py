@@ -31,7 +31,12 @@ from eval_lib.paper import (PAPER_DIR, UNIFIED_ADJ, bco_cfg_set,
                             paper_row as _row,
                             set_cfg_value as _set_cfg_value,
                             unify_weights as _unify_weights)
-from eval_lib.params import ADJ_OBJECTIVE, ADJ_TARGET, CONNECTIVITY_MODE
+from connectpt.routes_generator.objectives import load_unified_objective as _load_objective
+
+_OBJ = _load_objective()
+ADJ_OBJECTIVE = _OBJ.adj_objective
+ADJ_TARGET = _OBJ.adj_target
+CONNECTIVITY_MODE = _OBJ.connectivity_mode
 
 # --- static scenario constants -------------------------------------------------
 MACSA_SCENARIO_NAME = "mandl_8"

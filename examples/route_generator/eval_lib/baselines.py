@@ -6,9 +6,11 @@ the notebook. Helper names resolve via ``from .helpers import *``; each section
 keeps its own connectpt-library imports.
 """
 from .context import *  # noqa: F401,F403
-from .params import *  # noqa: F401,F403
-from .helpers import *  # noqa: F401,F403
+from .helpers import *  # noqa: F401,F403  (unified-objective weights + bco_config)
 from . import plots as _plots
+
+# Default benchmark city (non-objective knob; was an eval_lib.params constant).
+CITY_NAME = "Mumford0"
 
 
 def load_benchmark_tensors(city_name: str = CITY_NAME) -> dict:
