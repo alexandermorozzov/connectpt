@@ -39,7 +39,10 @@ class BeeColonyPlan:
             type_key = cls._classify(spec, policies)
             counts[type_key] += int(spec.count)
 
-            if type_key == "n_type4":
+            if spec.operator == "neural_rebuild":
+                # full-route neural rebuild (type-1) drives the construction model
+                needs_construction = True
+            elif type_key == "n_type4":
                 needs_construction = True
             elif type_key in ("n_type5", "n_type6"):
                 needs_edit = True
@@ -57,6 +60,9 @@ class BeeColonyPlan:
     def _classify(spec: BeeSpec, policies: dict) -> str:
         if spec.operator == "compound":
             return "n_type7"
+        if spec.operator == "neural_rebuild":
+            # full-route rebuild via the construction model (bee_colony type-1)
+            return "n_type1"
         if spec.operator == "heuristic_mutation":
             kind = (spec.mutation_kind or spec.route_selection or "").lower()
             return "n_type2" if "shorten" in kind else "n_type1"

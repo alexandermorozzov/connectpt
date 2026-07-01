@@ -35,6 +35,21 @@ class NeuralRouteActionBee:
         )
 
 
+class NeuralRebuildBee:
+    """Full-route rebuild via a construction policy (bee_colony type-1 neural).
+
+    Unlike ``NeuralRouteActionBee`` (one extend/trim/halt step), this replaces the
+    chosen route wholesale using the construction model's rollout -- the paper's
+    neural-BCO rebuild operator. There is no per-action gating, so no
+    ``allowed_actions`` validation is needed.
+    """
+
+    def __init__(self, policy, route_selector, acceptance_policy):
+        self.policy = policy
+        self.route_selector = route_selector
+        self.acceptance_policy = acceptance_policy
+
+
 class HeuristicMutationBee:
     """A model-free mutation (e.g. shorten, random path combine)."""
 
@@ -66,6 +81,13 @@ def build_bee(spec, policies: dict):
         return NeuralRouteActionBee(
             policy=policy,
             allowed_actions=spec.allowed_actions or [],
+            route_selector=get_route_selector(spec.route_selection),
+            acceptance_policy=acceptance,
+        )
+
+    if spec.operator == "neural_rebuild":
+        return NeuralRebuildBee(
+            policy=policies[spec.policy],
             route_selector=get_route_selector(spec.route_selection),
             acceptance_policy=acceptance,
         )
