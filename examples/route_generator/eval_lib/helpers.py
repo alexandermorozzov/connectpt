@@ -25,6 +25,7 @@ from connectpt.routes_generator.improvement_learning import (
 from connectpt.routes_generator.utils import get_eval_cfg
 from connectpt.routes_generator.eval_route_generator import eval_model
 from connectpt.routes_generator.search.seeded_search import run_seeded_bee_colony
+from connectpt.routes_generator.search.edit_bee import build_edit_bee_model
 from connectpt.routes_generator.torch_utils import (
     dump_routes, get_batch_tensor_from_routes)
 from connectpt.routes_generator.transit_time_estimator import RouteGenBatchState
@@ -567,38 +568,18 @@ def build_rpc_routes(spec, tensors, run_name=None, n_samples=1):
 def build_edit_model(device, weights_path=None, load_weights=True):
     """Load the trim-capable edit model used by edit/trim BCO mutations.
 
-    ``weights_path`` defaults to ``EDIT_MODEL_WEIGHTS_PATH`` but can be pointed
-    at any compatible trim-model checkpoint (e.g. a freshly trained
-    route+conn(+adj) model from the lc_redundancy notebook).
-
-    ``load_weights=False`` returns a randomly-initialised model of the same
-    architecture (untrained policy) -- used for the RL-ablation baseline that
-    isolates the value of training vs the structure alone.
+    Thin wrapper over the library builder
+    :func:`connectpt.routes_generator.search.edit_bee.build_edit_bee_model`,
+    supplying the notebook's module-level defaults: ``weights_path`` defaults to
+    ``EDIT_MODEL_WEIGHTS_PATH`` and the adjustment-conditioning feature count to
+    ``EDIT_MODEL_N_ADJ_COND_FEATS`` (set both together when pointing at a
+    conditioned checkpoint). ``load_weights=False`` returns an untrained model of
+    the same architecture (RL-ablation baseline).
     """
-    weights_path = weights_path or EDIT_MODEL_WEIGHTS_PATH
-    overrides = [
-        "model=bestsofar_feb2023_trim",
-        "model.route_generator.kwargs.serial_halting=True",
-        "++run_name=eval_seeded_edit_model",
-        "++experiment.logdir=null",
-    ]
-    # Checkpoints trained with adjustment conditioning carry 1-2 extra global
-    # features; the architecture must match or load_state_dict fails. Set
-    # eval_lib.helpers.EDIT_MODEL_N_ADJ_COND_FEATS alongside
-    # EDIT_MODEL_WEIGHTS_PATH when pointing at a conditioned checkpoint.
-    if EDIT_MODEL_N_ADJ_COND_FEATS:
-        overrides.append(
-            "++model.route_generator.kwargs.n_adjustment_cond_feats="
-            f"{int(EDIT_MODEL_N_ADJ_COND_FEATS)}")
-    if load_weights:
-        overrides.append(f"+model.weights='{weights_path}'")
-    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        edit_cfg = compose(config_name="ppo_50nodes.yaml", overrides=overrides)
-    edit_model = lrnu.build_model_from_cfg(edit_cfg.model, edit_cfg.experiment)
-    if load_weights:
-        edit_model.load_state_dict(torch.load(weights_path, map_location=device))
-    edit_model.to(device).eval()
-    return edit_model
+    return build_edit_bee_model(
+        device, weights_path or EDIT_MODEL_WEIGHTS_PATH,
+        load_weights=load_weights,
+        n_adjustment_cond_feats=EDIT_MODEL_N_ADJ_COND_FEATS)
 
 
 def run_bco(cfg, init_routes, mutation_counts_out=None, *,
