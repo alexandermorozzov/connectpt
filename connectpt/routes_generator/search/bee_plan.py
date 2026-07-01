@@ -26,10 +26,15 @@ class BeeColonyPlan:
     needs_construction: bool = False
     needs_edit: bool = False
     bees: list = field(default_factory=list)
+    # Per-edit-type halt permission (type4..7), derived from whether the bees of
+    # that type include "halt" in allowed_actions. bee_colony's type*_allow_halt
+    # flags: an edit bee that omits halt MUST propose a real mutation.
+    allow_halt: dict[str, bool] = field(default_factory=dict)
 
     @classmethod
     def from_specs(cls, specs: list[BeeSpec], policies: dict) -> "BeeColonyPlan":
         counts = {f"n_type{i}": 0 for i in range(1, 8)}
+        allow_halt = {f"type{i}_allow_halt": None for i in range(4, 8)}
         needs_construction = needs_edit = False
         bees = []
 
@@ -38,6 +43,15 @@ class BeeColonyPlan:
             bees.append(build_bee(spec, policies))
             type_key = cls._classify(spec, policies)
             counts[type_key] += int(spec.count)
+
+            # type4..7 are the halt-gated edit/construction-step bees.
+            i = int(type_key[len("n_type"):])
+            if 4 <= i <= 7:
+                halt = "halt" in set(spec.allowed_actions or [])
+                key = f"type{i}_allow_halt"
+                # all bees of a type share one flag; if they disagree, halt wins
+                # (permissive), matching a bee that is allowed to halt.
+                allow_halt[key] = halt if allow_halt[key] is None else (allow_halt[key] or halt)
 
             if spec.operator == "neural_rebuild":
                 # full-route neural rebuild (type-1) drives the construction model
@@ -53,8 +67,10 @@ class BeeColonyPlan:
                     if policies[step["policy"]].role == "construction":
                         needs_construction = True
 
+        # types with no bees keep bee_colony's default (halt allowed).
+        allow_halt = {k: (True if v is None else v) for k, v in allow_halt.items()}
         return cls(counts=counts, needs_construction=needs_construction,
-                   needs_edit=needs_edit, bees=bees)
+                   needs_edit=needs_edit, bees=bees, allow_halt=allow_halt)
 
     @staticmethod
     def _classify(spec: BeeSpec, policies: dict) -> str:
