@@ -12,14 +12,10 @@ import torch
 
 import eval_lib.helpers as _eh
 from eval_lib.baselines import load_benchmark_tensors, BENCHMARK_SPECS
-from eval_lib.helpers import build_bco_cfg, run_bco
+from eval_lib.helpers import run_bco
+from eval_lib.experiments import load_experiment_cfg
 from eval_lib.context import EDIT_MODEL_WEIGHTS_DIR, ARTIFACTS_DIR
-from connectpt.routes_generator.objectives import load_unified_objective as _load_obj
 from eval_lib.paper import bco_cfg_set, UNIFIED_ADJ, set_cfg_value
-
-_OBJ = _load_obj()
-CONNECTIVITY_MODE = _OBJ.connectivity_mode
-UNIFIED_COST_WEIGHTS = _OBJ.weights
 
 _eh.EDIT_MODEL_WEIGHTS_PATH = EDIT_MODEL_WEIGHTS_DIR / \
     "improvement_lc_rttconn_adj_w10_t02_finetune100.pt"
@@ -28,12 +24,15 @@ _eh.EDIT_MODEL_N_ADJ_COND_FEATS = 0
 GOLDEN_PATH = ARTIFACTS_DIR / "results" / "_golden_bco.pt"
 N_ITER = 3
 
+# Each variant loads its captured config-first YAML (nbco_variants/*); the bee
+# split, cost weights, connectivity mode and adjustment block are baked into the
+# YAML (byte-identical to the old build_bco_cfg output). run_variant applies only
+# the per-run overrides (route bounds, n_iterations, seed).
 VARIANTS = [
-    ("classical_Mumford0", "Mumford0", dict(use_neural_bees=False, n_type1_bees=5, n_type2_bees=5)),
-    ("classical_Mandl",    "Mandl",    dict(use_neural_bees=False, n_type1_bees=5, n_type2_bees=5)),
-    ("neural_Mumford0",    "Mumford0", dict(use_neural_bees=True,  n_type1_bees=5, n_type2_bees=5)),
-    ("our_Mumford0",       "Mumford0", dict(use_neural_bees=True,  n_type1_bees=5,
-                                            n_type2_bees=0, n_type5_bees=5)),
+    ("classical_Mumford0", "Mumford0", "nbco_variants/classic_bco_mumford0"),
+    ("classical_Mandl",    "Mandl",    "nbco_variants/classic_bco_mandl"),
+    ("neural_Mumford0",    "Mumford0", "nbco_variants/neural_bco_mumford0"),
+    ("our_Mumford0",       "Mumford0", "nbco_variants/our_nbco_mumford0"),
 ]
 
 
@@ -61,14 +60,14 @@ def _init_routes(city, spec, tensors):
     return R
 
 
-def run_variant(name, city, bee_kw):
+def run_variant(name, city, yaml_name):
     spec = next(s for s in BENCHMARK_SPECS if s["city"] == city)
     tensors = load_benchmark_tensors(city)
     R = _init_routes(city, spec, tensors)
-    cfg = build_bco_cfg(f"golden_{name}", spec["n_routes"], spec["min_route_len"],
-                        spec["max_route_len"], n_bees=10,
-                        connectivity_mode=CONNECTIVITY_MODE,
-                        **bee_kw, **UNIFIED_COST_WEIGHTS)
+    cfg = load_experiment_cfg(yaml_name)
+    for key in ("n_routes", "min_route_len", "max_route_len"):
+        set_cfg_value(cfg, f"eval.{key}", int(spec[key]))
+    set_cfg_value(cfg, "run_name", f"golden_{name}")
     bco_cfg_set(cfg, n_iterations=N_ITER, **UNIFIED_ADJ)
     set_cfg_value(cfg, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
     set_cfg_value(cfg, "experiment.seed", 0)
@@ -110,8 +109,8 @@ def _eq(a, b):
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "compare"
     results = {}
-    for name, city, kw in VARIANTS:
-        results[name] = run_variant(name, city, kw)
+    for name, city, yaml_name in VARIANTS:
+        results[name] = run_variant(name, city, yaml_name)
         print(f"[{name}] {results[name]['seconds']:.1f}s")
     if mode == "capture":
         torch.save(results, GOLDEN_PATH)
@@ -121,17 +120,19 @@ def main():
     n_bad = 0
     for name in golden:
         g, r = golden[name], results[name]
+        bad_here = 0
         for field in ("unserved", "metrics", "routes", "history"):
             ok = _eq(g[field], r[field])
             if not ok:
-                n_bad += 1
+                bad_here += 1
                 print(f"MISMATCH {name}.{field}")
                 if torch.is_tensor(g[field]) and torch.is_tensor(r[field]) \
                         and g[field].shape == r[field].shape:
                     diff = (g[field].float() - r[field].float()).abs()
                     print(f"  max abs diff: {diff.max().item():.3e}")
+        n_bad += bad_here
         speed = golden[name]["seconds"] / max(results[name]["seconds"], 1e-9)
-        print(f"[{name}] {'OK' if n_bad == 0 else 'BAD'} | "
+        print(f"[{name}] {'OK' if bad_here == 0 else 'BAD'} | "
               f"{golden[name]['seconds']:.1f}s -> {results[name]['seconds']:.1f}s "
               f"({speed:.2f}x)")
     if n_bad:
