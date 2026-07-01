@@ -40,7 +40,8 @@ from connectpt.routes_generator.citygraph_dataset import load_macsa_tensors  # n
 from eval_lib import plots as route_plots  # noqa: E402
 from eval_lib.baselines import _run_baseline  # noqa: E402
 from eval_lib.context import ARTIFACTS_DIR, DATASETS_DIR  # noqa: E402
-from eval_lib.helpers import as_route_tensor, build_bco_cfg, run_bco  # noqa: E402
+from eval_lib.helpers import as_route_tensor, run_bco  # noqa: E402
+from connectpt.routes_generator.search.bco_config import compose_bco_cfg as build_bco_cfg  # noqa: E402
 from eval_lib.paper import (  # noqa: E402
     UNIFIED_ADJ,
     adj_vs_init,

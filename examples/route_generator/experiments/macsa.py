@@ -24,7 +24,8 @@ from IPython.display import Image, display
 from eval_lib import plots as route_plots
 from eval_lib.baselines import _run_baseline
 from eval_lib.context import DATASETS_DIR
-from eval_lib.helpers import as_route_tensor, build_bco_cfg, run_bco
+from eval_lib.helpers import as_route_tensor, run_bco
+from connectpt.routes_generator.search.bco_config import compose_bco_cfg as build_bco_cfg
 import eval_lib.helpers as _eh
 from eval_lib.paper import (PAPER_DIR, UNIFIED_ADJ, bco_cfg_set,
                             eval_routes_cfg as _eval_routes_cfg,

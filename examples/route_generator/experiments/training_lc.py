@@ -613,7 +613,8 @@ def post_training_convergence(cfg, *, best_model_path, benchmark_specs,
     from omegaconf import OmegaConf
 
     import eval_lib.helpers as _eh
-    from eval_lib import build_bco_cfg, run_bco
+    from eval_lib import run_bco
+    from connectpt.routes_generator.search.bco_config import compose_bco_cfg as build_bco_cfg
 
     city = str(cfg.report.post_train.city)
     iters = int(cfg.report.post_train.iters)
