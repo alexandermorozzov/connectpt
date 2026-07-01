@@ -170,6 +170,12 @@ def _stem(name):
     return f"{PAPER_PREFIX}{name}"
 
 
+def paper_path(name):
+    """Prefix-aware path under paper_results (e.g. to read back a saved dump).
+    Mirrors what save_paper_* write, so reads find TEMP_ files on smoke runs."""
+    return PAPER_DIR / f"{PAPER_PREFIX}{name}"
+
+
 def save_paper_table(df, name):
     path = PAPER_DIR / f"{_stem(name)}.csv"
     df.to_csv(path, index=False)
