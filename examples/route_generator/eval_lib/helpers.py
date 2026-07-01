@@ -25,6 +25,7 @@ from connectpt.routes_generator.improvement_learning import (
 from connectpt.routes_generator.utils import get_eval_cfg
 from connectpt.routes_generator.eval_route_generator import eval_model
 from connectpt.routes_generator.bee_colony import bee_colony
+from connectpt.routes_generator.search.bco_invocation import build_bee_colony_kwargs
 from connectpt.routes_generator.torch_utils import (
     dump_routes, get_batch_tensor_from_routes)
 from connectpt.routes_generator.transit_time_estimator import RouteGenBatchState
@@ -634,6 +635,11 @@ def run_bco(cfg, init_routes, mutation_counts_out=None, *,
     edit_model = build_edit_model(device) if (n_type5_bees > 0 or n_type6_bees > 0 or n_type7_bees > 0) else None
     mutation_counts_out = {} if mutation_counts_out is None else mutation_counts_out
 
+    # The bee_colony parameter contract lives in the library (single source);
+    # this helper only supplies the loaded models + the data/init the run uses.
+    bco_kwargs = build_bee_colony_kwargs(
+        cfg, bee_model=bee_model, edit_model=edit_model,
+        mutation_counts_out=mutation_counts_out)
     output = lrnu.test_method(
         bee_colony,
         dataloader,
@@ -646,45 +652,7 @@ def run_bco(cfg, init_routes, mutation_counts_out=None, *,
         return_histories=cost_history_out is not None,
         routes_tensor=init_routes,
         iteration_callback=iteration_callback,
-        n_bees=cfg.n_bees,
-        n_iterations=cfg.n_iterations,
-        n_type1_bees=cfg.get("n_type1_bees", None),
-        n_type2_bees=cfg.get("n_type2_bees", None),
-        n_type4_bees=cfg.get("n_type4_bees", 0),
-        n_type5_bees=n_type5_bees,
-        n_type6_bees=n_type6_bees,
-        n_type7_bees=n_type7_bees,
-        bee_model=bee_model,
-        edit_model=edit_model,
-        force_linking_unlinked=force_linking_unlinked,
-        adjustment_degree_weight=cfg.get("adjustment_degree_weight", 0.0),
-        adjustment_degree_gap=cfg.get("adjustment_degree_gap", 0.1),
-        adjustment_degree_mode=cfg.get("adjustment_degree_mode", "current"),
-        adjustment_degree_objective=cfg.get("adjustment_degree_objective", "raw"),
-        adjustment_degree_target=cfg.get("adjustment_degree_target", 0.2),
-        ignore_type4_max_route_len=cfg.get("ignore_type4_max_route_len", False),
-        ignore_type5_max_route_len=cfg.get("ignore_type5_max_route_len", False),
-        type4_allow_halt=cfg.get("type4_allow_halt", True),
-        type5_allow_halt=cfg.get("type5_allow_halt", True),
-        type6_allow_halt=cfg.get("type6_allow_halt", True),
-        type7_allow_halt=cfg.get("type7_allow_halt", True),
-        ignore_type6_max_route_len=cfg.get("ignore_type6_max_route_len", False),
-        ignore_type7_max_route_len=cfg.get("ignore_type7_max_route_len", False),
-        use_demand_weighted_route_selection=cfg.get("use_demand_weighted_route_selection", False),
-        worse_accept_temperature=cfg.get("worse_accept_temperature", 0.0),
-        worse_accept_decay=cfg.get("worse_accept_decay", 0.995),
-        worse_accept_min_temperature=cfg.get("worse_accept_min_temperature", 0.001),
-        worse_selection_temperature=cfg.get("worse_selection_temperature", 0.0),
-        worse_selection_decay=cfg.get("worse_selection_decay", 0.995),
-        worse_selection_min_temperature=cfg.get("worse_selection_min_temperature", 0.001),
-        worse_selection_uniform_mix=cfg.get("worse_selection_uniform_mix", 0.05),
-        worse_selection_elite_count=cfg.get("worse_selection_elite_count", 1),
-        trim_grace_period=cfg.get("trim_grace_period", 0),
-        process_neural_bees_sequentially=cfg.get(
-            "process_neural_bees_sequentially", False),
-        early_stop_patience=cfg.get("early_stop_patience", None),
-        early_stop_min_delta=float(cfg.get("early_stop_min_delta", 0.0)),
-        mutation_counts_out=mutation_counts_out,
+        **bco_kwargs,
     )
     if cost_history_out is not None:
         _, _, unserved_demand, metrics, routes, cost_histories = output
