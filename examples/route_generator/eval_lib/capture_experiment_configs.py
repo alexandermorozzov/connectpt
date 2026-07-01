@@ -19,7 +19,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from .context import CFG_DIR
-from .params import (BCO_N_TYPE1_BEES, CONNECTIVITY_MODE, UNIFIED_COST_WEIGHTS,
+from .params import (bco_config, CONNECTIVITY_MODE, UNIFIED_COST_WEIGHTS,
                      ADJ_WEIGHT, ADJ_TARGET, ADJ_GAP, ADJ_MODE)
 from .paper import UNIFIED_ADJ
 from . import experiments as ex
@@ -56,16 +56,16 @@ CTX = ex.ExperimentContext(
     early_stop_patience=None, hh_max_repair_iters=5000,
     our_model_path="artifacts/model_weights/improvement/"
                    "improvement_lc_redundancy_rttwmc_v1_PRESERVED.pt",
-    bco_n_type1_bees=BCO_N_TYPE1_BEES, include_edit_rebuild=False)
+    bco_n_type1_bees=int(bco_config().n_type1_bees), include_edit_rebuild=False)
 
 
 # --- bee-mix variant dicts (extracted verbatim from the notebook cells) ------
 NEURAL_BCO_VARIANT = dict(run_name="neural_bco", use_neural_bees=True,
-                          n_type1_bees=BCO_N_TYPE1_BEES, n_type2_bees=None,
+                          n_type1_bees=int(bco_config().n_type1_bees), n_type2_bees=None,
                           n_type4_bees=0, n_type5_bees=0, n_type6_bees=0,
                           n_type7_bees=0)
 CLASSIC_BCO_VARIANT = dict(run_name="classic_bco", use_neural_bees=False,
-                           n_type1_bees=BCO_N_TYPE1_BEES, n_type2_bees=None,
+                           n_type1_bees=int(bco_config().n_type1_bees), n_type2_bees=None,
                            n_type4_bees=0, n_type5_bees=0, n_type6_bees=0,
                            n_type7_bees=0)
 TRIM12_EXTEND12_VARIANT = dict(run_name="trim12_extend12", use_neural_bees=True,

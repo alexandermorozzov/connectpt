@@ -159,17 +159,17 @@ def build_bco_cfg(
     min_route_len: int,
     max_route_len: int,
     use_neural_bees: bool = USE_NEURAL_BCO,
-    n_bees: int = BCO_N_BEES,
-    n_type1_bees: int = BCO_N_TYPE1_BEES,
+    n_bees: int | None = None,
+    n_type1_bees: int | None = None,
     n_type2_bees: int | None = None,
     n_type4_bees: int = 0,
     n_type5_bees: int = 0,
     n_type6_bees: int = 0,
     n_type7_bees: int = 0,
-    ignore_type4_max_route_len: bool = BCO_CONSTRUCTION_IGNORE_MAX_ROUTE_LEN,
-    ignore_type5_max_route_len: bool = BCO_EDIT_IGNORE_MAX_ROUTE_LEN,
-    ignore_type6_max_route_len: bool = BCO_TRIM_IGNORE_MAX_ROUTE_LEN,
-    ignore_type7_max_route_len: bool = BCO_TRIM_EXTEND_IGNORE_MAX_ROUTE_LEN,
+    ignore_type4_max_route_len: bool | None = None,
+    ignore_type5_max_route_len: bool | None = None,
+    ignore_type6_max_route_len: bool | None = None,
+    ignore_type7_max_route_len: bool | None = None,
     type4_allow_halt: bool = True,
     type5_allow_halt: bool = True,
     type6_allow_halt: bool = True,
@@ -179,14 +179,14 @@ def build_bco_cfg(
     route_time_weight: float = ROUTE_TIME_WEIGHT,
     median_connectivity_weight: float = MEDIAN_CONNECTIVITY_WEIGHT,
     connectivity_mode: str = "median_weighted",
-    worse_accept_temperature: float = BCO_WORSE_ACCEPT_TEMPERATURE,
-    worse_accept_decay: float = BCO_WORSE_ACCEPT_DECAY,
-    worse_accept_min_temperature: float = BCO_WORSE_ACCEPT_MIN_TEMPERATURE,
-    worse_selection_temperature: float = BCO_WORSE_SELECTION_TEMPERATURE,
-    worse_selection_decay: float = BCO_WORSE_SELECTION_DECAY,
-    worse_selection_min_temperature: float = BCO_WORSE_SELECTION_MIN_TEMPERATURE,
-    worse_selection_uniform_mix: float = BCO_WORSE_SELECTION_UNIFORM_MIX,
-    worse_selection_elite_count: int = BCO_WORSE_SELECTION_ELITE_COUNT,
+    worse_accept_temperature: float | None = None,
+    worse_accept_decay: float | None = None,
+    worse_accept_min_temperature: float | None = None,
+    worse_selection_temperature: float | None = None,
+    worse_selection_decay: float | None = None,
+    worse_selection_min_temperature: float | None = None,
+    worse_selection_uniform_mix: float | None = None,
+    worse_selection_elite_count: int | None = None,
     trim_grace_period: int = 0,
     process_neural_bees_sequentially: bool = False,
     early_stop_patience: int | None = None,
@@ -213,6 +213,38 @@ def build_bco_cfg(
       trim_only              - one edit-model trim/halt step
       trim_then_extend       - trim/halt, then construction extend/halt
     """
+    # Resolve unset args from the BCO algorithm config (reader + factory: the
+    # builder reads cfg/bco_mumford.yaml directly instead of module constants).
+    bco = bco_config()
+    if n_bees is None:
+        n_bees = int(bco.n_bees)
+    if n_type1_bees is None:
+        n_type1_bees = int(bco.n_type1_bees)
+    if ignore_type4_max_route_len is None:
+        ignore_type4_max_route_len = bool(bco.ignore_type4_max_route_len)
+    if ignore_type5_max_route_len is None:
+        ignore_type5_max_route_len = bool(bco.ignore_type5_max_route_len)
+    if ignore_type6_max_route_len is None:
+        ignore_type6_max_route_len = bool(bco.ignore_type6_max_route_len)
+    if ignore_type7_max_route_len is None:
+        ignore_type7_max_route_len = bool(bco.ignore_type7_max_route_len)
+    if worse_accept_temperature is None:
+        worse_accept_temperature = float(bco.worse_accept_temperature)
+    if worse_accept_decay is None:
+        worse_accept_decay = float(bco.worse_accept_decay)
+    if worse_accept_min_temperature is None:
+        worse_accept_min_temperature = float(bco.worse_accept_min_temperature)
+    if worse_selection_temperature is None:
+        worse_selection_temperature = float(bco.worse_selection_temperature)
+    if worse_selection_decay is None:
+        worse_selection_decay = float(bco.worse_selection_decay)
+    if worse_selection_min_temperature is None:
+        worse_selection_min_temperature = float(bco.worse_selection_min_temperature)
+    if worse_selection_uniform_mix is None:
+        worse_selection_uniform_mix = float(bco.worse_selection_uniform_mix)
+    if worse_selection_elite_count is None:
+        worse_selection_elite_count = int(bco.worse_selection_elite_count)
+
     run_name = safe_run_name(run_name)
     base_cfg_name = "neural_bco_mumford" if use_neural_bees else "bco_mumford"
     effective_type2 = (
@@ -234,7 +266,7 @@ def build_bco_cfg(
         f"++experiment.cost_function.kwargs.connectivity_mode={connectivity_mode}",
         f"++run_name={run_name}",
         f"++n_bees={n_bees}",
-        f"++n_iterations={BCO_N_ITERATIONS}",
+        f"++n_iterations={int(bco.n_iterations)}",
         f"++n_type1_bees={n_type1_bees}",
         f"++n_type2_bees={effective_type2}",
         f"++n_type4_bees={n_type4_bees}",
@@ -653,13 +685,15 @@ def run_bco(cfg, init_routes, mutation_counts_out=None, *,
 
 
 def build_default_bco_variants():
+    bco = bco_config()
+    n_bees, n_type1 = int(bco.n_bees), int(bco.n_type1_bees)
     return [
         {
             "key": "seeded_heuristic",
             "summary_label": "BCO",
             "run_name": "seeded_bco_heuristic_from_lc_mumford0",
             "use_neural_bees": False,
-            "n_type1_bees": BCO_N_TYPE1_BEES,
+            "n_type1_bees": n_type1,
             "n_type2_bees": None,
             "n_type4_bees": 0,
             "n_type5_bees": 0,
@@ -673,7 +707,7 @@ def build_default_bco_variants():
             "summary_label": "neural BCO",
             "run_name": "seeded_neural_bco_from_lc_mumford0",
             "use_neural_bees": True,
-            "n_type1_bees": BCO_N_TYPE1_BEES,
+            "n_type1_bees": n_type1,
             "n_type2_bees": None,
             "n_type4_bees": 0,
             "n_type5_bees": 0,
@@ -685,10 +719,10 @@ def build_default_bco_variants():
             "summary_label": "Heuristic rebuild + extend/trim edit BCO (5+5)",
             "run_name": "seeded_bco_heuristic_extend_trim_split_5_5_from_lc_mumford0",
             "use_neural_bees": False,
-            "n_type1_bees": BCO_N_TYPE1_BEES,
+            "n_type1_bees": n_type1,
             "n_type2_bees": 0,
             "n_type4_bees": 0,
-            "n_type5_bees": BCO_N_BEES - BCO_N_TYPE1_BEES,
+            "n_type5_bees": n_bees - n_type1,
             "n_type6_bees": 0,
             "n_type7_bees": 0,
         },
@@ -706,13 +740,13 @@ def build_default_bco_variants():
         # },
         {
             "key": "extend_trim_edit_only",
-            "summary_label": f"Extend/trim edit-only BCO (all {BCO_N_BEES} bees)",
+            "summary_label": f"Extend/trim edit-only BCO (all {n_bees} bees)",
             "run_name": "seeded_bco_extend_trim_edit_only_from_lc_mumford0",
             "use_neural_bees": False,
             "n_type1_bees": 0,
             "n_type2_bees": 0,
             "n_type4_bees": 0,
-            "n_type5_bees": BCO_N_BEES,
+            "n_type5_bees": n_bees,
             "n_type6_bees": 0,
             "n_type7_bees": 0,
         },

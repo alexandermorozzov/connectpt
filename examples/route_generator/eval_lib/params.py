@@ -1,9 +1,9 @@
 """Tunable experiment parameters -- the single source of truth.
 
-Repo paths live in :mod:`eval_lib.context`. The BCO algorithm constants are
-sourced from the algorithm YAML ``cfg/bco_mumford.yaml`` -- edit that YAML to
-tune them; this module just re-exports the values under their historical
-constant names so the notebook / helpers keep working.
+Repo paths live in :mod:`eval_lib.context`. The BCO algorithm config is read
+from ``cfg/bco_mumford.yaml`` through :func:`bco_config` -- a reader that the
+config builder (``build_bco_cfg``) consumes directly, rather than a pile of
+module-level ``CONST = _cfg.field`` aliases. Edit that YAML to tune the search.
 
 The **unified paper objective** block below is read by BOTH parts of
 ``paper_combined.ipynb``: PART 1 trains the edit model on exactly the same
@@ -65,23 +65,18 @@ MAX_ROUTE_LEN = 12
 LC_SAMPLES = 100
 USE_NEURAL_BCO = False
 
-# === BCO algorithm constants -- sourced from cfg/bco_mumford.yaml ===========
-# The algorithm YAML is the single source of truth; the BCO_* names below are
-# re-exports so existing notebook / helper code keeps working.
-_BCO_CFG = _OmegaConf.load(CFG_DIR / "bco_mumford.yaml")
+# === BCO algorithm config -- cfg/bco_mumford.yaml (read on demand) ==========
+# No flat BCO_* constants: the search config is read through bco_config() and
+# consumed directly by the config builder (build_bco_cfg) -- a reader + factory,
+# not a pile of module-level ``CONST = _cfg.field`` aliases.
+from functools import lru_cache as _lru_cache
 
-BCO_N_BEES = int(_BCO_CFG.n_bees)
-BCO_N_ITERATIONS = int(_BCO_CFG.n_iterations)
-BCO_N_TYPE1_BEES = int(_BCO_CFG.n_type1_bees)
-BCO_CONSTRUCTION_IGNORE_MAX_ROUTE_LEN = bool(_BCO_CFG.ignore_type4_max_route_len)
-BCO_EDIT_IGNORE_MAX_ROUTE_LEN = bool(_BCO_CFG.ignore_type5_max_route_len)
-BCO_TRIM_IGNORE_MAX_ROUTE_LEN = bool(_BCO_CFG.ignore_type6_max_route_len)
-BCO_TRIM_EXTEND_IGNORE_MAX_ROUTE_LEN = bool(_BCO_CFG.ignore_type7_max_route_len)
-BCO_WORSE_ACCEPT_TEMPERATURE = float(_BCO_CFG.worse_accept_temperature)
-BCO_WORSE_ACCEPT_DECAY = float(_BCO_CFG.worse_accept_decay)
-BCO_WORSE_ACCEPT_MIN_TEMPERATURE = float(_BCO_CFG.worse_accept_min_temperature)
-BCO_WORSE_SELECTION_TEMPERATURE = float(_BCO_CFG.worse_selection_temperature)
-BCO_WORSE_SELECTION_DECAY = float(_BCO_CFG.worse_selection_decay)
-BCO_WORSE_SELECTION_MIN_TEMPERATURE = float(_BCO_CFG.worse_selection_min_temperature)
-BCO_WORSE_SELECTION_UNIFORM_MIX = float(_BCO_CFG.worse_selection_uniform_mix)
-BCO_WORSE_SELECTION_ELITE_COUNT = int(_BCO_CFG.worse_selection_elite_count)
+
+@_lru_cache(maxsize=1)
+def bco_config():
+    """The BCO algorithm config (``cfg/bco_mumford.yaml``), loaded once.
+
+    Consumers read fields off the returned config (``bco_config().n_bees``)
+    rather than importing module-level constants.
+    """
+    return _OmegaConf.load(CFG_DIR / "bco_mumford.yaml")
