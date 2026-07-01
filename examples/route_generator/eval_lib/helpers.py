@@ -24,8 +24,8 @@ from connectpt.routes_generator.improvement_learning import (
     summarize_route_action_stats)
 from connectpt.routes_generator.utils import get_eval_cfg
 from connectpt.routes_generator.eval_route_generator import eval_model
-from connectpt.routes_generator.search.seeded_search import run_seeded_bee_colony
 from connectpt.routes_generator.search.edit_bee import build_edit_bee_model
+from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
 from connectpt.routes_generator.torch_utils import (
     dump_routes, get_batch_tensor_from_routes)
 import connectpt.routes_generator.utils as lrnu
@@ -490,57 +490,16 @@ def build_edit_model(device, weights_path=None, load_weights=True):
 def run_bco(cfg, init_routes, mutation_counts_out=None, *,
             tensors=None, run_name_scope="", cost_history_out=None,
             iteration_callback=None):
-    # tensors=None -> Mumford0 dataloader; tensors=<dict> -> explicit
-    # tensor dataset. run_name_scope prefixes the run name so the
-    # benchmark paths can keep their dataset/run-name labels.
-    # Unifies the former run_bco / run_bco_on_nx_tensors /
-    # run_bco_on_tensors trio.
-    if tensors is None:
-        dataloader = make_test_dataloader(cfg.eval.dataset)
-    else:
-        dataloader = make_tensor_dataloader(cfg.eval.dataset, tensors)
-    use_neural_bees = cfg.get("neural_bees", False)
-    prefix = f"{run_name_scope}"
-    prefix += "neural_bco_" if use_neural_bees else "bco_"
-    device, run_name, _, cost_obj, bee_model = lrnu.process_standard_experiment_cfg(
-        cfg,
-        run_name_prefix=prefix,
-        weights_required=use_neural_bees,
-    )
-    force_linking_unlinked = cfg.get("force_linking_unlinked", False)
-    if not use_neural_bees:
-        bee_model = None
-    elif bee_model is not None:
-        bee_model.force_linking_unlinked = force_linking_unlinked
-        bee_model.eval()
-
-    n_type5_bees = int(cfg.get("n_type5_bees", 0))
-    n_type6_bees = int(cfg.get("n_type6_bees", 0))
-    n_type7_bees = int(cfg.get("n_type7_bees", 0))
-    edit_model = build_edit_model(device) if (n_type5_bees > 0 or n_type6_bees > 0 or n_type7_bees > 0) else None
-    mutation_counts_out = {} if mutation_counts_out is None else mutation_counts_out
-
-    # The seeded bee-colony run (init from the provided routes, not from scratch)
-    # is owned by the library; this helper only supplies the data/cost/models it
-    # built. silent=False shows bee_colony's per-iteration tqdm (the outer
-    # 1-sample bar is auto-hidden).
-    output = run_seeded_bee_colony(
-        dataloader, cfg.eval, cost_obj, init_routes,
-        search_cfg=cfg, bee_model=bee_model, edit_model=edit_model,
-        mutation_counts_out=mutation_counts_out, device=device, silent=False,
-        return_histories=cost_history_out is not None,
-        iteration_callback=iteration_callback)
-    if cost_history_out is not None:
-        _, _, unserved_demand, metrics, routes, cost_histories = output
-        if cost_histories:
-            _h = cost_histories[0]
-            cost_history_out["history"] = (
-                _h.detach().cpu().clone() if hasattr(_h, "detach") else _h)
-    else:
-        _, _, unserved_demand, metrics, routes = output
-    routes_tensor = as_route_tensor(routes)
-    metrics = add_cost_breakdown_to_metrics(metrics, dataloader, cfg.eval, cost_obj, routes_tensor, device)
-    return run_name, metrics, unserved_demand, routes_tensor, mutation_counts_out
+    # Thin wrapper over the library-owned run_bco_from_cfg: resolve the dataset
+    # tensors (tensors=None -> the registered Mumford0 INPUT_TENSORS; a dict ->
+    # explicit tensor graph) and supply the notebook's edit-model globals. The
+    # cost/model/data build + seeded run + cost breakdown all live in the library.
+    return run_bco_from_cfg(
+        cfg, init_routes, INPUT_TENSORS if tensors is None else tensors,
+        mutation_counts_out=mutation_counts_out, run_name_scope=run_name_scope,
+        cost_history_out=cost_history_out, iteration_callback=iteration_callback,
+        edit_weights_path=EDIT_MODEL_WEIGHTS_PATH,
+        edit_n_adjustment_cond_feats=EDIT_MODEL_N_ADJ_COND_FEATS)
 
 
 def build_default_bco_variants():
