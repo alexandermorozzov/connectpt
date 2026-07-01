@@ -67,6 +67,26 @@ def nbco_adj_target(ekb_cfg):
     return float(t) if t is not None else float(load_unified_objective().adj_target)
 
 
+def _ekb_our_nbco_cfg(case, *, run_name_suffix, seed, force_cpu):
+    """Config-first Our-NBCO (GNN rebuild + trim/extend) cfg for the EKB case.
+
+    Loads the captured ``cfg/experiments/ekb/our_nbco_ekb.yaml`` and applies the
+    per-run knobs (route bounds from the case spec, run name, seed, cpu). This
+    replaces the notebook's context-bound ``experiments.our_model_cfg`` builder;
+    the composed config is byte-identical to that builder's output (verified).
+    """
+    from eval_lib.experiments import load_experiment_cfg
+    from eval_lib.paper import set_cfg_value
+    cfg = load_experiment_cfg("ekb/our_nbco_ekb")
+    for key in ("n_routes", "min_route_len", "max_route_len"):
+        set_cfg_value(cfg, f"eval.{key}", int(case.spec[key]))
+    set_cfg_value(cfg, "run_name",
+                  f"EKB_{run_name_suffix}our_nbco_gnn_rebuild_trimext")
+    set_cfg_value(cfg, "experiment.seed", int(seed))
+    set_cfg_value(cfg, "experiment.cpu", bool(force_cpu))
+    return cfg
+
+
 def score_routes(case: EKBCase, routes, tag, *, adj_target, force_cpu,
                  alpha=None, seed_routes=None):
     """Score a fixed route set under the unified objective (adjustment ON).
@@ -182,14 +202,14 @@ class EKBRunResult:
     table_stem: str
 
 
-def run_ekb_nbco(case: EKBCase, *, ekb_cfg, our_model_cfg, n_bees, seed,
+def run_ekb_nbco(case: EKBCase, *, ekb_cfg, n_bees, seed,
                  model_outputs_dir) -> EKBRunResult:
     """Single NBCO run (GNN rebuild + trim/extend) on the active EKB case.
 
-    ``our_model_cfg`` is the notebook's context-bound ``experiments.our_model_cfg``
-    partial. Reads/writes the paper cache (honouring the TEMP_ prefix); saves a
-    live best-solution checkpoint on every improvement. Returns the result df,
-    the {label: routes} mapping, and the convergence history.
+    The Our-NBCO config is built config-first from ``ekb/our_nbco_ekb.yaml`` (see
+    :func:`_ekb_our_nbco_cfg`). Reads/writes the paper cache (honouring the TEMP_
+    prefix); saves a live best-solution checkpoint on every improvement. Returns
+    the result df, the {label: routes} mapping, and the convergence history.
     """
     import pandas as pd
     import torch
@@ -232,9 +252,8 @@ def run_ekb_nbco(case: EKBCase, *, ekb_cfg, our_model_cfg, n_bees, seed,
 
     print(f"[EKB NBCO] running {final_label} on {case.case_tag}: "
           f"iters={n_iterations}, target={adj_target} ...", flush=True)
-    cfg = our_model_cfg("EKB", case.spec, adj_target=adj_target,
-                        run_name_suffix=f"{case.case_tag}_", seed=int(seed),
-                        use_gnn=True, force_cpu=force_cpu)
+    cfg = _ekb_our_nbco_cfg(case, run_name_suffix=f"{case.case_tag}_",
+                            seed=int(seed), force_cpu=force_cpu)
     set_cfg_value(cfg, "experiment.cpu", bool(force_cpu))
     set_cfg_value(cfg, "process_neural_bees_sequentially", seq)
     bco_cfg_set(cfg, n_iterations=n_iterations,
@@ -311,11 +330,12 @@ def run_ekb_nbco(case: EKBCase, *, ekb_cfg, our_model_cfg, n_bees, seed,
     return EKBRunResult(df, results, history, mutation_counts, table)
 
 
-def run_ekb_alpha_sweep(case: EKBCase, *, ekb_cfg, our_model_cfg, n_bees, seed):
+def run_ekb_alpha_sweep(case: EKBCase, *, ekb_cfg, n_bees, seed):
     """Alpha sweep (route/connectivity trade-off) at a fixed adjustment target.
 
     Returns ``(df, {label: routes})``. Honours the TEMP_ prefix + cache like the
-    NBCO runner. ``our_model_cfg`` is the notebook's context-bound partial.
+    NBCO runner. The base Our-NBCO config is built config-first (see
+    :func:`_ekb_our_nbco_cfg`); each alpha overrides the RTT/WMC weights.
     """
     import pandas as pd
     import torch
@@ -369,9 +389,9 @@ def run_ekb_alpha_sweep(case: EKBCase, *, ekb_cfg, our_model_cfg, n_bees, seed):
         rows.append(seed_row)
         append_paper_row(seed_row, table, ndigits=4)
 
-        cfg = our_model_cfg("EKB", case.spec, adj_target=adj_target,
-                            run_name_suffix=f"{case.case_tag}_alpha{alpha:g}_",
-                            seed=int(seed), use_gnn=True, force_cpu=force_cpu)
+        cfg = _ekb_our_nbco_cfg(
+            case, run_name_suffix=f"{case.case_tag}_alpha{alpha:g}_",
+            seed=int(seed), force_cpu=force_cpu)
         set_cfg_value(cfg, "experiment.cpu", bool(force_cpu))
         set_cfg_value(cfg, "experiment.cost_function.kwargs.route_time_weight", float(alpha))
         set_cfg_value(cfg, "experiment.cost_function.kwargs.median_connectivity_weight",
