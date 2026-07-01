@@ -31,3 +31,10 @@ e1:
   cities: [Mandl]
   run_neural_bco: true
   run_our_model: true
+
+ekb:
+  nbco:
+    iterations: 1
+  sweep:
+    iterations: 1
+    alpha_grid: [0.5]

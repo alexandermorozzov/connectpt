@@ -50,3 +50,28 @@ e1:
 
 e2:
   table_suffix: "_mumford1_5model"
+
+# EKB (Ekaterinburg) case study + NBCO run + alpha sweep. Was the inline
+# EKB_* constants in the notebook's EKB cells.
+ekb:
+  force_cpu: true
+  score_seed: false
+  use_crop: false
+  crop_target_nodes: 300
+  crop_min_route_len: 11
+  crop_keep_largest_component: true
+  route_fig_node_size: 8
+  nbco:
+    process_neural_bees_sequentially: true
+    force_rerun: false
+    iterations: 25
+    adj_target: null      # null -> the unified ADJ_TARGET (eval_lib.params)
+    final_label: "Our NBCO (GNN + trim/extend)"
+    overlap_curves: true
+    node_size: 8
+  sweep:
+    process_neural_bees_sequentially: false
+    force_rerun: false
+    iterations: 50
+    adj_target: 0.3
+    alpha_grid: [0.0, 0.5, 1.0]

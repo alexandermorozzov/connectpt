@@ -265,6 +265,11 @@ def test_paper_combined_uses_two_sided_adj_objective():
     edit_yaml = (REPO_ROOT / "connectpt" / "routes_generator" / "cfg" / "train"
                  / "edit.yaml").read_text(encoding="utf-8")
     assert "adjustment_degree_objective: cap" in edit_yaml
-    # PART 2 search spreads the unified adj kwargs (UNIFIED_ADJ, usually via
-    # dict(UNIFIED_ADJ, adjustment_degree_target=...) overrides).
-    assert text.count("UNIFIED_ADJ") >= 3
+    # PART 2 search spreads the unified adj kwargs (UNIFIED_ADJ). The per-method
+    # threading now lives in the library (experiment_runner + the one-off
+    # experiments modules), not inline in the notebook, so assert the single
+    # source is applied there rather than counting notebook occurrences.
+    assert "UNIFIED_ADJ" in text  # still threaded via the notebook helpers cell
+    for mod in ("eval_lib/experiment_runner.py", "experiments/macsa.py",
+                "experiments/ekb.py"):
+        assert "UNIFIED_ADJ" in (ROUTE_EXAMPLES / mod).read_text(encoding="utf-8"), mod
