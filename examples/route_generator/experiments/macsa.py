@@ -102,28 +102,28 @@ def config_summary():
     }
 
 
-def _macsa_alpha_tag(alpha):
+def macsa_alpha_tag(alpha):
     return f"{float(alpha):.1f}".rstrip("0").rstrip(".").replace("-", "m").replace(".", "p") or "0"
 
 
-def _macsa_alpha_label(alpha):
+def macsa_alpha_label(alpha):
     return f"Our NBCO alpha={float(alpha):.1f} (iter={MACSA_SWEEP_BCO_ITERATIONS})"
 
 
-def _macsa_alpha_weights(alpha):
+def macsa_alpha_weights(alpha):
     alpha = float(alpha)
     return {"demand_time_weight": 0.0,
             "route_time_weight": alpha,
             "median_connectivity_weight": 1.0 - alpha}
 
 
-def _macsa_set_alpha_weights(cfg, alpha):
-    for key, value in _macsa_alpha_weights(alpha).items():
+def macsa_set_alpha_weights(cfg, alpha):
+    for key, value in macsa_alpha_weights(alpha).items():
         _set_cfg_value(cfg, f"experiment.cost_function.kwargs.{key}", float(value))
     return cfg
 
 
-def _macsa_read_routes_0indexed(path):
+def macsa_read_routes_0indexed(path):
     rows = []
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         line = line.split("#", 1)[0].strip()
@@ -138,17 +138,17 @@ def _macsa_read_routes_0indexed(path):
     return out
 
 
-def _macsa_pad_routes(routes, n_routes, max_route_len):
+def macsa_pad_routes(routes, n_routes, max_route_len):
     from ._common import pad_routes_to
     return pad_routes_to(routes, n_routes, max_route_len, strict=True)
 
 
-def _macsa_2d(routes):
+def macsa_2d(routes):
     from ._common import route_2d
     return route_2d(routes)
 
 
-def _macsa_build_spec(raw_routes, n_nodes):
+def macsa_build_spec(raw_routes, n_nodes):
     n_routes = int(raw_routes[MACSA_REF_METHOD].shape[0])
     longest = max(int((rt > -1).sum(-1).max().item()) for rt in raw_routes.values())
     return {"city": MACSA_SCENARIO_NAME,
@@ -157,10 +157,10 @@ def _macsa_build_spec(raw_routes, n_nodes):
             "max_route_len": min(int(n_nodes), max(12, longest))}
 
 
-def _macsa_score_routes(method, source, routes, *, seed_routes, tensors, spec,
+def macsa_score_routes(method, source, routes, *, seed_routes, tensors, spec,
                         alpha, adj_target, adj_objective):
     cfg = _unify_weights(_eval_routes_cfg(MACSA_SCENARIO_NAME, spec))
-    _macsa_set_alpha_weights(cfg, alpha)
+    macsa_set_alpha_weights(cfg, alpha)
     _set_cfg_value(cfg, "experiment.cpu", True)
     _set_cfg_value(cfg, "eval.csv", False)
     _set_cfg_value(cfg, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
@@ -186,7 +186,7 @@ def _macsa_score_routes(method, source, routes, *, seed_routes, tensors, spec,
     return row, as_route_tensor(scored_routes)
 
 
-def _macsa_build_our_cfg(spec, *, alpha, adj_target, adj_objective,
+def macsa_build_our_cfg(spec, *, alpha, adj_target, adj_objective,
                          n_iterations, n_bees, seed, force_cpu):
     n_bees = int(n_bees)
     rebuild_bees = max(1, n_bees // 2)
@@ -203,23 +203,23 @@ def _macsa_build_our_cfg(spec, *, alpha, adj_target, adj_objective,
         worse_accept_min_temperature=0.001,
         worse_selection_temperature=0.02, worse_selection_decay=0.985,
         worse_selection_uniform_mix=0.10, worse_selection_elite_count=2,
-        **_macsa_alpha_weights(alpha))
+        **macsa_alpha_weights(alpha))
     bco_cfg_set(cfg, n_iterations=int(n_iterations),
                 type4_allow_halt=False, type5_allow_halt=False,
                 type6_allow_halt=False, type7_allow_halt=False,
                 **dict(UNIFIED_ADJ,
                        adjustment_degree_target=float(adj_target),
                        adjustment_degree_objective=str(adj_objective)))
-    _macsa_set_alpha_weights(cfg, alpha)
+    macsa_set_alpha_weights(cfg, alpha)
     _set_cfg_value(cfg, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
     _set_cfg_value(cfg, "eval.csv", False)
     _set_cfg_value(cfg, "experiment.seed", int(seed))
     return cfg
 
 
-def _macsa_run_our_nbco(seed_routes, *, tensors, spec, alpha, adj_target,
+def macsa_run_our_nbco(seed_routes, *, tensors, spec, alpha, adj_target,
                         adj_objective, n_iterations, n_bees, seed, force_cpu):
-    cfg = _macsa_build_our_cfg(spec, alpha=alpha, adj_target=adj_target,
+    cfg = macsa_build_our_cfg(spec, alpha=alpha, adj_target=adj_target,
                                adj_objective=adj_objective,
                                n_iterations=n_iterations, n_bees=n_bees,
                                seed=seed, force_cpu=force_cpu)
@@ -229,7 +229,7 @@ def _macsa_run_our_nbco(seed_routes, *, tensors, spec, alpha, adj_target,
     return as_route_tensor(routes), _t.perf_counter() - t0
 
 
-def _macsa_metric_subtitle(row):
+def macsa_metric_subtitle(row):
     if row is None:
         return ""
     return (f"ATT={float(row['ATT']):.2f}  WMC={float(row['WMC']):.2f}\n"
@@ -237,14 +237,14 @@ def _macsa_metric_subtitle(row):
             f"adj={float(row['adj_vs_seed']):.3f}")
 
 
-def _macsa_relabel_nodes_1indexed(ax):
+def macsa_relabel_nodes_1indexed(ax):
     for txt in ax.texts:
         value = txt.get_text()
         if value.isdigit():
             txt.set_text(str(int(value) + 1))
 
 
-def _macsa_draw_grid(*, routes, rows_by_method, coords, street_adj, demand,
+def macsa_draw_grid(*, routes, rows_by_method, coords, street_adj, demand,
                      diff=False, ref_key=None, ref_routes=None,
                      include_demand=True, include_ref=True, ncol=5,
                      title="MACSA routes", node_size=MACSA_NODE_SIZE):
@@ -260,16 +260,16 @@ def _macsa_draw_grid(*, routes, rows_by_method, coords, street_adj, demand,
                              squeeze=False, constrained_layout=True)
     if ref_routes is None and ref_key is not None and ref_key in routes:
         ref_routes = routes[ref_key]
-    ref_routes_2d = _macsa_2d(ref_routes) if ref_routes is not None else None
+    ref_routes_2d = macsa_2d(ref_routes) if ref_routes is not None else None
     for ax, panel in zip(axes.flat, panels):
         if panel == "__demand__":
             route_plots.plot_demand_graph(ax, demand, coords, street_adj,
                                           title="OD demand",
                                           subtitle="edge color/width = demand")
-            _macsa_relabel_nodes_1indexed(ax)
+            macsa_relabel_nodes_1indexed(ax)
             continue
-        panel_routes = _macsa_2d(routes[panel])
-        subtitle = _macsa_metric_subtitle(rows_by_method.get(panel))
+        panel_routes = macsa_2d(routes[panel])
+        subtitle = macsa_metric_subtitle(rows_by_method.get(panel))
         if diff and ref_routes_2d is not None and panel != ref_key:
             route_plots.plot_route_diff(ax, panel_routes, ref_routes_2d,
                                         coords, street_adj,
@@ -285,14 +285,14 @@ def _macsa_draw_grid(*, routes, rows_by_method, coords, street_adj, demand,
                                              with_overlap_curves=True,
                                              show_node_labels=True,
                                              node_size=node_size)
-        _macsa_relabel_nodes_1indexed(ax)
+        macsa_relabel_nodes_1indexed(ax)
     for ax in axes.flat[len(panels):]:
         ax.axis("off")
     fig.suptitle(title, fontsize=15, fontweight="bold")
     return fig
 
 
-def _macsa_save_fig(fig, stem, suffix):
+def macsa_save_fig(fig, stem, suffix):
     import eval_lib.paper as _paper
     path = PAPER_DIR / f"{_paper.PAPER_PREFIX}{stem}_{suffix}.png"
     fig.savefig(path, dpi=MACSA_DPI, bbox_inches="tight")
@@ -301,18 +301,18 @@ def _macsa_save_fig(fig, stem, suffix):
     return path
 
 
-def _macsa_display_image(path):
+def macsa_display_image(path):
     try:
         display(Image(filename=str(path)))
     except Exception:
         print(path)
 
 
-def _macsa_upsert_row(rows, row):
+def macsa_upsert_row(rows, row):
     return [r for r in rows if str(r.get("method")) != str(row.get("method"))] + [row]
 
 
-def _macsa_select_best_sweep_row(sweep_df, macsa_row):
+def macsa_select_best_sweep_row(sweep_df, macsa_row):
     work = sweep_df.copy()
     work["beats_macsa_rtt_wmc"] = ((work["RTT"].astype(float) < float(macsa_row["RTT"])) &
                                     (work["WMC"].astype(float) < float(macsa_row["WMC"])))
@@ -329,5 +329,5 @@ def _macsa_select_best_sweep_row(sweep_df, macsa_row):
 # ``from experiments.macsa import *`` and keep calling them by their bare names.
 # OUR_MODEL_PATH is deliberately NOT exported so importing here never clobbers
 # the notebook's own training-time OUR_MODEL_PATH.
-__all__ = [n for n in dict(globals()) if n.startswith("MACSA_") or n.startswith("_macsa_")]
+__all__ = [n for n in dict(globals()) if n.startswith("MACSA_") or n.startswith("macsa_")]
 __all__ += ["configure", "config_summary"]
