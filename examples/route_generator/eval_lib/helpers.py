@@ -24,8 +24,7 @@ from connectpt.routes_generator.improvement_learning import (
     summarize_route_action_stats)
 from connectpt.routes_generator.utils import get_eval_cfg
 from connectpt.routes_generator.eval_route_generator import eval_model
-from connectpt.routes_generator.bee_colony import bee_colony
-from connectpt.routes_generator.search.bco_invocation import build_bee_colony_kwargs
+from connectpt.routes_generator.search.seeded_search import run_seeded_bee_colony
 from connectpt.routes_generator.torch_utils import (
     dump_routes, get_batch_tensor_from_routes)
 from connectpt.routes_generator.transit_time_estimator import RouteGenBatchState
@@ -635,25 +634,16 @@ def run_bco(cfg, init_routes, mutation_counts_out=None, *,
     edit_model = build_edit_model(device) if (n_type5_bees > 0 or n_type6_bees > 0 or n_type7_bees > 0) else None
     mutation_counts_out = {} if mutation_counts_out is None else mutation_counts_out
 
-    # The bee_colony parameter contract lives in the library (single source);
-    # this helper only supplies the loaded models + the data/init the run uses.
-    bco_kwargs = build_bee_colony_kwargs(
-        cfg, bee_model=bee_model, edit_model=edit_model,
-        mutation_counts_out=mutation_counts_out)
-    output = lrnu.test_method(
-        bee_colony,
-        dataloader,
-        cfg.eval,
-        OmegaConf.create({"method": "tensor"}),
-        cost_obj,
-        silent=False,   # show bee_colony's per-iteration tqdm (outer 1-sample bar is auto-hidden)
-        device=device,
-        return_routes=True,
+    # The seeded bee-colony run (init from the provided routes, not from scratch)
+    # is owned by the library; this helper only supplies the data/cost/models it
+    # built. silent=False shows bee_colony's per-iteration tqdm (the outer
+    # 1-sample bar is auto-hidden).
+    output = run_seeded_bee_colony(
+        dataloader, cfg.eval, cost_obj, init_routes,
+        search_cfg=cfg, bee_model=bee_model, edit_model=edit_model,
+        mutation_counts_out=mutation_counts_out, device=device, silent=False,
         return_histories=cost_history_out is not None,
-        routes_tensor=init_routes,
-        iteration_callback=iteration_callback,
-        **bco_kwargs,
-    )
+        iteration_callback=iteration_callback)
     if cost_history_out is not None:
         _, _, unserved_demand, metrics, routes, cost_histories = output
         if cost_histories:
