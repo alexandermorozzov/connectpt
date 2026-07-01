@@ -88,7 +88,8 @@ class BeeColonySearchRun(ExperimentRun):
             device=device,
         )
 
-    def run(self, *, dry_run: bool = False) -> SearchArtifact:
+    def run(self, *, dry_run: bool = False, init_routes=None, tensors=None,
+            eval_dims=None) -> SearchArtifact:
         self.setup()
         summary = self.runner.plan_summary()
         if dry_run:
@@ -98,6 +99,20 @@ class BeeColonySearchRun(ExperimentRun):
                 metadata={"dry_run": True,
                           "models_loaded": sorted(self.models),
                           "policies": sorted(self.policies)},
+            )
+
+        # Seeded mode: improve an EXISTING network passed in (init_routes on the
+        # provided graph tensors), the paper contract. eval_dims gives the route
+        # bounds of that network. Falls back to from-scratch benchmark search.
+        if init_routes is not None:
+            if eval_dims is None or tensors is None:
+                raise ValueError("seeded run requires both tensors and eval_dims")
+            routes, unserved, metrics = self.runner.run_seeded(
+                init_routes, tensors, eval_dims=eval_dims)
+            return SearchArtifact(
+                run_name=self.cfg.run.name, output_dir=self.context.output_dir,
+                result={"routes": routes, "unserved": unserved, "metrics": metrics},
+                plan=summary, metadata={"seeded": True},
             )
 
         result = self.runner.run_suite()

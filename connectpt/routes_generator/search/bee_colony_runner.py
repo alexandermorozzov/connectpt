@@ -50,6 +50,40 @@ class BeeColonyRunner:
         )
         return kwargs
 
+    def run_seeded(self, init_routes, tensors, *, eval_dims, n_iterations=None):
+        """Seeded improvement of an EXISTING network (init from ``init_routes``).
+
+        Builds the tensor dataloader from ``tensors``, translates the declarative
+        plan into the flat bee_colony search cfg (:func:`plan_to_search_cfg`) and
+        runs the seeded executor. Reseeds from ``cfg.run.seed`` immediately before
+        the run so the search is reproducible independent of model-init RNG.
+        Returns ``(routes, unserved, metrics)``.
+        """
+        from omegaconf import OmegaConf
+        from torch_geometric.loader import DataLoader
+
+        from ..citygraph_dataset import get_dataset_from_config
+        from ..core.runtime import seed_everything
+        from .plan_kwargs import plan_to_search_cfg
+        from .seeded_search import run_seeded_bee_colony
+
+        dataloader = DataLoader(
+            get_dataset_from_config(OmegaConf.create({"type": "tensor"}), tensors=tensors),
+            batch_size=1)
+        eval_cfg = OmegaConf.create(dict(eval_dims))
+        search = self.cfg.search
+        search_cfg = plan_to_search_cfg(
+            self.plan, n_bees=int(search.n_bees),
+            n_iterations=int(search.n_iterations if n_iterations is None else n_iterations))
+
+        seed_everything(int(self.cfg.run.get("seed", 0)))
+        out = run_seeded_bee_colony(
+            dataloader, eval_cfg, self.cost_obj, init_routes, search_cfg=search_cfg,
+            bee_model=self.models.get("construction"), edit_model=self.models.get("edit"),
+            device=self.device, silent=True)
+        _mean, _std, unserved, metrics, routes = out
+        return routes, unserved, metrics
+
     def run_suite(self):
         """Run the full bee-colony search on the benchmark instance."""
         from omegaconf import OmegaConf

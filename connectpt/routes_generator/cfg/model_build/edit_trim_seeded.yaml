@@ -1,0 +1,11 @@
+# @package _global_
+# Edit/trim model matching the seeded paper runs (golden `our_nbco`): the
+# `bestsofar_feb2023_trim` route generator with allow_trim_below_min=false --
+# the config the flat build_edit_bee_model composes. Distinct from
+# `edit_trim_paper` (allow_trim_below_min=true), which is the bee_type_comparison
+# variant. Same architecture (checkpoints load strict either way); only the
+# trim-below-min action masking differs.
+defaults:
+  - /experiment: standard
+  - /model: bestsofar_feb2023_trim
+  - _self_

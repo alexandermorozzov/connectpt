@@ -44,6 +44,19 @@ def test_our_nbco_bee_set_matches_flat_counts():
     assert plan.needs_edit is True          # type-5 edit bees drive the edit model
 
 
+def test_rpc_path_mix_is_type3():
+    """A random path-combiner rebuild bee maps to type-3 (path_mix_rebuild).
+    bee_colony derives the type-3 count as the remainder, so it is not emitted
+    explicitly -- but the plan classifies it correctly and needs no models."""
+    rpc = CFG / "search" / "bee_sets" / "rpc_trim_extend.yaml"
+    plan = BeeColonyPlan.from_specs(parse_bee_specs(OmegaConf.load(rpc).bees), _policies())
+    assert plan.counts["n_type3"] == 5   # rpc rebuild
+    assert plan.counts["n_type5"] == 5   # edit trim/extend
+    assert plan.counts["n_type1"] == 0 and plan.counts["n_type4"] == 0
+    assert plan.needs_construction is False  # type-3 is heuristic, no model
+    assert plan.needs_edit is True
+
+
 def test_neural_rebuild_is_type1_not_type4():
     """A neural construction rebuild bee must map to type-1 (full rebuild), not
     type-4 (single construction-extend step)."""

@@ -81,7 +81,14 @@ class BeeColonyPlan:
             return "n_type1"
         if spec.operator == "heuristic_mutation":
             kind = (spec.mutation_kind or spec.route_selection or "").lower()
-            return "n_type2" if "shorten" in kind else "n_type1"
+            if "shorten" in kind:
+                return "n_type2"
+            # random path-combiner rebuild (bee_colony's type-3 -- the RPC
+            # construct used by the ablation variants). bee_colony derives the
+            # type-3 count as the remainder, so it is not emitted explicitly.
+            if "path_mix" in kind or "path_combin" in kind or "rpc" in kind:
+                return "n_type3"
+            return "n_type1"
         if spec.operator == "neural_route_action":
             role = policies[spec.policy].role
             if role == "construction":
