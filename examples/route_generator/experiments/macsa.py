@@ -139,21 +139,13 @@ def _macsa_read_routes_0indexed(path):
 
 
 def _macsa_pad_routes(routes, n_routes, max_route_len):
-    routes = as_route_tensor(routes).long()
-    if routes.ndim == 3:
-        routes = routes[0]
-    if routes.shape[0] != int(n_routes):
-        raise ValueError(f"Expected {n_routes} routes, got {tuple(routes.shape)}")
-    if routes.shape[-1] > int(max_route_len):
-        raise ValueError(f"Route width {routes.shape[-1]} exceeds {max_route_len}")
-    if routes.shape[-1] < int(max_route_len):
-        routes = torch.nn.functional.pad(routes, (0, int(max_route_len) - routes.shape[-1]), value=-1)
-    return routes
+    from ._common import pad_routes_to
+    return pad_routes_to(routes, n_routes, max_route_len, strict=True)
 
 
 def _macsa_2d(routes):
-    routes = as_route_tensor(routes)
-    return routes[0] if routes.ndim == 3 else routes
+    from ._common import route_2d
+    return route_2d(routes)
 
 
 def _macsa_build_spec(raw_routes, n_nodes):

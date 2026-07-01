@@ -59,23 +59,9 @@ def copytier_config(cfg) -> "CopyTierConfig":
 
 def _pad_routes_to(routes, n_routes, max_route_len):
     """Pad/clip a route tensor to (n_routes, max_route_len) with -1 fill.
-    Shared by dataset generation and the clean-LC baseline (was duplicated)."""
-    import torch
-
-    from eval_lib import as_route_tensor
-
-    t = as_route_tensor(routes).long()
-    if t.ndim == 3:
-        t = t[0]
-    if t.shape[0] < n_routes:
-        t = torch.cat([t, torch.full((n_routes - t.shape[0], t.shape[1]), -1, dtype=t.dtype)], 0)
-    else:
-        t = t[:n_routes]
-    if t.shape[1] < max_route_len:
-        t = torch.cat([t, torch.full((t.shape[0], max_route_len - t.shape[1]), -1, dtype=t.dtype)], 1)
-    elif t.shape[1] > max_route_len:
-        t = t[:, :max_route_len]
-    return t
+    Shared by dataset generation and the clean-LC baseline."""
+    from ._common import pad_routes_to
+    return pad_routes_to(routes, n_routes, max_route_len)
 
 
 def _graph_tensors(g):
