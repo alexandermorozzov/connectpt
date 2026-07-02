@@ -177,3 +177,47 @@ def test_seeded_classic_bco_matches_flat():
 
     assert routes_b.shape == routes_a.shape
     assert torch.equal(routes_b, routes_a), "seeded classic BCO diverged from flat"
+
+
+def test_seeded_neural_bco_matches_flat():
+    """Neural BCO (type-1 neural rebuild + type-2 random edit, construction model
+    only) via BeeColonySearchRun.run(seeded) == flat nbco_variants/neural_bco_mumford0
+    bit-for-bit. Completes the E1 method parity gate (neural_bco + our_nbco)."""
+    if not CONSTRUCTION_MODEL_WEIGHTS_PATH.exists():
+        pytest.skip("construction weights not present")
+    from eval_lib.baselines import BENCHMARK_SPECS, load_benchmark_tensors
+    from eval_lib.experiments import load_experiment_cfg
+    from eval_lib.paper import UNIFIED_ADJ, bco_cfg_set, set_cfg_value
+
+    spec = next(s for s in BENCHMARK_SPECS if s["city"] == "Mumford0")
+    tensors = load_benchmark_tensors("Mumford0")
+    R = _init_routes(spec, tensors)
+    eval_dims = {"n_routes": spec["n_routes"], "min_route_len": spec["min_route_len"],
+                 "max_route_len": spec["max_route_len"]}
+
+    with initialize_config_dir(config_dir=str(LIB_CFG), version_base=None):
+        cfg = compose(config_name="experiments/seeded/neural_bco_mumford0",
+                      overrides=[f"search.n_iterations={N_ITERS}"])
+    art = BeeColonySearchRun(cfg).run(init_routes=R, tensors=tensors, eval_dims=eval_dims)
+    routes_b = _as(art.result["routes"])
+
+    device = torch.device("cpu")
+    cost = CostFactory.build_unified("rtt_wmc_no_demand", for_training=False); cost.to(device)
+    construction = RouteModelFactory.build_construction_model_by_name("construction")
+    CheckpointStore.load_model_weights(construction, CONSTRUCTION_MODEL_WEIGHTS_PATH,
+                                       strict=True, map_location=device)
+    construction.to(device).eval()
+    dl = DataLoader(get_dataset_from_config(OmegaConf.create({"type": "tensor"}), tensors=tensors),
+                    batch_size=1)
+    flat = load_experiment_cfg("nbco_variants/neural_bco_mumford0")
+    for k, v in eval_dims.items():
+        set_cfg_value(flat, f"eval.{k}", int(v))
+    bco_cfg_set(flat, n_iterations=N_ITERS, **UNIFIED_ADJ)
+    set_cfg_value(flat, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
+    seed_everything(0)
+    out = run_seeded_bee_colony(dl, OmegaConf.create(eval_dims), cost, R, search_cfg=flat,
+                                bee_model=construction, edit_model=None, device=device, silent=True)
+    routes_a = _as(out[4])
+
+    assert routes_b.shape == routes_a.shape
+    assert torch.equal(routes_b, routes_a), "seeded neural BCO diverged from flat"
