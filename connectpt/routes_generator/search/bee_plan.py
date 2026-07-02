@@ -93,8 +93,11 @@ class BeeColonyPlan:
             role = policies[spec.policy].role
             if role == "construction":
                 return "n_type4"
+            # edit role: the type5/type6 split is EXTEND presence, not halt. A
+            # trim-only bee (no extend) is type6 and may still halt
+            # (type6_allow_halt); a bee that can extend is type5.
             actions = set(spec.allowed_actions or [])
-            if actions and actions <= {"trim_start", "trim_end"}:
+            if "extend" not in actions:
                 return "n_type6"
             return "n_type5"
         raise ValueError(f"cannot classify bee operator {spec.operator!r}")

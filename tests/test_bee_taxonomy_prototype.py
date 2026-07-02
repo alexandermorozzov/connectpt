@@ -173,3 +173,26 @@ def test_declarative_our_nbco_seeded_matches_flat_run():
     routes_decl = run(declarative)
     assert routes_flat.shape == routes_decl.shape
     assert torch.equal(routes_flat, routes_decl), "declarative our_nbco diverged from flat"
+
+
+# --- U4: every paper bee-mix preset matches its flat nbco_variants counts -----
+@pytest.mark.parametrize("bee_set,flat", [
+    ("classic_bco_paper", "classic_bco_mumford0"),
+    ("neural_bco", "neural_bco_mumford0"),
+    ("our_nbco", "our_nbco_mumford0"),
+    ("trim12_extend12", "trim12_extend12_mumford0"),
+])
+def test_paper_bee_sets_match_flat_counts(bee_set, flat):
+    specs = parse_bee_specs(OmegaConf.load(CFG / "search" / "bee_sets" / f"{bee_set}.yaml").bees)
+    plan = BeeColonyPlan.from_specs(specs, _policies())
+    fv = OmegaConf.load(CFG / "experiments" / "nbco_variants" / f"{flat}.yaml")
+
+    expected = {f"n_type{i}": int(fv.get(f"n_type{i}_bees", 0)) for i in range(1, 8)}
+    assert plan.counts == expected, (bee_set, plan.counts, expected)
+
+    # halt flags must match the flat variant for every ACTIVE edit type (4-7);
+    # inactive types are irrelevant to the run (0 bees) so are not compared.
+    for i in range(4, 8):
+        if plan.counts[f"n_type{i}"] > 0:
+            assert plan.allow_halt[f"type{i}_allow_halt"] == bool(fv.get(f"type{i}_allow_halt", True)), \
+                (bee_set, f"type{i}_allow_halt")
