@@ -72,9 +72,11 @@ class BeeColonyRunner:
             batch_size=1)
         eval_cfg = OmegaConf.create(dict(eval_dims))
         search = self.cfg.search
+        acceptance = search.get("acceptance")
         search_cfg = plan_to_search_cfg(
             self.plan, n_bees=int(search.n_bees),
-            n_iterations=int(search.n_iterations if n_iterations is None else n_iterations))
+            n_iterations=int(search.n_iterations if n_iterations is None else n_iterations),
+            acceptance=None if acceptance is None else dict(acceptance))
 
         seed_everything(int(self.cfg.run.get("seed", 0)))
         out = run_seeded_bee_colony(

@@ -16,10 +16,21 @@ from omegaconf import OmegaConf
 from ..objectives import load_bco_algo_config, load_unified_objective
 
 
-def plan_to_search_cfg(plan, *, n_bees: int, n_iterations: int):
-    """Flat search cfg equivalent to a BeeColonyPlan, for run_seeded_bee_colony."""
+def plan_to_search_cfg(plan, *, n_bees: int, n_iterations: int, acceptance=None):
+    """Flat search cfg equivalent to a BeeColonyPlan, for run_seeded_bee_colony.
+
+    ``acceptance`` is an optional worse-accept schedule (the ``search.acceptance``
+    config group: worse_accept_* / worse_selection_*). When omitted, the BCO
+    algorithm-config defaults (``cfg/bco_mumford.yaml``) are used -- so callers
+    that don't compose an acceptance group are unaffected.
+    """
     obj = load_unified_objective()
     bco = load_bco_algo_config()
+    acc = dict(acceptance) if acceptance is not None else {}
+
+    def _acc(key):
+        return acc[key] if key in acc else getattr(bco, key)
+
     counts = plan.counts
     node = {
         "n_bees": int(n_bees),
@@ -39,14 +50,14 @@ def plan_to_search_cfg(plan, *, n_bees: int, n_iterations: int):
         "adjustment_degree_gap": obj.adj_gap,
         "adjustment_degree_mode": obj.adj_mode,
         # worse-accept / selection schedule + ignore-max-len -- BCO algo config
-        "worse_accept_temperature": float(bco.worse_accept_temperature),
-        "worse_accept_decay": float(bco.worse_accept_decay),
-        "worse_accept_min_temperature": float(bco.worse_accept_min_temperature),
-        "worse_selection_temperature": float(bco.worse_selection_temperature),
-        "worse_selection_decay": float(bco.worse_selection_decay),
-        "worse_selection_min_temperature": float(bco.worse_selection_min_temperature),
-        "worse_selection_uniform_mix": float(bco.worse_selection_uniform_mix),
-        "worse_selection_elite_count": int(bco.worse_selection_elite_count),
+        "worse_accept_temperature": float(_acc("worse_accept_temperature")),
+        "worse_accept_decay": float(_acc("worse_accept_decay")),
+        "worse_accept_min_temperature": float(_acc("worse_accept_min_temperature")),
+        "worse_selection_temperature": float(_acc("worse_selection_temperature")),
+        "worse_selection_decay": float(_acc("worse_selection_decay")),
+        "worse_selection_min_temperature": float(_acc("worse_selection_min_temperature")),
+        "worse_selection_uniform_mix": float(_acc("worse_selection_uniform_mix")),
+        "worse_selection_elite_count": int(_acc("worse_selection_elite_count")),
         "ignore_type4_max_route_len": bool(bco.ignore_type4_max_route_len),
         "ignore_type5_max_route_len": bool(bco.ignore_type5_max_route_len),
         "ignore_type6_max_route_len": bool(bco.ignore_type6_max_route_len),

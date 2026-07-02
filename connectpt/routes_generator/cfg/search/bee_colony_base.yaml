@@ -4,6 +4,7 @@
 defaults:
   - /objective: rtt_wmc_no_demand
   - /data: mandl_benchmark
+  - /search/acceptance: greedy
   - _self_
 
 run:
