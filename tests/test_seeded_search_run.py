@@ -139,3 +139,41 @@ def test_run_sweep_varies_alpha_per_point():
     # cost left at the last point (alpha=1.0 -> route_time_weight=1, conn=0)
     assert run.cost_obj.route_time_weight == 1.0
     assert run.cost_obj.median_connectivity_weight == 0.0
+
+
+def test_seeded_classic_bco_matches_flat():
+    """Heuristic classic BCO (no neural models) via BeeColonySearchRun == flat
+    nbco_variants/classic_bco_mumford0, seeded. Validates the type1-heuristic +
+    type2 path end-to-end (no weights needed)."""
+    from eval_lib.baselines import BENCHMARK_SPECS, load_benchmark_tensors
+    from eval_lib.experiments import load_experiment_cfg
+    from eval_lib.paper import UNIFIED_ADJ, bco_cfg_set, set_cfg_value
+
+    spec = next(s for s in BENCHMARK_SPECS if s["city"] == "Mumford0")
+    tensors = load_benchmark_tensors("Mumford0")
+    R = _init_routes(spec, tensors)
+    eval_dims = {"n_routes": spec["n_routes"], "min_route_len": spec["min_route_len"],
+                 "max_route_len": spec["max_route_len"]}
+
+    with initialize_config_dir(config_dir=str(LIB_CFG), version_base=None):
+        cfg = compose(config_name="experiments/seeded/classic_bco_mumford0",
+                      overrides=[f"search.n_iterations={N_ITERS}"])
+    art = BeeColonySearchRun(cfg).run(init_routes=R, tensors=tensors, eval_dims=eval_dims)
+    routes_b = _as(art.result["routes"])
+
+    cost = CostFactory.build_unified("rtt_wmc_no_demand", for_training=False)
+    cost.to(torch.device("cpu"))
+    dl = DataLoader(get_dataset_from_config(OmegaConf.create({"type": "tensor"}), tensors=tensors),
+                    batch_size=1)
+    flat = load_experiment_cfg("nbco_variants/classic_bco_mumford0")
+    for k, v in eval_dims.items():
+        set_cfg_value(flat, f"eval.{k}", int(v))
+    bco_cfg_set(flat, n_iterations=N_ITERS, **UNIFIED_ADJ)
+    set_cfg_value(flat, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
+    seed_everything(0)
+    out = run_seeded_bee_colony(dl, OmegaConf.create(eval_dims), cost, R, search_cfg=flat,
+                                bee_model=None, edit_model=None, device=torch.device("cpu"), silent=True)
+    routes_a = _as(out[4])
+
+    assert routes_b.shape == routes_a.shape
+    assert torch.equal(routes_b, routes_a), "seeded classic BCO diverged from flat"
