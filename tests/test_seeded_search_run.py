@@ -109,3 +109,33 @@ def test_seeded_beecolonysearchrun_matches_flat_our_nbco():
 
     assert routes_b.shape == routes_a.shape
     assert torch.equal(routes_b, routes_a), "seeded BeeColonySearchRun diverged from flat our_nbco"
+
+
+def test_run_sweep_varies_alpha_per_point():
+    """run_sweep reconfigures the RTT/WMC trade-off per point and runs one seeded
+    search each -- distinct alphas give distinct route sets, and the cost is left
+    reconfigured to the last swept point."""
+    if not (CONSTRUCTION_MODEL_WEIGHTS_PATH.exists() and EDIT_CKPT.exists()):
+        pytest.skip("construction/edit weights not present")
+    from eval_lib.baselines import BENCHMARK_SPECS, load_benchmark_tensors
+
+    spec = next(s for s in BENCHMARK_SPECS if s["city"] == "Mumford0")
+    tensors = load_benchmark_tensors("Mumford0")
+    R = _init_routes(spec, tensors)
+    eval_dims = {"n_routes": spec["n_routes"], "min_route_len": spec["min_route_len"],
+                 "max_route_len": spec["max_route_len"]}
+
+    with initialize_config_dir(config_dir=str(LIB_CFG), version_base=None):
+        cfg = compose(config_name="experiments/seeded/our_nbco_mumford0",
+                      overrides=[f"search.n_iterations={N_ITERS}"])
+    run = BeeColonySearchRun(cfg)
+    run.setup()
+    rows = run.runner.run_sweep(R, tensors, eval_dims=eval_dims,
+                                alpha_grid=[0.0, 1.0], adj_targets=[0.2])
+
+    assert [r["alpha"] for r in rows] == [0.0, 1.0]
+    r0, r1 = _as(rows[0]["routes"]), _as(rows[1]["routes"])
+    assert not torch.equal(r0, r1), "alpha=0 and alpha=1 gave identical routes"
+    # cost left at the last point (alpha=1.0 -> route_time_weight=1, conn=0)
+    assert run.cost_obj.route_time_weight == 1.0
+    assert run.cost_obj.median_connectivity_weight == 0.0

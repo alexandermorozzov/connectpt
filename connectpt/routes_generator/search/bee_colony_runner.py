@@ -50,14 +50,20 @@ class BeeColonyRunner:
         )
         return kwargs
 
-    def run_seeded(self, init_routes, tensors, *, eval_dims, n_iterations=None):
+    def run_seeded(self, init_routes, tensors, *, eval_dims, n_iterations=None,
+                   alpha=None, adj_target=None):
         """Seeded improvement of an EXISTING network (init from ``init_routes``).
 
         Builds the tensor dataloader from ``tensors``, translates the declarative
         plan into the flat bee_colony search cfg (:func:`plan_to_search_cfg`) and
         runs the seeded executor. Reseeds from ``cfg.run.seed`` immediately before
         the run so the search is reproducible independent of model-init RNG.
-        Returns ``(routes, unserved, metrics)``.
+
+        ``alpha`` (RTT/WMC trade-off) reconfigures the cost weights in place
+        (route_time_weight=alpha, median_connectivity_weight=1-alpha), matching the
+        notebook's per-sweep-point weight override; ``adj_target`` overrides the
+        adjustment-degree target the bee-colony optimizes. Returns
+        ``(routes, unserved, metrics)``.
         """
         from omegaconf import OmegaConf
         from torch_geometric.loader import DataLoader
@@ -66,6 +72,10 @@ class BeeColonyRunner:
         from ..core.runtime import seed_everything
         from .plan_kwargs import plan_to_search_cfg
         from .seeded_search import run_seeded_bee_colony
+
+        if alpha is not None:
+            self.cost_obj.route_time_weight = float(alpha)
+            self.cost_obj.median_connectivity_weight = float(1.0 - alpha)
 
         dataloader = DataLoader(
             get_dataset_from_config(OmegaConf.create({"type": "tensor"}), tensors=tensors),
@@ -77,6 +87,8 @@ class BeeColonyRunner:
             self.plan, n_bees=int(search.n_bees),
             n_iterations=int(search.n_iterations if n_iterations is None else n_iterations),
             acceptance=None if acceptance is None else dict(acceptance))
+        if adj_target is not None:
+            search_cfg.adjustment_degree_target = float(adj_target)
 
         seed_everything(int(self.cfg.run.get("seed", 0)))
         out = run_seeded_bee_colony(
@@ -85,6 +97,25 @@ class BeeColonyRunner:
             device=self.device, silent=True)
         _mean, _std, unserved, metrics, routes = out
         return routes, unserved, metrics
+
+    def run_sweep(self, init_routes, tensors, *, eval_dims, alpha_grid=(None,),
+                  adj_targets=(None,), n_iterations=None):
+        """Run a seeded (alpha x adj_target) sweep -- one seeded search per point.
+
+        Replaces the notebook's ``run_experiment`` alpha/adj loop: for each
+        (alpha, adj_target) it reconfigures the cost trade-off + adjustment target
+        and runs the seeded search from the shared initial network. Returns a list
+        of ``{"alpha", "adj_target", "routes", "unserved", "metrics"}`` rows.
+        """
+        rows = []
+        for alpha in alpha_grid:
+            for adj_target in adj_targets:
+                routes, unserved, metrics = self.run_seeded(
+                    init_routes, tensors, eval_dims=eval_dims,
+                    n_iterations=n_iterations, alpha=alpha, adj_target=adj_target)
+                rows.append({"alpha": alpha, "adj_target": adj_target,
+                             "routes": routes, "unserved": unserved, "metrics": metrics})
+        return rows
 
     def run_suite(self):
         """Run the full bee-colony search on the benchmark instance."""
