@@ -71,7 +71,8 @@ def _init_routes(spec, tensors):
 
 def _run_builder_path(spec, tensors, R, use_neural):
     from eval_lib.helpers import build_bco_cfg, run_bco
-    from eval_lib.paper import bco_cfg_set, UNIFIED_ADJ, set_cfg_value
+    from eval_lib.experiments import bco_cfg_set, set_cfg_value
+    from eval_lib.paper import UNIFIED_ADJ
 
     cfg = build_bco_cfg("parity_builder", spec["n_routes"], spec["min_route_len"],
                         spec["max_route_len"], use_neural_bees=use_neural, n_bees=10,

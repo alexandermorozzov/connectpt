@@ -131,7 +131,8 @@ def test_declarative_our_nbco_seeded_matches_flat_run():
         sys.path.insert(0, route_examples)
     from eval_lib.baselines import load_benchmark_tensors, BENCHMARK_SPECS
     from eval_lib.experiments import load_experiment_cfg
-    from eval_lib.paper import bco_cfg_set, UNIFIED_ADJ, set_cfg_value
+    from eval_lib.experiments import bco_cfg_set, set_cfg_value
+    from eval_lib.paper import UNIFIED_ADJ
 
     device = torch.device("cpu")
     spec = next(s for s in BENCHMARK_SPECS if s["city"] == _CITY)

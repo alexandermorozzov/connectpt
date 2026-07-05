@@ -72,7 +72,8 @@ def test_seeded_beecolonysearchrun_matches_flat_our_nbco():
         pytest.skip("construction/edit weights not present")
     from eval_lib.baselines import BENCHMARK_SPECS, load_benchmark_tensors
     from eval_lib.experiments import load_experiment_cfg
-    from eval_lib.paper import UNIFIED_ADJ, bco_cfg_set, set_cfg_value
+    from eval_lib.experiments import bco_cfg_set, set_cfg_value
+    from eval_lib.paper import UNIFIED_ADJ
 
     spec = next(s for s in BENCHMARK_SPECS if s["city"] == "Mumford0")
     tensors = load_benchmark_tensors("Mumford0")
@@ -147,7 +148,8 @@ def test_seeded_classic_bco_matches_flat():
     type2 path end-to-end (no weights needed)."""
     from eval_lib.baselines import BENCHMARK_SPECS, load_benchmark_tensors
     from eval_lib.experiments import load_experiment_cfg
-    from eval_lib.paper import UNIFIED_ADJ, bco_cfg_set, set_cfg_value
+    from eval_lib.experiments import bco_cfg_set, set_cfg_value
+    from eval_lib.paper import UNIFIED_ADJ
 
     spec = next(s for s in BENCHMARK_SPECS if s["city"] == "Mumford0")
     tensors = load_benchmark_tensors("Mumford0")
@@ -187,7 +189,8 @@ def test_seeded_neural_bco_matches_flat():
         pytest.skip("construction weights not present")
     from eval_lib.baselines import BENCHMARK_SPECS, load_benchmark_tensors
     from eval_lib.experiments import load_experiment_cfg
-    from eval_lib.paper import UNIFIED_ADJ, bco_cfg_set, set_cfg_value
+    from eval_lib.experiments import bco_cfg_set, set_cfg_value
+    from eval_lib.paper import UNIFIED_ADJ
 
     spec = next(s for s in BENCHMARK_SPECS if s["city"] == "Mumford0")
     tensors = load_benchmark_tensors("Mumford0")

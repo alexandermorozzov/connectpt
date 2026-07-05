@@ -43,17 +43,13 @@ from eval_lib.context import ARTIFACTS_DIR, DATASETS_DIR  # noqa: E402
 from eval_lib.helpers import as_route_tensor  # noqa: E402
 from eval_lib.context import EDIT_MODEL_WEIGHTS_PATH  # noqa: E402
 from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg  # noqa: E402
-from connectpt.routes_generator.search.bco_config import compose_bco_cfg as build_bco_cfg  # noqa: E402
+from eval_lib.experiments import compose_experiment_cfg, scoring_cfg  # noqa: E402
 from eval_lib.paper import (  # noqa: E402
     UNIFIED_ADJ,
     adj_vs_init,
-    bco_cfg_set,
-    eval_routes_cfg,
     paper_row,
     save_paper_routes,
     save_paper_table,
-    set_cfg_value,
-    unify_weights,
 )
 from connectpt.routes_generator.objectives import load_unified_objective  # noqa: E402
 CONNECTIVITY_MODE = load_unified_objective().connectivity_mode
@@ -90,21 +86,6 @@ def our_method_label(alpha: float, adj_objective: str, adj_target_label: str) ->
         f"Our NBCO (alpha={float(alpha):g}, "
         f"adj={adj_objective}, target={adj_target_label})"
     )
-
-
-def alpha_weights(alpha: float) -> dict:
-    alpha = float(alpha)
-    return {
-        "demand_time_weight": 0.0,
-        "route_time_weight": alpha,
-        "median_connectivity_weight": 1.0 - alpha,
-    }
-
-
-def set_cfg_alpha_weights(cfg, alpha: float):
-    for key, value in alpha_weights(alpha).items():
-        set_cfg_value(cfg, f"experiment.cost_function.kwargs.{key}", float(value))
-    return cfg
 
 
 def read_routes_0indexed(path: Path) -> torch.Tensor:
@@ -177,11 +158,7 @@ def score_fixed_routes(
     adj_objective: str = "target",
     alpha: float = 0.5,
 ) -> tuple[dict, torch.Tensor]:
-    cfg = unify_weights(eval_routes_cfg(SCENARIO_NAME, spec))
-    set_cfg_alpha_weights(cfg, alpha)
-    set_cfg_value(cfg, "experiment.cpu", True)
-    set_cfg_value(cfg, "eval.csv", False)
-    set_cfg_value(cfg, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
+    cfg = scoring_cfg(SCENARIO_NAME, spec, cpu=True, csv=False, alpha=alpha)
     adj_kwargs = dict(
         UNIFIED_ADJ,
         adjustment_degree_target=float(adj_target),
@@ -222,58 +199,27 @@ def build_our_nbco_cfg(
     spec: dict,
     adj_target: float,
     n_iterations: int,
-    n_bees: int,
     seed: int,
     force_cpu: bool,
     alpha: float,
     adj_objective: str,
 ):
-    """Mirror paper_combined's Our NBCO: GNN rebuild bees + trim/extend bees."""
-    n_bees = int(n_bees)
-    rebuild_bees = max(1, n_bees // 2)
-    trim_extend_bees = n_bees - rebuild_bees
-    cfg = build_bco_cfg(
+    """Mirror paper_combined's Our NBCO: GNN rebuild bees + trim/extend bees.
+
+    The bee composition (5 rebuild + 5 trim/extend) and worse-accept schedule
+    live in the captured ``cfg/experiments/macsa/our_nbco_mandl8.yaml`` preset;
+    only the sweep point and run identity are applied here.
+    """
+    return compose_experiment_cfg(
+        "macsa/our_nbco_mandl8", bounds=spec,
         run_name=f"{SCENARIO_NAME}_macsa_target_our_nbco_gnn_rebuild_trimext",
-        n_routes=spec["n_routes"],
-        min_route_len=spec["min_route_len"],
-        max_route_len=spec["max_route_len"],
-        use_neural_bees=True,
-        n_bees=n_bees,
-        n_type1_bees=rebuild_bees,
-        n_type2_bees=0,
-        n_type4_bees=0,
-        n_type5_bees=trim_extend_bees,
-        n_type6_bees=0,
-        n_type7_bees=0,
-        force_cpu=bool(force_cpu),
-        connectivity_mode=CONNECTIVITY_MODE,
-        worse_accept_temperature=0.02,
-        worse_accept_decay=0.985,
-        worse_accept_min_temperature=0.001,
-        worse_selection_temperature=0.02,
-        worse_selection_decay=0.985,
-        worse_selection_uniform_mix=0.10,
-        worse_selection_elite_count=2,
-        **alpha_weights(alpha),
-    )
-    bco_cfg_set(
-        cfg,
+        seed=int(seed), cpu=bool(force_cpu), alpha=alpha,
         n_iterations=int(n_iterations),
-        type4_allow_halt=False,
-        type5_allow_halt=False,
-        type6_allow_halt=False,
-        type7_allow_halt=False,
-        **dict(
+        adj=dict(
             UNIFIED_ADJ,
             adjustment_degree_target=float(adj_target),
             adjustment_degree_objective=str(adj_objective),
-        ),
-    )
-    set_cfg_alpha_weights(cfg, alpha)
-    set_cfg_value(cfg, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
-    set_cfg_value(cfg, "eval.csv", False)
-    set_cfg_value(cfg, "experiment.seed", int(seed))
-    return cfg
+        ))
 
 
 def load_cached_routes(path: Path, method: str) -> torch.Tensor | None:
@@ -333,7 +279,6 @@ def run_our_nbco(
     spec: dict,
     adj_target: float,
     n_iterations: int,
-    n_bees: int,
     seed: int,
     force_cpu: bool,
     alpha: float,
@@ -345,7 +290,6 @@ def run_our_nbco(
         spec=spec,
         adj_target=adj_target,
         n_iterations=n_iterations,
-        n_bees=n_bees,
         seed=seed,
         force_cpu=force_cpu,
         alpha=alpha,
@@ -503,7 +447,6 @@ def parse_args() -> argparse.Namespace:
         help="Adjustment target for Our NBCO. Default: actual MACSA adj.",
     )
     parser.add_argument("--bco-iterations", type=int, default=500)
-    parser.add_argument("--bco-bees", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--edit-checkpoint",
@@ -640,7 +583,6 @@ def main() -> None:
                     spec=spec,
                     adj_target=our_adj_target,
                     n_iterations=int(args.bco_iterations),
-                    n_bees=int(args.bco_bees),
                     seed=int(args.seed),
                     force_cpu=bool(args.cpu),
                     alpha=alpha,

@@ -67,24 +67,26 @@ def nbco_adj_target(ekb_cfg):
     return float(t) if t is not None else float(load_unified_objective().adj_target)
 
 
-def _ekb_our_nbco_cfg(case, *, run_name_suffix, seed, force_cpu):
+def _ekb_our_nbco_cfg(case, *, run_name_suffix, seed, force_cpu,
+                      seq_bees=None, n_iterations=None, adj_target=None,
+                      alpha=None):
     """Config-first Our-NBCO (GNN rebuild + trim/extend) cfg for the EKB case.
 
-    Loads the captured ``cfg/experiments/ekb/our_nbco_ekb.yaml`` and applies the
-    per-run knobs (route bounds from the case spec, run name, seed, cpu). This
-    replaces the notebook's context-bound ``experiments.our_model_cfg`` builder;
-    the composed config is byte-identical to that builder's output (verified).
+    Loads the captured ``cfg/experiments/ekb/our_nbco_ekb.yaml`` and applies
+    ONLY the allowed runtime values through the single composition point:
+    data-derived route bounds, run identity (run name / seed / cpu / seq),
+    and the sweep point (iterations / adjustment target / alpha).
     """
-    from eval_lib.experiments import load_experiment_cfg
-    from eval_lib.paper import set_cfg_value
-    cfg = load_experiment_cfg("ekb/our_nbco_ekb")
-    for key in ("n_routes", "min_route_len", "max_route_len"):
-        set_cfg_value(cfg, f"eval.{key}", int(case.spec[key]))
-    set_cfg_value(cfg, "run_name",
-                  f"EKB_{run_name_suffix}our_nbco_gnn_rebuild_trimext")
-    set_cfg_value(cfg, "experiment.seed", int(seed))
-    set_cfg_value(cfg, "experiment.cpu", bool(force_cpu))
-    return cfg
+    from eval_lib.experiments import compose_experiment_cfg
+    from eval_lib.paper import UNIFIED_ADJ
+    adj = (dict(UNIFIED_ADJ, adjustment_degree_target=float(adj_target))
+           if adj_target is not None else None)
+    return compose_experiment_cfg(
+        "ekb/our_nbco_ekb", bounds=case.spec,
+        run_name=f"EKB_{run_name_suffix}our_nbco_gnn_rebuild_trimext",
+        seed=int(seed), cpu=bool(force_cpu), seq_bees=seq_bees,
+        n_iterations=n_iterations, adj=adj, alpha=alpha,
+        weighted_connectivity=True if adj is not None else None)
 
 
 def score_routes(case: EKBCase, routes, tag, *, adj_target, force_cpu,
@@ -96,19 +98,13 @@ def score_routes(case: EKBCase, routes, tag, *, adj_target, force_cpu,
     defaults to the case's initial network.
     """
     from eval_lib.baselines import _run_baseline
-    from eval_lib.paper import (UNIFIED_ADJ, eval_routes_cfg, set_cfg_value,
-                                unify_weights)
+    from eval_lib.experiments import scoring_cfg
+    from eval_lib.paper import UNIFIED_ADJ
     from connectpt.routes_generator.objectives import load_unified_objective
     CONNECTIVITY_MODE = load_unified_objective().connectivity_mode
 
-    cfg = unify_weights(eval_routes_cfg("EKB", case.spec))
-    set_cfg_value(cfg, "run_name", f"EKB_{case.case_tag}_{tag}")
-    set_cfg_value(cfg, "experiment.cpu", bool(force_cpu))
-    set_cfg_value(cfg, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
-    if alpha is not None:
-        set_cfg_value(cfg, "experiment.cost_function.kwargs.route_time_weight", float(alpha))
-        set_cfg_value(cfg, "experiment.cost_function.kwargs.median_connectivity_weight",
-                      float(1.0 - alpha))
+    cfg = scoring_cfg("EKB", case.spec, run_name=f"EKB_{case.case_tag}_{tag}",
+                      cpu=bool(force_cpu), alpha=alpha)
     return _run_baseline(
         None, cfg, routes, f"EKB_{case.case_tag}_{tag}_", {}, tensors=case.tensors,
         use_weighted_connectivity=True, connectivity_mode=CONNECTIVITY_MODE,
@@ -216,9 +212,9 @@ def run_ekb_nbco(case: EKBCase, *, ekb_cfg, n_bees, seed,
     import torch
 
     from eval_lib import as_route_tensor
-    from eval_lib.paper import (PAPER_DIR, UNIFIED_ADJ, append_paper_row,
-                                bco_cfg_set, ravel_hist, reset_paper_table,
-                                save_paper_routes, save_paper_table, set_cfg_value)
+    from eval_lib.paper import (PAPER_DIR, append_paper_row, ravel_hist,
+                                reset_paper_table, save_paper_routes,
+                                save_paper_table)
     from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
 
     ekb = ekb_cfg
@@ -255,12 +251,8 @@ def run_ekb_nbco(case: EKBCase, *, ekb_cfg, n_bees, seed,
     print(f"[EKB NBCO] running {final_label} on {case.case_tag}: "
           f"iters={n_iterations}, target={adj_target} ...", flush=True)
     cfg = _ekb_our_nbco_cfg(case, run_name_suffix=f"{case.case_tag}_",
-                            seed=int(seed), force_cpu=force_cpu)
-    set_cfg_value(cfg, "experiment.cpu", bool(force_cpu))
-    set_cfg_value(cfg, "process_neural_bees_sequentially", seq)
-    bco_cfg_set(cfg, n_iterations=n_iterations,
-                **dict(UNIFIED_ADJ, adjustment_degree_target=float(adj_target)))
-    set_cfg_value(cfg, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
+                            seed=int(seed), force_cpu=force_cpu, seq_bees=seq,
+                            n_iterations=n_iterations, adj_target=adj_target)
 
     # Live checkpoint: overwrite final_ekb_best_solution with the current BCO
     # incumbent on every improvement, so stopping early never loses the best.
@@ -350,9 +342,8 @@ def run_ekb_alpha_sweep(case: EKBCase, *, ekb_cfg, n_bees, seed, ctx):
     from tqdm.auto import tqdm
 
     from eval_lib import as_route_tensor
-    from eval_lib.paper import (PAPER_DIR, UNIFIED_ADJ, append_paper_row,
-                                bco_cfg_set, reset_paper_table, save_paper_routes,
-                                save_paper_table, set_cfg_value)
+    from eval_lib.paper import (PAPER_DIR, append_paper_row, reset_paper_table,
+                                save_paper_routes, save_paper_table)
     from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
 
     ekb = ekb_cfg
@@ -400,15 +391,8 @@ def run_ekb_alpha_sweep(case: EKBCase, *, ekb_cfg, n_bees, seed, ctx):
 
         cfg = _ekb_our_nbco_cfg(
             case, run_name_suffix=f"{case.case_tag}_alpha{alpha:g}_",
-            seed=int(seed), force_cpu=force_cpu)
-        set_cfg_value(cfg, "experiment.cpu", bool(force_cpu))
-        set_cfg_value(cfg, "experiment.cost_function.kwargs.route_time_weight", float(alpha))
-        set_cfg_value(cfg, "experiment.cost_function.kwargs.median_connectivity_weight",
-                      float(1.0 - alpha))
-        set_cfg_value(cfg, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
-        set_cfg_value(cfg, "process_neural_bees_sequentially", seq)
-        bco_cfg_set(cfg, n_iterations=n_iterations,
-                    **dict(UNIFIED_ADJ, adjustment_degree_target=float(adj_target)))
+            seed=int(seed), force_cpu=force_cpu, seq_bees=seq,
+            n_iterations=n_iterations, adj_target=adj_target, alpha=float(alpha))
         t0 = _time.perf_counter()
         _run_name, _metrics, _unserved, out_routes, _mut = run_bco_from_cfg(
             cfg, case.init, case.tensors,

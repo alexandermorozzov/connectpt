@@ -21,8 +21,8 @@ from omegaconf import OmegaConf, ListConfig
 
 from .context import CFG_DIR
 from .data_sources import create_data_source
-from .experiments import load_experiment_cfg
-from .paper import UNIFIED_ADJ, bco_cfg_set, full_metrics, set_cfg_value
+from .experiments import compose_experiment_cfg
+from .paper import UNIFIED_ADJ, full_metrics
 
 
 @dataclass
@@ -38,11 +38,6 @@ class ExperimentResult:
 def load_experiment_spec(name):
     """Load an experiment spec YAML from cfg/experiments/<name>.yaml."""
     return OmegaConf.load(CFG_DIR / "experiments" / f"{name}.yaml")
-
-
-def _alpha_weights(alpha):
-    return {"route_time_weight": float(alpha),
-            "median_connectivity_weight": float(1.0 - alpha)}
 
 
 def _default_metrics(metrics_obj, routes, init_routes, *, keep):
@@ -102,30 +97,23 @@ def run_experiment(spec, *, ctx=None, method_fn: Callable = None,
 
     rows, routes = [], {"Initial": inst.init_routes}
     for method in methods:
-        base_cfg = load_experiment_cfg(method.config)
         # route bounds come from the loaded instance (the data source knows the
         # right n_routes / lengths -- e.g. a MACSA scenario differs from any
         # benchmark city), so one captured bee-mix config works across sources.
-        for key in ("n_routes", "min_route_len", "max_route_len"):
-            if key in inst.spec:
-                set_cfg_value(base_cfg, f"eval.{key}", int(inst.spec[key]))
-        if method.get("force_cpu") is not None:
-            set_cfg_value(base_cfg, "experiment.cpu", bool(method.force_cpu))
-        if method.get("process_neural_bees_sequentially") is not None:
-            set_cfg_value(base_cfg, "process_neural_bees_sequentially",
-                          bool(method.process_neural_bees_sequentially))
+        base_cfg = compose_experiment_cfg(
+            method.config, bounds=dict(inst.spec),
+            cpu=method.get("force_cpu"),
+            seq_bees=method.get("process_neural_bees_sequentially"))
         label = method.get("label", "method")
 
         for alpha in alphas:
             for adj_target in adj_targets:
-                cfg = copy.deepcopy(base_cfg)
-                if alpha is not None:
-                    for key, value in _alpha_weights(alpha).items():
-                        set_cfg_value(cfg, f"experiment.cost_function.kwargs.{key}", value)
                 adj_kwargs = dict(UNIFIED_ADJ, adjustment_degree_target=adj_target)
                 if adj_weight_override is not None:
                     adj_kwargs["adjustment_degree_weight"] = adj_weight_override
-                bco_cfg_set(cfg, n_iterations=n_iterations, **adj_kwargs)
+                cfg = compose_experiment_cfg(
+                    copy.deepcopy(base_cfg), alpha=alpha,
+                    n_iterations=n_iterations, adj=adj_kwargs)
 
                 out = method_fn(cfg, inst.init_routes, tensors=inst.tensors,
                                 run_name_scope=f"{inst.label}_{label}_a{alpha}_t{adj_target}_")

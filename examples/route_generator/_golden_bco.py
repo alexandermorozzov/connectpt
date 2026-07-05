@@ -11,9 +11,9 @@ import sys, time, random
 import torch
 
 from eval_lib.baselines import load_benchmark_tensors, BENCHMARK_SPECS
-from eval_lib.experiments import load_experiment_cfg
+from eval_lib.experiments import compose_experiment_cfg
 from eval_lib.context import EDIT_MODEL_WEIGHTS_DIR, ARTIFACTS_DIR
-from eval_lib.paper import bco_cfg_set, UNIFIED_ADJ, set_cfg_value
+from eval_lib.paper import UNIFIED_ADJ
 from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
 
 EDIT_WEIGHTS_PATH = EDIT_MODEL_WEIGHTS_DIR / \
@@ -62,13 +62,9 @@ def run_variant(name, city, yaml_name):
     spec = next(s for s in BENCHMARK_SPECS if s["city"] == city)
     tensors = load_benchmark_tensors(city)
     R = _init_routes(city, spec, tensors)
-    cfg = load_experiment_cfg(yaml_name)
-    for key in ("n_routes", "min_route_len", "max_route_len"):
-        set_cfg_value(cfg, f"eval.{key}", int(spec[key]))
-    set_cfg_value(cfg, "run_name", f"golden_{name}")
-    bco_cfg_set(cfg, n_iterations=N_ITER, **UNIFIED_ADJ)
-    set_cfg_value(cfg, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
-    set_cfg_value(cfg, "experiment.seed", 0)
+    cfg = compose_experiment_cfg(
+        yaml_name, bounds=spec, run_name=f"golden_{name}", seed=0,
+        n_iterations=N_ITER, adj=UNIFIED_ADJ, weighted_connectivity=True)
     torch.manual_seed(0)
     random.seed(0)
     ch = {}

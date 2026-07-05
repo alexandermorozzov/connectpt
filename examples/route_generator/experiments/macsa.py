@@ -26,14 +26,10 @@ from IPython.display import Image, display
 from eval_lib import plots as route_plots
 from eval_lib.baselines import _run_baseline
 from eval_lib.context import DATASETS_DIR
+from eval_lib.experiments import compose_experiment_cfg, scoring_cfg
 from eval_lib.helpers import as_route_tensor
-from connectpt.routes_generator.search.bco_config import compose_bco_cfg as build_bco_cfg
 from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
-from eval_lib.paper import (PAPER_DIR, UNIFIED_ADJ, bco_cfg_set,
-                            eval_routes_cfg as _eval_routes_cfg,
-                            paper_row as _row,
-                            set_cfg_value as _set_cfg_value,
-                            unify_weights as _unify_weights)
+from eval_lib.paper import PAPER_DIR, UNIFIED_ADJ, paper_row as _row
 from connectpt.routes_generator.objectives import load_unified_objective as _load_objective
 
 _OBJ = _load_objective()
@@ -118,19 +114,6 @@ def macsa_alpha_label(alpha, n_iterations):
     return f"Our NBCO alpha={float(alpha):.1f} (iter={int(n_iterations)})"
 
 
-def macsa_alpha_weights(alpha):
-    alpha = float(alpha)
-    return {"demand_time_weight": 0.0,
-            "route_time_weight": alpha,
-            "median_connectivity_weight": 1.0 - alpha}
-
-
-def macsa_set_alpha_weights(cfg, alpha):
-    for key, value in macsa_alpha_weights(alpha).items():
-        _set_cfg_value(cfg, f"experiment.cost_function.kwargs.{key}", float(value))
-    return cfg
-
-
 def macsa_read_routes_0indexed(path):
     rows = []
     for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -167,11 +150,7 @@ def macsa_build_spec(raw_routes, n_nodes):
 
 def macsa_score_routes(method, source, routes, *, seed_routes, tensors, spec,
                         alpha, adj_target, adj_objective):
-    cfg = _unify_weights(_eval_routes_cfg(MACSA_SCENARIO_NAME, spec))
-    macsa_set_alpha_weights(cfg, alpha)
-    _set_cfg_value(cfg, "experiment.cpu", True)
-    _set_cfg_value(cfg, "eval.csv", False)
-    _set_cfg_value(cfg, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
+    cfg = scoring_cfg(MACSA_SCENARIO_NAME, spec, cpu=True, csv=False, alpha=alpha)
     adj_kwargs = dict(UNIFIED_ADJ,
                       adjustment_degree_target=float(adj_target),
                       adjustment_degree_objective=str(adj_objective))
@@ -195,42 +174,28 @@ def macsa_score_routes(method, source, routes, *, seed_routes, tensors, spec,
 
 
 def macsa_build_our_cfg(spec, *, alpha, adj_target, adj_objective,
-                         n_iterations, n_bees, seed, force_cpu):
-    n_bees = int(n_bees)
-    rebuild_bees = max(1, n_bees // 2)
-    trim_extend_bees = n_bees - rebuild_bees
-    cfg = build_bco_cfg(
-        run_name=f"{MACSA_SCENARIO_NAME}_alpha_sweep_our_nbco_gnn_rebuild_trimext",
-        n_routes=spec["n_routes"], min_route_len=spec["min_route_len"],
-        max_route_len=spec["max_route_len"], use_neural_bees=True,
-        n_bees=n_bees, n_type1_bees=rebuild_bees, n_type2_bees=0,
-        n_type4_bees=0, n_type5_bees=trim_extend_bees,
-        n_type6_bees=0, n_type7_bees=0,
-        force_cpu=bool(force_cpu), connectivity_mode=CONNECTIVITY_MODE,
-        worse_accept_temperature=0.02, worse_accept_decay=0.985,
-        worse_accept_min_temperature=0.001,
-        worse_selection_temperature=0.02, worse_selection_decay=0.985,
-        worse_selection_uniform_mix=0.10, worse_selection_elite_count=2,
-        **macsa_alpha_weights(alpha))
-    bco_cfg_set(cfg, n_iterations=int(n_iterations),
-                type4_allow_halt=False, type5_allow_halt=False,
-                type6_allow_halt=False, type7_allow_halt=False,
-                **dict(UNIFIED_ADJ,
-                       adjustment_degree_target=float(adj_target),
-                       adjustment_degree_objective=str(adj_objective)))
-    macsa_set_alpha_weights(cfg, alpha)
-    _set_cfg_value(cfg, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
-    _set_cfg_value(cfg, "eval.csv", False)
-    _set_cfg_value(cfg, "experiment.seed", int(seed))
-    return cfg
+                         n_iterations, seed, force_cpu):
+    """Our-NBCO cfg for the MACSA case: captured preset + the sweep point.
+
+    The bee composition (5 GNN-rebuild + 5 trim/extend, forced-mutation edit
+    bees) and the worse-accept schedule live in
+    ``cfg/experiments/macsa/our_nbco_mandl8.yaml``; only the sweep point and
+    run identity are applied here.
+    """
+    return compose_experiment_cfg(
+        "macsa/our_nbco_mandl8", bounds=spec, seed=int(seed),
+        cpu=bool(force_cpu), alpha=alpha, n_iterations=int(n_iterations),
+        adj=dict(UNIFIED_ADJ,
+                 adjustment_degree_target=float(adj_target),
+                 adjustment_degree_objective=str(adj_objective)))
 
 
 def macsa_run_our_nbco(seed_routes, *, tensors, spec, alpha, adj_target,
-                        adj_objective, n_iterations, n_bees, seed, force_cpu,
+                        adj_objective, n_iterations, seed, force_cpu,
                         edit_weights_path, edit_adj_cond_feats=0):
     cfg = macsa_build_our_cfg(spec, alpha=alpha, adj_target=adj_target,
                                adj_objective=adj_objective,
-                               n_iterations=n_iterations, n_bees=n_bees,
+                               n_iterations=n_iterations,
                                seed=seed, force_cpu=force_cpu)
     t0 = _t.perf_counter()
     _run_name, _metrics, _unserved, routes, _mutation_counts = run_bco_from_cfg(

@@ -194,8 +194,6 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
     # the notebook binds the shared names off that accessor object -- it never
     # hardcodes objective literal values.
     import re
-    assert "from connectpt.routes_generator.objectives import load_unified_objective" in text
-    assert "load_unified_objective()" in text
     assert "from eval_lib.params import" not in text  # params.py is deleted
     # Objective names may be bound from the accessor object (= _OBJ.<field>) but
     # never from a hardcoded literal.
@@ -224,9 +222,13 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
     assert "ppo_50nodes.yaml" not in text
     assert 'f"++experiment.cost_function.kwargs.connectivity_mode=' not in text
 
-    # PART 2 (experiments) still threads the unified connectivity mode through
-    # every method's cost config.
-    assert "connectivity_mode=CONNECTIVITY_MODE" in text
+    # PART 2 (experiments) threads the unified connectivity mode config-first:
+    # the captured presets carry it and eval_lib.experiments composes it from
+    # the objective YAML -- the notebook no longer passes it by hand.
+    assert "connectivity_mode=CONNECTIVITY_MODE" not in text
+    experiments_py = (ROUTE_EXAMPLES / "eval_lib" / "experiments.py").read_text(
+        encoding="utf-8")
+    assert "obj.connectivity_mode" in experiments_py
 
 
 def test_paper_combined_streams_csv_rows_with_duration():
@@ -237,13 +239,14 @@ def test_paper_combined_streams_csv_rows_with_duration():
         "".join(cell.get("source", [])) for cell in notebook["cells"]
     )
 
-    # Results IO lives in eval_lib.paper; the notebook streams rows through it
-    # rather than building tables inline. Anchor on the stable helper names, not
-    # on the volatile per-experiment call sites / signatures.
-    assert "append_paper_row" in text
+    # Results IO lives in eval_lib.paper; the notebook saves tables through it
+    # while the EKB row streaming lives in experiments/ekb.py. Anchor on the
+    # stable helper names, not on volatile per-experiment call sites.
     assert "paper_row as _row" in text
     assert "save_paper_table" in text
-    assert "reset_paper_table" in text
+    ekb_py = (ROUTE_EXAMPLES / "experiments" / "ekb.py").read_text(encoding="utf-8")
+    assert "append_paper_row" in ekb_py
+    assert "reset_paper_table" in ekb_py
 
 
 def test_paper_combined_uses_two_sided_adj_objective():
@@ -268,7 +271,7 @@ def test_paper_combined_uses_two_sided_adj_objective():
     # threading now lives in the library (experiment_runner + the one-off
     # experiments modules), not inline in the notebook, so assert the single
     # source is applied there rather than counting notebook occurrences.
-    assert "UNIFIED_ADJ" in text  # still threaded via the notebook helpers cell
+    assert "UNIFIED_ADJ" not in text  # adj threading lives in the library now
     for mod in ("eval_lib/experiment_runner.py", "experiments/macsa.py",
                 "experiments/ekb.py"):
         assert "UNIFIED_ADJ" in (ROUTE_EXAMPLES / mod).read_text(encoding="utf-8"), mod

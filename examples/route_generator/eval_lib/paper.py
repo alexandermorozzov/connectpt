@@ -1,15 +1,13 @@
-"""paper_combined.ipynb support: unified-objective helpers + paper_results IO.
+"""paper_combined.ipynb support: unified-objective metrics + paper_results IO.
 
-Everything here is generic plumbing extracted from the notebook's helper cell:
-config mutation utilities, the unified-objective adjustment kwargs, the full
-metric row computed for every results table, and the ``paper_results`` output
-sink. Experiment design (ablation variants, per-city budgets, init pipeline)
-stays in the notebook.
+The unified-objective adjustment kwargs, the full metric row computed for
+every results table, and the ``paper_results`` output sink. Config
+composition (``set_cfg_value`` / ``compose_experiment_cfg`` / scoring cfgs)
+lives in :mod:`eval_lib.experiments`; experiment design stays in YAML.
 """
 import numpy as np
 import pandas as pd
 import torch
-from omegaconf import OmegaConf
 
 from connectpt.routes_generator.bee_colony import get_adjustment_degrees
 
@@ -17,7 +15,6 @@ from connectpt.routes_generator.objectives import load_unified_objective
 
 from .context import ARTIFACTS_DIR
 from .helpers import as_route_tensor, metric_value
-from .baselines import build_sa_cfg
 from .route_copies import redundancy_fraction
 
 # --- unified objective ------------------------------------------------------
@@ -34,42 +31,6 @@ MAX_ROUTE_LEN = 12
 # Adjustment kwargs shared by every unified-objective run (E1u baselines,
 # NSGA-II, MACSA): two-sided |adj - target| penalty. Sourced from the objective.
 UNIFIED_ADJ = dict(_OBJ.adj_kwargs)
-
-
-def set_cfg_value(cfg, dotted_key, value):
-    """Set a nested OmegaConf value even when the composed cfg is structured."""
-    target = cfg
-    parts = dotted_key.split(".")
-    for part in parts[:-1]:
-        OmegaConf.set_struct(target, False)
-        target = target[part]
-    OmegaConf.set_struct(target, False)
-    target[parts[-1]] = value
-    return cfg
-
-
-def bco_cfg_set(cfg, **kv):
-    """Set fields BCO reads from cfg (n_iterations, adjustment_degree_*)."""
-    OmegaConf.set_struct(cfg, False)
-    for k, v in kv.items():
-        cfg[k] = v
-    return cfg
-
-
-def unify_weights(cfg):
-    """Set a baseline cfg's cost weights to the unified objective (RTT+WMC, demand off)."""
-    for key, value in UNIFIED_COST_WEIGHTS.items():
-        set_cfg_value(cfg, f"experiment.cost_function.kwargs.{key}", value)
-    set_cfg_value(cfg, "experiment.cost_function.kwargs.connectivity_mode",
-                  CONNECTIVITY_MODE)
-    return cfg
-
-
-def eval_routes_cfg(city, spec):
-    """1-iteration SA cfg used only to evaluate a fixed route set's metrics."""
-    return build_sa_cfg(f"{city}_eval", spec["n_routes"],
-                        spec["min_route_len"], spec["max_route_len"],
-                        n_iterations=1, connectivity_mode=CONNECTIVITY_MODE)
 
 
 def ravel_hist(h):

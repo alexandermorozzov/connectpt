@@ -43,7 +43,9 @@ e1:
   alpha_grid: [0.0, 0.5, 1.0]
   adj_target: 0.3
   bco_iterations: 200
-  init_source_stem: "_our_only_target03_iter500"
+  # Init network selection is config-first: pin a saved dump per experiment via
+  # the e1_<city>.yaml data block (`init_dump: <paper_results routes.pt>`);
+  # default is LC + realistic tier (eval_lib.data_sources.BenchmarkDataSource).
   reuse_baseline_cache: true
   rerun_baselines: false
   rerun_our_model: true
