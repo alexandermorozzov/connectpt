@@ -10,16 +10,14 @@ Usage: python _golden_bco.py capture|compare [tag]
 import sys, time, random
 import torch
 
-import eval_lib.helpers as _eh
 from eval_lib.baselines import load_benchmark_tensors, BENCHMARK_SPECS
-from eval_lib.helpers import run_bco
 from eval_lib.experiments import load_experiment_cfg
 from eval_lib.context import EDIT_MODEL_WEIGHTS_DIR, ARTIFACTS_DIR
 from eval_lib.paper import bco_cfg_set, UNIFIED_ADJ, set_cfg_value
+from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
 
-_eh.EDIT_MODEL_WEIGHTS_PATH = EDIT_MODEL_WEIGHTS_DIR / \
+EDIT_WEIGHTS_PATH = EDIT_MODEL_WEIGHTS_DIR / \
     "improvement_lc_rttconn_adj_w10_t02_finetune100.pt"
-_eh.EDIT_MODEL_N_ADJ_COND_FEATS = 0
 
 GOLDEN_PATH = ARTIFACTS_DIR / "results" / "_golden_bco.pt"
 N_ITER = 3
@@ -75,8 +73,10 @@ def run_variant(name, city, yaml_name):
     random.seed(0)
     ch = {}
     t0 = time.perf_counter()
-    out = run_bco(cfg, R, tensors=tensors, run_name_scope="golden_",
-                  cost_history_out=ch)
+    out = run_bco_from_cfg(cfg, R, tensors, run_name_scope="golden_",
+                           cost_history_out=ch,
+                           edit_weights_path=EDIT_WEIGHTS_PATH,
+                           edit_n_adjustment_cond_feats=0)
     dt = time.perf_counter() - t0
     _, metrics, unserved, routes, _ = out
     # wall-clock duration is the only legitimately nondeterministic metric

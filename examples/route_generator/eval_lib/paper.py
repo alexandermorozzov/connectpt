@@ -153,50 +153,37 @@ def macsa_eval_bounds(scenario):
 
 
 # --- paper_results output sink ----------------------------------------------
+#
+# Every sink takes the output-filename prefix EXPLICITLY (keyword-only,
+# required). The caller threads it from ``RunContext.output_prefix`` ("TEMP_"
+# on smoke runs, "" on full runs) -- there is no module-global prefix anymore.
 
 PAPER_DIR = ARTIFACTS_DIR / "paper_results"
 PAPER_DIR.mkdir(parents=True, exist_ok=True)
 
-# Output filename prefix consulted by every sink (here, results_io.save_table and
-# experiments.macsa figures). Set it to e.g. "TEMP_" for throwaway/smoke runs so
-# nothing overwrites the real paper_results files. Read dynamically (via the
-# module attribute) so a late set_paper_prefix() still takes effect.
-PAPER_PREFIX = ""
 
-
-def set_paper_prefix(prefix):
-    """Set the global output-filename prefix (e.g. 'TEMP_'); returns it."""
-    global PAPER_PREFIX
-    PAPER_PREFIX = prefix or ""
-    return PAPER_PREFIX
-
-
-def _stem(name):
-    return f"{PAPER_PREFIX}{name}"
-
-
-def paper_path(name):
+def paper_path(name, *, prefix):
     """Prefix-aware path under paper_results (e.g. to read back a saved dump).
     Mirrors what save_paper_* write, so reads find TEMP_ files on smoke runs."""
-    return PAPER_DIR / f"{PAPER_PREFIX}{name}"
+    return PAPER_DIR / f"{prefix}{name}"
 
 
-def save_paper_table(df, name):
-    path = PAPER_DIR / f"{_stem(name)}.csv"
+def save_paper_table(df, name, *, prefix):
+    path = PAPER_DIR / f"{prefix}{name}.csv"
     df.to_csv(path, index=False)
     print(f"[paper] table ({len(df)} rows) -> {path}")
     return path
 
 
-def reset_paper_table(name):
-    path = PAPER_DIR / f"{_stem(name)}.csv"
+def reset_paper_table(name, *, prefix):
+    path = PAPER_DIR / f"{prefix}{name}.csv"
     if path.exists():
         path.unlink()
     return path
 
 
-def append_paper_row(row, name, ndigits=3):
-    path = PAPER_DIR / f"{_stem(name)}.csv"
+def append_paper_row(row, name, ndigits=3, *, prefix):
+    path = PAPER_DIR / f"{prefix}{name}.csv"
     header = not path.exists()
     pd.DataFrame([row]).round(ndigits).to_csv(path, mode="a", header=header,
                                               index=False)
@@ -211,7 +198,8 @@ def save_paper_fig(fig, name):
     return None
 
 
-def save_paper_routes(name, routes, coords=None, street_adj=None, meta=None):
+def save_paper_routes(name, routes, coords=None, street_adj=None, meta=None, *,
+                      prefix):
     """Dump a {label: route_tensor} mapping (+ coords/street_adj) to paper_results
     so the route figures can be reconstructed later."""
     payload = {
@@ -220,7 +208,7 @@ def save_paper_routes(name, routes, coords=None, street_adj=None, meta=None):
         "street_adj": (street_adj.cpu() if hasattr(street_adj, "cpu") else street_adj),
         "meta": meta or {},
     }
-    path = PAPER_DIR / f"{_stem(name)}_routes.pt"
+    path = PAPER_DIR / f"{prefix}{name}_routes.pt"
     torch.save(payload, path)
     print(f"[paper] route dump ({len(payload['routes'])} sets) -> {path}")
     return path

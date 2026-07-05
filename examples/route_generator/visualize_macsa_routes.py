@@ -40,7 +40,9 @@ from connectpt.routes_generator.citygraph_dataset import load_macsa_tensors  # n
 from eval_lib import plots as route_plots  # noqa: E402
 from eval_lib.baselines import _run_baseline  # noqa: E402
 from eval_lib.context import ARTIFACTS_DIR, DATASETS_DIR  # noqa: E402
-from eval_lib.helpers import as_route_tensor, run_bco  # noqa: E402
+from eval_lib.helpers import as_route_tensor  # noqa: E402
+from eval_lib.context import EDIT_MODEL_WEIGHTS_PATH  # noqa: E402
+from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg  # noqa: E402
 from connectpt.routes_generator.search.bco_config import compose_bco_cfg as build_bco_cfg  # noqa: E402
 from eval_lib.paper import (  # noqa: E402
     UNIFIED_ADJ,
@@ -337,6 +339,7 @@ def run_our_nbco(
     alpha: float,
     method: str,
     adj_objective: str,
+    edit_weights_path: Path,
 ) -> tuple[dict, torch.Tensor]:
     cfg = build_our_nbco_cfg(
         spec=spec,
@@ -349,11 +352,13 @@ def run_our_nbco(
         adj_objective=adj_objective,
     )
     t0 = time.perf_counter()
-    _run_name, metrics, _unserved, routes, _mutation_counts = run_bco(
+    _run_name, metrics, _unserved, routes, _mutation_counts = run_bco_from_cfg(
         cfg,
         seed_routes,
-        tensors=tensors,
+        tensors,
         run_name_scope=f"{SCENARIO_NAME}_",
+        edit_weights_path=edit_weights_path,
+        edit_n_adjustment_cond_feats=0,
     )
     row = paper_row(
         SCENARIO_NAME,
@@ -500,6 +505,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bco-iterations", type=int, default=500)
     parser.add_argument("--bco-bees", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--edit-checkpoint",
+        type=Path,
+        default=EDIT_MODEL_WEIGHTS_PATH,
+        help="Edit-model checkpoint for the Our-NBCO trim/extend bees.",
+    )
+    parser.add_argument(
+        "--output-prefix",
+        default="",
+        help="Filename prefix for saved tables/routes (e.g. TEMP_ for dry runs).",
+    )
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--ncol", type=int, default=5)
     parser.add_argument("--demand-top-frac", type=float, default=None)
@@ -630,6 +646,7 @@ def main() -> None:
                     alpha=alpha,
                     method=method,
                     adj_objective=our_adj_objective,
+                    edit_weights_path=args.edit_checkpoint,
                 )
                 row, scored_routes = score_fixed_routes(
                     method=method,
@@ -656,12 +673,13 @@ def main() -> None:
 
     df = pd.DataFrame(rows).round(6)
     df["macsa_adj_target"] = float(macsa_adj)
-    save_paper_table(df, args.stem)
+    save_paper_table(df, args.stem, prefix=args.output_prefix)
     save_paper_routes(
         args.stem,
         routes,
         coords,
         street_adj,
+        prefix=args.output_prefix,
         meta={
             "scenario": SCENARIO_NAME,
             "scenario_dir": str(args.scenario_dir),

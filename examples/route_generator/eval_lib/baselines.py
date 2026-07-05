@@ -262,7 +262,6 @@ def run_hh(cfg, init_routes, *, tensors=None, run_name_scope="",
 import numpy as np
 import matplotlib.pyplot as plt
 
-import connectpt.routes_generator.nsgaii as _nsgaii_mod
 from connectpt.routes_generator import NSGAII, RouteGenBatchState
 from connectpt.routes_generator import heuristics as _hs
 
@@ -338,9 +337,6 @@ def run_nsgaii(cfg, *, tensors=None, init_routes=None, run_name_scope="",
         cost_obj.adjustment_degree_mode = adjustment_degree_mode
         _seed = as_route_tensor(init_routes)
         cost_obj.adjustment_seed = (_seed[None] if _seed.dim() == 2 else _seed).to(device)
-    # NSGA-II reads its device from a module global (the ancestor set it in
-    # the Hydra main()); point it at the device we just resolved.
-    _nsgaii_mod.DEVICE = device
     data = next(iter(dataloader))
     if device.type != "cpu":
         data = data.cuda()
@@ -356,7 +352,8 @@ def run_nsgaii(cfg, *, tensors=None, init_routes=None, run_name_scope="",
         n_iterations=int(cfg.n_iterations), pop_size=int(cfg.pop_size),
         p_crossover=float(cfg.p_crossover), p_mutation=float(cfg.p_mutation),
         mutator_p_t=float(cfg.mutator_p_t),
-        batch_size=int(cfg.get("gen_batch_size", cfg.pop_size)))
+        batch_size=int(cfg.get("gen_batch_size", cfg.pop_size)),
+        device=device)
     with torch.no_grad():
         output = optimizer.run(state, cfg.get("init_mode", "husselmann"),
                                sum_writer=None, seed_routes=init_routes)
@@ -386,14 +383,16 @@ BENCHMARK_SPECS = [
     {"city": "Mumford3", "n_routes": 60, "min_route_len": 12, "max_route_len": 25},
 ]
 BENCHMARK_NX_SEED = 0
-BENCHMARK_INIT_MODE = "rpc"
 
 # requested metrics only: Cp (ATT) | Co (RTT) | d0 | d1 | d2 | d_un | cost
 
 
-def load_benchmark_graph(spec, init_mode=None):
-    """Load a benchmark city and build its benchmark initial route set."""
-    init_mode = BENCHMARK_INIT_MODE if init_mode is None else init_mode
+def load_benchmark_graph(spec, init_mode="rpc"):
+    """Load a benchmark city and build its benchmark initial route set.
+
+    ``init_mode`` is explicit ("rpc" or "nx"); thread it from
+    ``RunContext.benchmark_init_mode`` when the suite profile decides.
+    """
     tensors = load_benchmark_tensors(spec["city"])
     if init_mode == "rpc":
         init_routes = build_rpc_routes(
@@ -407,7 +406,7 @@ def load_benchmark_graph(spec, init_mode=None):
             graph, num_routes=spec["n_routes"], min_len=spec["min_route_len"],
             max_len=spec["max_route_len"], seed=BENCHMARK_NX_SEED)
     else:
-        raise ValueError(f"Unknown BENCHMARK_INIT_MODE: {init_mode!r}")
+        raise ValueError(f"Unknown benchmark init_mode: {init_mode!r}")
     return tensors, init_routes
 
 

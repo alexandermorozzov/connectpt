@@ -50,16 +50,32 @@ def _default_metrics(metrics_obj, routes, init_routes, *, keep):
     return {k: row[k] for k in keep if k in row}
 
 
-def run_experiment(spec, *, method_fn: Callable = None,
+def run_experiment(spec, *, ctx=None, method_fn: Callable = None,
                    metrics_fn: Callable = None) -> ExperimentResult:
     """Run a full experiment from its spec.
 
-    ``method_fn`` defaults to eval_lib.run_bco; ``metrics_fn`` defaults to the
-    paper full-metric set filtered to ``spec.metrics``. Both are injectable so
-    the orchestration (sweep + overrides) can be unit-tested without running BCO.
+    ``ctx`` (a :class:`eval_lib.run_context.RunContext`) supplies the edit-model
+    checkpoint the default method uses; it is required unless an explicit
+    ``method_fn`` is injected. ``method_fn`` defaults to the library-owned
+    ``run_bco_from_cfg``; ``metrics_fn`` defaults to the paper full-metric set
+    filtered to ``spec.metrics``. Both are injectable so the orchestration
+    (sweep + overrides) can be unit-tested without running BCO.
     """
     if method_fn is None:
-        from .helpers import run_bco as method_fn  # noqa: PLW0127
+        if ctx is None:
+            raise TypeError(
+                "run_experiment: pass ctx=RunContext(...) so the default "
+                "method knows which edit checkpoint to load (or inject an "
+                "explicit method_fn)")
+        from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
+        _edit_path = ctx.edit_weights_path
+        _edit_feats = int(ctx.edit_adj_cond_feats)
+
+        def method_fn(cfg, init_routes, *, tensors, run_name_scope=""):
+            return run_bco_from_cfg(
+                cfg, init_routes, tensors, run_name_scope=run_name_scope,
+                edit_weights_path=_edit_path,
+                edit_n_adjustment_cond_feats=_edit_feats)
     if metrics_fn is None:
         keep = list(spec.get("metrics", []))
         def metrics_fn(m, routes, init):  # noqa: E306

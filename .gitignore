@@ -46,3 +46,8 @@ datasets
 # training logs -- are kept local only; regenerate by running the notebooks.
 artifacts/
 .tmp_pycache
+
+# Local task-tracking / agent files (not part of the published repo)
+CLAUDE.md
+BOARD.md
+board/

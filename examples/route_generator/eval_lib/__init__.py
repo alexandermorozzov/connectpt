@@ -8,6 +8,7 @@ notebook uses. The unified objective is read from the single source
 via ``from eval_lib import *``.
 """
 from .context import *  # noqa: F401,F403
+from .run_context import RunContext  # noqa: F401
 from .plots import *  # noqa: F401,F403
 from .helpers import *  # noqa: F401,F403
 from .baselines import *  # noqa: F401,F403

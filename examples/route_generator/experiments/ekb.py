@@ -203,24 +203,26 @@ class EKBRunResult:
 
 
 def run_ekb_nbco(case: EKBCase, *, ekb_cfg, n_bees, seed,
-                 model_outputs_dir) -> EKBRunResult:
+                 model_outputs_dir, ctx) -> EKBRunResult:
     """Single NBCO run (GNN rebuild + trim/extend) on the active EKB case.
 
     The Our-NBCO config is built config-first from ``ekb/our_nbco_ekb.yaml`` (see
-    :func:`_ekb_our_nbco_cfg`). Reads/writes the paper cache (honouring the TEMP_
-    prefix); saves a live best-solution checkpoint on every improvement. Returns
-    the result df, the {label: routes} mapping, and the convergence history.
+    :func:`_ekb_our_nbco_cfg`). ``ctx`` (RunContext) supplies the edit-model
+    checkpoint and the output prefix (TEMP_ on smoke) for every read/write.
+    Saves a live best-solution checkpoint on every improvement. Returns the
+    result df, the {label: routes} mapping, and the convergence history.
     """
     import pandas as pd
     import torch
 
-    import eval_lib.paper as _paper
-    from eval_lib import as_route_tensor, run_bco
+    from eval_lib import as_route_tensor
     from eval_lib.paper import (PAPER_DIR, UNIFIED_ADJ, append_paper_row,
                                 bco_cfg_set, ravel_hist, reset_paper_table,
                                 save_paper_routes, save_paper_table, set_cfg_value)
+    from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
 
     ekb = ekb_cfg
+    prefix = str(ctx.output_prefix)
     adj_target = nbco_adj_target(ekb)
     seq = bool(ekb.nbco.process_neural_bees_sequentially)
     n_iterations = int(ekb.nbco.iterations)
@@ -228,8 +230,8 @@ def run_ekb_nbco(case: EKBCase, *, ekb_cfg, n_bees, seed,
     force_cpu = bool(ekb.force_cpu)
 
     table = nbco_table_stem(case, ekb)
-    routes_path = PAPER_DIR / f"{_paper.PAPER_PREFIX}{table}_routes.pt"
-    csv_path = PAPER_DIR / f"{_paper.PAPER_PREFIX}{table}.csv"
+    routes_path = PAPER_DIR / f"{prefix}{table}_routes.pt"
+    csv_path = PAPER_DIR / f"{prefix}{table}.csv"
     results = {"Initial EKB routes": case.init}
 
     if routes_path.exists() and csv_path.exists() and not bool(ekb.nbco.force_rerun):
@@ -239,7 +241,7 @@ def run_ekb_nbco(case: EKBCase, *, ekb_cfg, n_bees, seed,
         print(f"[EKB NBCO] loaded cached routes/table: {routes_path.name}")
         return EKBRunResult(df, results, {}, {}, table)
 
-    reset_paper_table(table)
+    reset_paper_table(table, prefix=prefix)
     rows, history, mutation_counts = [], {}, {}
     print("[EKB NBCO] scoring initial EKB routes ...", flush=True)
     seed_res = score_routes(case, case.init, "nbco_seed_eval",
@@ -248,7 +250,7 @@ def run_ekb_nbco(case: EKBCase, *, ekb_cfg, n_bees, seed,
                         seed_res[1], case.init, adj_target=adj_target,
                         n_iterations=n_iterations, n_bees=n_bees, seq_bees=seq)
     rows.append(seed_row)
-    append_paper_row(seed_row, table, ndigits=4)
+    append_paper_row(seed_row, table, ndigits=4, prefix=prefix)
 
     print(f"[EKB NBCO] running {final_label} on {case.case_tag}: "
           f"iters={n_iterations}, target={adj_target} ...", flush=True)
@@ -272,14 +274,15 @@ def run_ekb_nbco(case: EKBCase, *, ekb_cfg, n_bees, seed,
                     objective_cost=float(best_costs[0]), adj_vs_seed=float(best_adj[0]),
                     case_tag=case.case_tag, adj_target=float(adj_target),
                     n_iterations=n_iterations)
-        save_paper_table(pd.DataFrame([mrow]).round(6), best_stem)
+        save_paper_table(pd.DataFrame([mrow]).round(6), best_stem, prefix=prefix)
         save_paper_routes(best_stem,
                           {"Initial EKB routes": as_route_tensor(case.init),
                            final_label: best_rt},
                           meta={"city": "EKB", "best_method": final_label,
                                 "checkpoint_iteration": int(iteration),
                                 "case_tag": case.case_tag,
-                                "objective_cost": float(best_costs[0])})
+                                "objective_cost": float(best_costs[0])},
+                          prefix=prefix)
         if writer is not None:
             writer.add_scalar("ekb/objective_cost", float(best_costs[0]), int(iteration))
             writer.add_scalar("ekb/adj_vs_seed", float(best_adj[0]), int(iteration))
@@ -295,10 +298,13 @@ def run_ekb_nbco(case: EKBCase, *, ekb_cfg, n_bees, seed,
 
     t0 = _time.perf_counter()
     try:
-        res = run_bco(cfg, case.init, tensors=case.tensors,
-                      run_name_scope=f"EKB_{case.case_tag}_",
-                      cost_history_out=history, mutation_counts_out=mutation_counts,
-                      iteration_callback=_save_best)
+        res = run_bco_from_cfg(
+            cfg, case.init, case.tensors,
+            run_name_scope=f"EKB_{case.case_tag}_",
+            cost_history_out=history, mutation_counts_out=mutation_counts,
+            iteration_callback=_save_best,
+            edit_weights_path=ctx.edit_weights_path,
+            edit_n_adjustment_cond_feats=int(ctx.edit_adj_cond_feats))
     except KeyboardInterrupt:
         print(f"[EKB NBCO] interrupted -- best-so-far kept in {best_stem}.*")
         raise
@@ -312,13 +318,13 @@ def run_ekb_nbco(case: EKBCase, *, ekb_cfg, n_bees, seed,
                        duration_s=dt, seed_cost=seed_row["cost"])
     rows.append(row_out)
     results[final_label] = out_routes
-    append_paper_row(row_out, table, ndigits=4)
+    append_paper_row(row_out, table, ndigits=4, prefix=prefix)
     torch.save({"history": ravel_hist(history.get("history")),
                 "mutation_counts": mutation_counts},
-               PAPER_DIR / f"{_paper.PAPER_PREFIX}{table}_history.pt")
+               PAPER_DIR / f"{prefix}{table}_history.pt")
 
     df = pd.DataFrame(rows)
-    save_paper_table(df.round(4), table)
+    save_paper_table(df.round(4), table, prefix=prefix)
     save_paper_routes(table, results, case.tensors["node_locs"],
                       case.tensors["street_adj"],
                       meta={"city": "EKB", "case_tag": case.case_tag,
@@ -326,28 +332,31 @@ def run_ekb_nbco(case: EKBCase, *, ekb_cfg, n_bees, seed,
                             "objective": "NBCO GNN + trim/extend",
                             "adj_target": float(adj_target),
                             "n_iterations": n_iterations,
-                            "process_neural_bees_sequentially": seq})
+                            "process_neural_bees_sequentially": seq},
+                      prefix=prefix)
     return EKBRunResult(df, results, history, mutation_counts, table)
 
 
-def run_ekb_alpha_sweep(case: EKBCase, *, ekb_cfg, n_bees, seed):
+def run_ekb_alpha_sweep(case: EKBCase, *, ekb_cfg, n_bees, seed, ctx):
     """Alpha sweep (route/connectivity trade-off) at a fixed adjustment target.
 
-    Returns ``(df, {label: routes})``. Honours the TEMP_ prefix + cache like the
-    NBCO runner. The base Our-NBCO config is built config-first (see
+    Returns ``(df, {label: routes})``. ``ctx`` (RunContext) supplies the
+    edit-model checkpoint and the output prefix (TEMP_ on smoke) + cache paths.
+    The base Our-NBCO config is built config-first (see
     :func:`_ekb_our_nbco_cfg`); each alpha overrides the RTT/WMC weights.
     """
     import pandas as pd
     import torch
     from tqdm.auto import tqdm
 
-    import eval_lib.paper as _paper
-    from eval_lib import as_route_tensor, run_bco
+    from eval_lib import as_route_tensor
     from eval_lib.paper import (PAPER_DIR, UNIFIED_ADJ, append_paper_row,
                                 bco_cfg_set, reset_paper_table, save_paper_routes,
                                 save_paper_table, set_cfg_value)
+    from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
 
     ekb = ekb_cfg
+    prefix = str(ctx.output_prefix)
     adj_target = float(ekb.sweep.adj_target)
     n_iterations = int(ekb.sweep.iterations)
     alpha_grid = list(ekb.sweep.alpha_grid)
@@ -355,8 +364,8 @@ def run_ekb_alpha_sweep(case: EKBCase, *, ekb_cfg, n_bees, seed):
     force_cpu = bool(ekb.force_cpu)
 
     table = sweep_table_stem(case, ekb)
-    routes_path = PAPER_DIR / f"{_paper.PAPER_PREFIX}{table}_routes.pt"
-    csv_path = PAPER_DIR / f"{_paper.PAPER_PREFIX}{table}.csv"
+    routes_path = PAPER_DIR / f"{prefix}{table}_routes.pt"
+    csv_path = PAPER_DIR / f"{prefix}{table}.csv"
 
     if routes_path.exists() and csv_path.exists() and not bool(ekb.sweep.force_rerun):
         payload = torch.load(routes_path, map_location="cpu", weights_only=False)
@@ -367,7 +376,7 @@ def run_ekb_alpha_sweep(case: EKBCase, *, ekb_cfg, n_bees, seed):
 
     print(f"[EKB sweep] case={case.case_tag} spec={case.spec} alphas={alpha_grid} "
           f"target={adj_target} iters={n_iterations} cpu={force_cpu}")
-    reset_paper_table(table)
+    reset_paper_table(table, prefix=prefix)
     rows = []
     routes = {"Initial EKB routes": case.init}
 
@@ -387,7 +396,7 @@ def run_ekb_alpha_sweep(case: EKBCase, *, ekb_cfg, n_bees, seed):
                              adj_target=adj_target, n_iterations=n_iterations,
                              n_bees=n_bees, seq_bees=seq)
         rows.append(seed_row)
-        append_paper_row(seed_row, table, ndigits=4)
+        append_paper_row(seed_row, table, ndigits=4, prefix=prefix)
 
         cfg = _ekb_our_nbco_cfg(
             case, run_name_suffix=f"{case.case_tag}_alpha{alpha:g}_",
@@ -401,9 +410,11 @@ def run_ekb_alpha_sweep(case: EKBCase, *, ekb_cfg, n_bees, seed):
         bco_cfg_set(cfg, n_iterations=n_iterations,
                     **dict(UNIFIED_ADJ, adjustment_degree_target=float(adj_target)))
         t0 = _time.perf_counter()
-        _run_name, _metrics, _unserved, out_routes, _mut = run_bco(
-            cfg, case.init, tensors=case.tensors,
-            run_name_scope=f"EKB_{case.case_tag}_alpha{alpha:g}_")
+        _run_name, _metrics, _unserved, out_routes, _mut = run_bco_from_cfg(
+            cfg, case.init, case.tensors,
+            run_name_scope=f"EKB_{case.case_tag}_alpha{alpha:g}_",
+            edit_weights_path=ctx.edit_weights_path,
+            edit_n_adjustment_cond_feats=int(ctx.edit_adj_cond_feats))
         dt = _time.perf_counter() - t0
         out_routes = as_route_tensor(out_routes)
         routes[f"Our NBCO alpha={alpha:g}"] = out_routes
@@ -417,13 +428,13 @@ def run_ekb_alpha_sweep(case: EKBCase, *, ekb_cfg, n_bees, seed):
                             n_bees=n_bees, seq_bees=seq, duration_s=dt,
                             seed_cost=seed_row.get("cost"))
         rows.append(row_out)
-        append_paper_row(row_out, table, ndigits=4)
+        append_paper_row(row_out, table, ndigits=4, prefix=prefix)
         save_paper_routes(table, routes, case.tensors["node_locs"],
-                          case.tensors["street_adj"], meta=_meta())
+                          case.tensors["street_adj"], meta=_meta(), prefix=prefix)
 
     df = pd.DataFrame(rows)
-    save_paper_table(df.round(4), table)
+    save_paper_table(df.round(4), table, prefix=prefix)
     save_paper_routes(table, routes, case.tensors["node_locs"],
-                      case.tensors["street_adj"], meta=_meta())
+                      case.tensors["street_adj"], meta=_meta(), prefix=prefix)
     print(f"[EKB sweep] saved -> {csv_path.name} + {routes_path.name}")
     return df, routes

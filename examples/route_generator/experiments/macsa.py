@@ -5,8 +5,9 @@ helpers used to live inline in ``paper_combined.ipynb``; they are collected here
 so the notebook keeps only the data loading, orchestration and computed results.
 
 Runtime-dependent values (smoke vs full iteration count, the Our-NBCO checkpoint
-path, the seed) are injected via :func:`configure` -- call it once before using
-any helper. The static scenario constants and all helpers are exported via
+path, the seed) live in an immutable :class:`MacsaRunConfig` built by
+:func:`configure` from the notebook's ``RunContext`` -- no module globals are
+mutated. The static scenario constants and all helpers are exported via
 ``__all__`` so the notebook can ``from experiments.macsa import *``.
 """
 from __future__ import annotations
@@ -15,6 +16,7 @@ import contextlib
 import io
 import math
 import time as _t
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -24,9 +26,9 @@ from IPython.display import Image, display
 from eval_lib import plots as route_plots
 from eval_lib.baselines import _run_baseline
 from eval_lib.context import DATASETS_DIR
-from eval_lib.helpers import as_route_tensor, run_bco
+from eval_lib.helpers import as_route_tensor
 from connectpt.routes_generator.search.bco_config import compose_bco_cfg as build_bco_cfg
-import eval_lib.helpers as _eh
+from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
 from eval_lib.paper import (PAPER_DIR, UNIFIED_ADJ, bco_cfg_set,
                             eval_routes_cfg as _eval_routes_cfg,
                             paper_row as _row,
@@ -66,54 +68,54 @@ MACSA_TABLEB_EVAL_ADJ_OBJECTIVE = str(ADJ_OBJECTIVE)
 MACSA_NODE_SIZE = 70.0
 MACSA_DPI = 220
 
-# --- runtime-configured values (set by configure()) ----------------------------
-MACSA_SWEEP_BCO_ITERATIONS = 100
-MACSA_SWEEP_SEED = 0
-MACSA_SWEEP_STEM = f"final_macsa_mandl8_alpha_sweep_iter{MACSA_SWEEP_BCO_ITERATIONS}"
-OUR_MODEL_PATH = None
+# --- runtime run config (immutable; built by configure()) ----------------------
+
+@dataclass(frozen=True)
+class MacsaRunConfig:
+    """Runtime knobs of the MACSA sweep -- explicit, no module globals."""
+    bco_iterations: int
+    seed: int
+    edit_weights_path: Path
+    edit_adj_cond_feats: int = 0
+
+    @property
+    def sweep_stem(self) -> str:
+        return f"final_macsa_mandl8_alpha_sweep_iter{self.bco_iterations}"
+
+    def summary(self) -> dict:
+        return {
+            "scenario_dir": str(MACSA_SCENARIO_DIR),
+            "alpha_grid": MACSA_ALPHA_GRID,
+            "bco_iterations": self.bco_iterations,
+            "bco_bees": MACSA_SWEEP_BEES,
+            "seed": self.seed,
+            "force_cpu": MACSA_FORCE_CPU,
+            "our_model": Path(self.edit_weights_path).name,
+        }
 
 
-def configure(*, smoke=False, our_model_path=None, seeds=None):
-    """Inject the runtime-dependent values and wire the Our-NBCO checkpoint.
+def configure(ctx, *, smoke=False, seeds=None) -> MacsaRunConfig:
+    """Build the immutable MACSA run config from the notebook's RunContext.
 
-    ``smoke`` collapses the sweep to a single BCO iteration; ``our_model_path``
-    selects the edit-model checkpoint (defaulting to the finetuned adj model);
-    ``seeds`` provides the sweep seed. Mirrors the side effects the notebook cell
-    used to perform inline (setting ``eval_lib.helpers`` module globals).
+    ``smoke`` collapses the sweep to a single BCO iteration; the edit-model
+    checkpoint comes from ``ctx.edit_weights_path`` (the suite profile);
+    ``seeds`` provides the sweep seed.
     """
-    global MACSA_SWEEP_BCO_ITERATIONS, MACSA_SWEEP_SEED, MACSA_SWEEP_STEM, OUR_MODEL_PATH
-    MACSA_SWEEP_BCO_ITERATIONS = 1 if smoke else 100
-    if our_model_path is None:
-        from eval_lib.context import EDIT_MODEL_WEIGHTS_DIR
-        our_model_path = (EDIT_MODEL_WEIGHTS_DIR /
-                          "improvement_lc_rttconn_adj_w10_t02_finetune100.pt")
-    OUR_MODEL_PATH = our_model_path
     seeds = seeds or [0]
-    MACSA_SWEEP_SEED = int(seeds[0])
-    MACSA_SWEEP_STEM = f"final_macsa_mandl8_alpha_sweep_iter{MACSA_SWEEP_BCO_ITERATIONS}"
-    _eh.EDIT_MODEL_WEIGHTS_PATH = OUR_MODEL_PATH
-    _eh.EDIT_MODEL_N_ADJ_COND_FEATS = 0
-    return config_summary()
-
-
-def config_summary():
-    return {
-        "scenario_dir": str(MACSA_SCENARIO_DIR),
-        "alpha_grid": MACSA_ALPHA_GRID,
-        "bco_iterations": MACSA_SWEEP_BCO_ITERATIONS,
-        "bco_bees": MACSA_SWEEP_BEES,
-        "seed": MACSA_SWEEP_SEED,
-        "force_cpu": MACSA_FORCE_CPU,
-        "our_model": Path(OUR_MODEL_PATH).name if OUR_MODEL_PATH else None,
-    }
+    return MacsaRunConfig(
+        bco_iterations=1 if smoke else 100,
+        seed=int(seeds[0]),
+        edit_weights_path=Path(ctx.edit_weights_path),
+        edit_adj_cond_feats=int(ctx.edit_adj_cond_feats),
+    )
 
 
 def macsa_alpha_tag(alpha):
     return f"{float(alpha):.1f}".rstrip("0").rstrip(".").replace("-", "m").replace(".", "p") or "0"
 
 
-def macsa_alpha_label(alpha):
-    return f"Our NBCO alpha={float(alpha):.1f} (iter={MACSA_SWEEP_BCO_ITERATIONS})"
+def macsa_alpha_label(alpha, n_iterations):
+    return f"Our NBCO alpha={float(alpha):.1f} (iter={int(n_iterations)})"
 
 
 def macsa_alpha_weights(alpha):
@@ -224,14 +226,17 @@ def macsa_build_our_cfg(spec, *, alpha, adj_target, adj_objective,
 
 
 def macsa_run_our_nbco(seed_routes, *, tensors, spec, alpha, adj_target,
-                        adj_objective, n_iterations, n_bees, seed, force_cpu):
+                        adj_objective, n_iterations, n_bees, seed, force_cpu,
+                        edit_weights_path, edit_adj_cond_feats=0):
     cfg = macsa_build_our_cfg(spec, alpha=alpha, adj_target=adj_target,
                                adj_objective=adj_objective,
                                n_iterations=n_iterations, n_bees=n_bees,
                                seed=seed, force_cpu=force_cpu)
     t0 = _t.perf_counter()
-    _run_name, _metrics, _unserved, routes, _mutation_counts = run_bco(
-        cfg, seed_routes, tensors=tensors, run_name_scope=f"{MACSA_SCENARIO_NAME}_")
+    _run_name, _metrics, _unserved, routes, _mutation_counts = run_bco_from_cfg(
+        cfg, seed_routes, tensors, run_name_scope=f"{MACSA_SCENARIO_NAME}_",
+        edit_weights_path=edit_weights_path,
+        edit_n_adjustment_cond_feats=int(edit_adj_cond_feats))
     return as_route_tensor(routes), _t.perf_counter() - t0
 
 
@@ -298,9 +303,8 @@ def macsa_draw_grid(*, routes, rows_by_method, coords, street_adj, demand,
     return fig
 
 
-def macsa_save_fig(fig, stem, suffix):
-    import eval_lib.paper as _paper
-    path = PAPER_DIR / f"{_paper.PAPER_PREFIX}{stem}_{suffix}.png"
+def macsa_save_fig(fig, stem, suffix, *, prefix):
+    path = PAPER_DIR / f"{prefix}{stem}_{suffix}.png"
     fig.savefig(path, dpi=MACSA_DPI, bbox_inches="tight")
     plt.close(fig)
     print(f"[paper] figure -> {path}")
@@ -333,7 +337,5 @@ def macsa_select_best_sweep_row(sweep_df, macsa_row):
 
 # Export the static scenario constants + every helper so the notebook can do
 # ``from experiments.macsa import *`` and keep calling them by their bare names.
-# OUR_MODEL_PATH is deliberately NOT exported so importing here never clobbers
-# the notebook's own training-time OUR_MODEL_PATH.
 __all__ = [n for n in dict(globals()) if n.startswith("MACSA_") or n.startswith("macsa_")]
-__all__ += ["configure", "config_summary"]
+__all__ += ["configure", "MacsaRunConfig"]

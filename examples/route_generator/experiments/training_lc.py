@@ -612,9 +612,8 @@ def post_training_convergence(cfg, *, best_model_path, benchmark_specs,
     import pandas as pd
     from omegaconf import OmegaConf
 
-    import eval_lib.helpers as _eh
-    from eval_lib import run_bco
     from connectpt.routes_generator.search.bco_config import compose_bco_cfg as build_bco_cfg
+    from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
 
     city = str(cfg.report.post_train.city)
     iters = int(cfg.report.post_train.iters)
@@ -623,10 +622,9 @@ def post_training_convergence(cfg, *, best_model_path, benchmark_specs,
     condition_on_adj_target = bool(int(
         cfg.model.route_generator.kwargs.get("n_adjustment_cond_feats", 0)) > 0)
 
-    _eh.EDIT_MODEL_WEIGHTS_PATH = best_model_path
-    _eh.EDIT_MODEL_N_ADJ_COND_FEATS = (1 if condition_on_adj_target else 0)
+    edit_adj_cond_feats = 1 if condition_on_adj_target else 0
     print(f"[post-train] edit bee model <- {best_model_path.name} "
-          f"(adj_cond_feats={_eh.EDIT_MODEL_N_ADJ_COND_FEATS})")
+          f"(adj_cond_feats={edit_adj_cond_feats})")
 
     spec = next(s for s in benchmark_specs if s["city"] == city)
     tensors, init = load_benchmark_graph(spec)
@@ -645,8 +643,10 @@ def post_training_convergence(cfg, *, best_model_path, benchmark_specs,
         OmegaConf.update(bco_cfg, "n_iterations", int(iters), force_add=True)
         hist_out = {}
         t0 = _time.perf_counter()
-        run_bco(bco_cfg, init, tensors=tensors, run_name_scope=f"{city}_",
-                cost_history_out=hist_out)
+        run_bco_from_cfg(bco_cfg, init, tensors, run_name_scope=f"{city}_",
+                         cost_history_out=hist_out,
+                         edit_weights_path=best_model_path,
+                         edit_n_adjustment_cond_feats=edit_adj_cond_feats)
         dt = _time.perf_counter() - t0
         h = hist_out.get("history")
         y = (np.asarray(h.numpy() if hasattr(h, "numpy") else h).reshape(-1)

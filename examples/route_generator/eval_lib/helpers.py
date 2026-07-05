@@ -4,10 +4,10 @@ Extracted verbatim from the notebook's "Helper Functions" cell so the notebook
 stays readable. Free names the helpers used to resolve against the notebook
 namespace are provided here: repo paths via :mod:`eval_lib.context`, the unified
 objective read from the single YAML source via
-``connectpt.routes_generator.objectives.load_unified_objective``, route-plotting
-helpers via :mod:`eval_lib.plots`, and the benchmark tensors via the module-level
-``INPUT_TENSORS`` (registered once by the notebook with
-:func:`set_input_tensors`, replacing the old ``input_tensors`` notebook global).
+``connectpt.routes_generator.objectives.load_unified_objective``, and
+route-plotting helpers via :mod:`eval_lib.plots`. Runtime knobs (edit-model
+checkpoint, output prefix) are NOT module state anymore -- they travel
+explicitly via :class:`eval_lib.run_context.RunContext`.
 """
 import numpy as np
 import pandas as pd
@@ -24,7 +24,6 @@ from connectpt.routes_generator.improvement_learning import (
     summarize_route_action_stats)
 from connectpt.routes_generator.utils import get_eval_cfg
 from connectpt.routes_generator.eval_route_generator import eval_model
-from connectpt.routes_generator.search.edit_bee import build_edit_bee_model
 from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
 from connectpt.routes_generator.search.bco_config import (
     compose_bco_cfg as build_bco_cfg, safe_run_name,
@@ -51,26 +50,16 @@ MEDIAN_CONNECTIVITY_WEIGHT = _OBJ.median_connectivity_weight
 DISABLED_COST_COMPONENTS = list(_OBJ.disabled_components)
 # Non-objective run defaults (were eval_lib.params knobs, not part of the cost).
 LC_SAMPLES = 100
+# FROZEN-NOTEBOOK COMPAT: referenced by evaluation.ipynb; not used by new code.
 USE_NEURAL_BCO = False
 
 
-# Benchmark tensors used by make_test_dataloader. The notebook registers them
-# once via set_input_tensors(); this replaces the old `input_tensors` global.
-INPUT_TENSORS = None
-
-# Adjustment-conditioning feature count of the edit-model checkpoint pointed
-# to by EDIT_MODEL_WEIGHTS_PATH (0 = unconditioned legacy checkpoints).
-EDIT_MODEL_N_ADJ_COND_FEATS = 0
-
-
-def set_input_tensors(tensors):
-    """Register the default benchmark tensors used by make_test_dataloader."""
-    global INPUT_TENSORS
-    INPUT_TENSORS = tensors
-
-
 def make_test_dataloader(dataset_cfg):
-    dataset = get_dataset_from_config(dataset_cfg, tensors=INPUT_TENSORS)
+    """Dataloader for a dataset described entirely by ``dataset_cfg``.
+
+    For explicit in-memory tensors use :func:`make_tensor_dataloader`.
+    """
+    dataset = get_dataset_from_config(dataset_cfg)
     return DataLoader(dataset, batch_size=1)
 
 
@@ -277,36 +266,24 @@ def build_rpc_routes(spec, tensors, run_name=None, n_samples=1):
         routes, spec["n_routes"], spec["max_route_len"])
 
 
-def build_edit_model(device, weights_path=None, load_weights=True):
-    """Load the trim-capable edit model used by edit/trim BCO mutations.
-
-    Thin wrapper over the library builder
-    :func:`connectpt.routes_generator.search.edit_bee.build_edit_bee_model`,
-    supplying the notebook's module-level defaults: ``weights_path`` defaults to
-    ``EDIT_MODEL_WEIGHTS_PATH`` and the adjustment-conditioning feature count to
-    ``EDIT_MODEL_N_ADJ_COND_FEATS`` (set both together when pointing at a
-    conditioned checkpoint). ``load_weights=False`` returns an untrained model of
-    the same architecture (RL-ablation baseline).
-    """
-    return build_edit_bee_model(
-        device, weights_path or EDIT_MODEL_WEIGHTS_PATH,
-        load_weights=load_weights,
-        n_adjustment_cond_feats=EDIT_MODEL_N_ADJ_COND_FEATS)
-
-
 def run_bco(cfg, init_routes, mutation_counts_out=None, *,
             tensors=None, run_name_scope="", cost_history_out=None,
             iteration_callback=None):
-    # Thin wrapper over the library-owned run_bco_from_cfg: resolve the dataset
-    # tensors (tensors=None -> the registered Mumford0 INPUT_TENSORS; a dict ->
-    # explicit tensor graph) and supply the notebook's edit-model globals. The
-    # cost/model/data build + seeded run + cost breakdown all live in the library.
+    """FROZEN-NOTEBOOK COMPAT (experiment.ipynb) -- do not use in new code.
+
+    Thin wrapper over the library-owned
+    :func:`connectpt.routes_generator.search.cfg_run.run_bco_from_cfg`, pinned
+    to the legacy default edit checkpoint
+    (``eval_lib.context.EDIT_MODEL_WEIGHTS_PATH``). New code calls
+    ``run_bco_from_cfg`` directly with an explicit ``edit_weights_path``
+    (usually ``RunContext.edit_weights_path``).
+    """
     return run_bco_from_cfg(
-        cfg, init_routes, INPUT_TENSORS if tensors is None else tensors,
+        cfg, init_routes, tensors,
         mutation_counts_out=mutation_counts_out, run_name_scope=run_name_scope,
         cost_history_out=cost_history_out, iteration_callback=iteration_callback,
         edit_weights_path=EDIT_MODEL_WEIGHTS_PATH,
-        edit_n_adjustment_cond_feats=EDIT_MODEL_N_ADJ_COND_FEATS)
+        edit_n_adjustment_cond_feats=0)
 
 
 def build_default_bco_variants():
@@ -442,6 +419,3 @@ def build_default_bco_variants():
 
 
 BCO_VARIANTS = build_default_bco_variants()
-
-
-BCO_VARIANTS
