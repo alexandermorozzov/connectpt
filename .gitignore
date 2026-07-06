@@ -46,3 +46,15 @@ datasets
 # training logs -- are kept local only; regenerate by running the notebooks.
 artifacts/
 .tmp_pycache
+BOARD.md
+CLAUDE.md
+.claude/worktrees/mystifying-tesla-f6b0e2
+board/milestone-001-kill-module-globals.md
+board/milestone-002-declarative-config-overrides.md
+board/milestone-003-native-bee-plan.md
+board/milestone-004-split-transit-time-estimator.md
+board/milestone-005-split-bee-colony.md
+board/milestone-006-split-models-improvement.md
+board/milestone-007-installable-library.md
+board/milestone-008-dead-code-inventory.md
+board/milestone-009-notebook-on-wrappers.md
