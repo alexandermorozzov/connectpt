@@ -420,26 +420,16 @@ def _choose_route_indices(bee_networks, demand, n_routes,
 
 def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                mod_steps_per_pass=2, shorten_prob=0.2, n_iterations=400,
-               n_type1_bees=None, n_type2_bees=None, n_type4_bees=0,
-               n_type5_bees=0, n_type6_bees=0, n_type7_bees=0,
+               *, plan,
                silent=False,
                iteration_callback=None,
                force_linking_unlinked=False,
-               bee_model=None, edit_model=None,
                sum_writer=None, mutation_counts_out=None,
                adjustment_degree_weight=0.0,
                adjustment_degree_gap=0.1,
                adjustment_degree_mode='current',
                adjustment_degree_objective='raw',
                adjustment_degree_target=0.2,
-               ignore_type4_max_route_len=False,
-               ignore_type5_max_route_len=False,
-               ignore_type6_max_route_len=False,
-               ignore_type7_max_route_len=False,
-               type4_allow_halt=True,
-               type5_allow_halt=True,
-               type6_allow_halt=True,
-               type7_allow_halt=True,
                use_demand_weighted_route_selection=False,
                worse_accept_temperature=0.0,
                worse_accept_decay=0.995,
@@ -465,24 +455,16 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         iteration, called NP in the paper.
     mod_steps_per_pass -- The number of modifications each bee considers in the
         forward pass, called NC in the paper.
-    shorten_prob -- The probability that type-2 bees will shorten a route,
+    shorten_prob -- The probability that shorten bees will shorten a route,
         called P in the paper.  In their experiments, they use 0.2.
     n_iters -- The number of iterations to perform, called IT in the paper.
-    n_type1_bees -- There are 2 types of bees used in the algorithm, which
-        modify the solution in different ways.  This parameter determines the
-        balance between them.  The paper isn't clear how many of each they use,
-        so by default we make it half-and-half.
-    n_type4_bees -- neural construction bees that apply one extension/halt
-        step to the selected route.
-    n_type5_bees -- neural edit bees that apply one extend/trim/halt step.
-    n_type6_bees -- neural trim-only bees that apply one trim/halt step.
-    n_type7_bees -- neural compound bees that apply one trim-only step and
-        then one construction/extension step before evaluation.
-    type4_allow_halt/type5_allow_halt/type6_allow_halt/type7_allow_halt --
-        whether the corresponding one-step mutation bees may return a no-op
-        halt when another action is valid.
+    plan -- an ExecutablePlan (search.executable_plan): the ordered mutation-
+        operator groups (rebuild / shorten / RPC / construction-extend /
+        edit / trim / trim-then-extend) with their bee counts, models and
+        per-operator halt/max-len flags. Built from the flat ``n_type*_bees``
+        config format via ``ExecutablePlan.from_flat_cfg`` or from declarative
+        BeeSpecs via ``ExecutablePlan.from_specs``.
     silent -- if true, no tqdm output or printing
-    bee_model -- if a torch model is provided, use it as the only bee type.
     adjustment_degree_weight -- penalty weight for changing routes too much
         relative to the original initialized network.
     adjustment_degree_gap -- gap parameter used in sequence alignment when
