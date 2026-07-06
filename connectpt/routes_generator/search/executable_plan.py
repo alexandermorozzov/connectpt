@@ -23,8 +23,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .. import bee_colony as _bc
+import importlib
+
+import torch
+
 from .. import utils as _lrnu
+
+# Import the bee_colony *module* (not the package attribute): the package
+# __init__ rebinds ``connectpt.routes_generator.bee_colony`` to the compat
+# ``bee_colony`` function, so ``from .. import bee_colony`` would grab that
+# function instead of the module whose mutation helpers we need here.
+_bc = importlib.import_module("connectpt.routes_generator.bee_colony")
 
 
 # ---------------------------------------------------------------------------
@@ -285,29 +294,124 @@ class ExecutablePlan:
                     "edit_model must have supports_trim_actions=True to "
                     "drive edit/trim/compound mutations")
 
+    # -- one mutation step ---------------------------------------------------
+
+    def attempted_type_counts(self) -> dict:
+        """Legacy ``n_type1..n_type7`` attempted-mutation counts (slot order).
+
+        The engine records mutation stats by canonical slot; groups are always
+        the seven canonical operator slots in order, so ``groups[i].count`` is
+        ``n_type{i+1}``."""
+        return {f"n_type{i}": int(g.count)
+                for i, g in enumerate(self.groups, start=1)}
+
+    def get_mutants(self, bee_networks, chosen_route_idxs, *, direct_sat_dmd,
+                    shorten_prob, street_node_neighbours, shortest_paths,
+                    force_linking_unlinked, env_state,
+                    single_bee_env_state=None, adj_condition_target=None,
+                    adj_condition_weight=None,
+                    process_neural_bees_sequentially=False):
+        """Apply one mutation step to every bee, dispatched by plan group.
+
+        Reproduces the legacy ``bee_colony.get_mutants`` bit-for-bit without the
+        ``n_type1..n_type7`` branching: draw one bee permutation, slice it by
+        group counts in canonical (slot) order, refill empty routes, then run
+        each group's operator over its slots. Returns the mutated networks and a
+        per-bee slot tensor (1..7) for mutation stats.
+        """
+        bee_networks = bee_networks.clone()
+        seq_state = (single_bee_env_state if single_bee_env_state is not None
+                     else env_state)
+        max_n_nodes = bee_networks.shape[3]
+        gather_idx = chosen_route_idxs[..., None, None].expand(
+            -1, -1, -1, max_n_nodes)
+        modified_routes = bee_networks.gather(2, gather_idx).squeeze(2)
+        empty_routes = (modified_routes > -1).sum(-1) == 0
+        n_bees = bee_networks.shape[1]
+        dev = bee_networks.device
+
+        # one bee permutation, sliced by group counts in canonical slot order
+        scen_idxs = torch.randperm(n_bees, device=dev)
+        mutation_types = torch.zeros(n_bees, device=dev, dtype=torch.long)
+        group_idxs = []
+        off = 0
+        for slot, g in enumerate(self.groups, start=1):
+            idxs = scen_idxs[off:off + g.count]
+            off += g.count
+            group_idxs.append(idxs)
+            mutation_types[idxs] = slot
+
+        # remaining-network state: the heuristic rebuild (no construction model)
+        # and force-linked empty-route construction both need the routes NOT
+        # under mutation. Matches the legacy condition exactly.
+        remaining_state = None
+        if self.construction_model is None or (
+                empty_routes.any() and force_linking_unlinked):
+            unsel_routes = _bc.tu.get_unselected_routes(
+                bee_networks, chosen_route_idxs)
+            remaining_state = env_state.clone()
+            remaining_state.replace_routes(unsel_routes.flatten(0, 1))
+
+        if empty_routes.any():
+            new_empty = _bc.get_new_route_variants(
+                modified_routes, direct_sat_dmd, shortest_paths,
+                force_linking_unlinked=force_linking_unlinked,
+                remaining_state=remaining_state)
+            modified_routes[empty_routes] = new_empty[empty_routes]
+
+        ctx = MutationContext(
+            bee_networks=bee_networks, chosen_route_idxs=chosen_route_idxs,
+            modified_routes=modified_routes, env_state=env_state,
+            seq_state=seq_state, remaining_state=remaining_state,
+            process_sequentially=process_neural_bees_sequentially,
+            direct_sat_dmd=direct_sat_dmd, shorten_prob=shorten_prob,
+            street_node_neighbours=street_node_neighbours,
+            shortest_paths=shortest_paths,
+            force_linking_unlinked=force_linking_unlinked,
+            adj_condition_target=adj_condition_target,
+            adj_condition_weight=adj_condition_weight, max_n_nodes=max_n_nodes)
+
+        # Each slot is a disjoint block of bees; run in canonical order so the
+        # RNG stream (empty-route refill, then each operator) matches the legacy
+        # typed dispatch. Empty groups consume no RNG and are skipped.
+        new_routes = modified_routes.clone()
+        for g, idxs in zip(self.groups, group_idxs):
+            if g.count == 0:
+                continue
+            new_routes[:, idxs] = g.op.mutate(ctx, idxs)
+
+        bee_networks.scatter_(2, gather_idx, new_routes[..., None, :])
+        return bee_networks, mutation_types
+
     # -- builders ------------------------------------------------------------
 
     @classmethod
-    def from_flat_cfg(cls, cfg, *, bee_model=None, edit_model=None):
-        """Adapt the flat ``n_type*_bees`` config format (captured presets).
+    def from_counts(cls, *, n_bees, n_type1=None, n_type2=None, n_type4=0,
+                    n_type5=0, n_type6=0, n_type7=0, bee_model=None,
+                    edit_model=None, type4_allow_halt=True,
+                    type5_allow_halt=True, type6_allow_halt=True,
+                    type7_allow_halt=True, ignore_type4_max_route_len=False,
+                    ignore_type5_max_route_len=False,
+                    ignore_type6_max_route_len=False,
+                    ignore_type7_max_route_len=False):
+        """Build a plan from the legacy per-type bee counts + model roles.
 
-        Reproduces the legacy engine's defaulting exactly: ``n_type1_bees``
-        omitted -> half the bees; ``n_type2_bees`` omitted -> the remainder
-        after the explicit counts; any bees left over become random-path-
-        combiner rebuilds (the legacy type-3 remainder). This builder is the
-        flat-format compatibility boundary -- new bee sets are declarative
-        specs (``from_specs``).
+        Reproduces the old ``bee_colony`` defaulting exactly: ``n_type1``
+        omitted -> half the bees; ``n_type2`` omitted -> the remainder after the
+        explicit counts; any bees left over become random-path-combiner rebuilds
+        (the legacy type-3 remainder); a trim-capable construction model doubles
+        as the edit model when no explicit edit model is given. This is the
+        taxonomy compatibility boundary used by the old-signature ``bee_colony``
+        wrapper -- new bee sets are declarative specs (:meth:`from_specs`).
         """
-        n_bees = int(cfg.n_bees)
-        n_type4 = int(cfg.get("n_type4_bees", 0))
-        n_type5 = int(cfg.get("n_type5_bees", 0))
-        n_type6 = int(cfg.get("n_type6_bees", 0))
-        n_type7 = int(cfg.get("n_type7_bees", 0))
-        n_type1 = cfg.get("n_type1_bees", None)
+        n_bees = int(n_bees)
+        n_type4 = int(n_type4)
+        n_type5 = int(n_type5)
+        n_type6 = int(n_type6)
+        n_type7 = int(n_type7)
         if n_type1 is None:
             n_type1 = n_bees // 2
         n_type1 = int(n_type1)
-        n_type2 = cfg.get("n_type2_bees", None)
         if n_type2 is None:
             n_type2 = (n_bees - n_type1 - n_type4 - n_type5 - n_type6
                        - n_type7)
@@ -326,9 +430,6 @@ class ExecutablePlan:
                                           False):
             edit_model = bee_model
 
-        def flag(key, default):
-            return bool(cfg.get(key, default))
-
         rebuild_op = (NeuralRebuildOp(bee_model, name="type1")
                       if bee_model is not None else
                       HeuristicRebuildOp(name="type1"))
@@ -339,28 +440,56 @@ class ExecutablePlan:
             PlanGroup(NeuralRebuildOp(None, name="type3", lazy_rpc=True),
                       n_type3),
             PlanGroup(ConstructionExtendOp(
-                bee_model, name="type4",
-                allow_halt=flag("type4_allow_halt", True),
-                ignore_max_route_len=flag("ignore_type4_max_route_len", False),
+                bee_model, name="type4", allow_halt=bool(type4_allow_halt),
+                ignore_max_route_len=bool(ignore_type4_max_route_len),
             ), n_type4),
             PlanGroup(EditOp(
-                edit_model, name="type5",
-                allow_halt=flag("type5_allow_halt", True),
-                ignore_max_route_len=flag("ignore_type5_max_route_len", False),
+                edit_model, name="type5", allow_halt=bool(type5_allow_halt),
+                ignore_max_route_len=bool(ignore_type5_max_route_len),
             ), n_type5),
             PlanGroup(TrimOp(
-                edit_model, name="type6",
-                allow_halt=flag("type6_allow_halt", True),
-                ignore_max_route_len=flag("ignore_type6_max_route_len", False),
+                edit_model, name="type6", allow_halt=bool(type6_allow_halt),
+                ignore_max_route_len=bool(ignore_type6_max_route_len),
             ), n_type6),
             PlanGroup(TrimThenExtendOp(
                 edit_model, extend_model, name="type7",
-                allow_halt=flag("type7_allow_halt", True),
-                ignore_max_route_len=flag("ignore_type7_max_route_len", False),
+                allow_halt=bool(type7_allow_halt),
+                ignore_max_route_len=bool(ignore_type7_max_route_len),
             ), n_type7),
         ]
         return cls(groups, construction_model=bee_model,
                    edit_model=edit_model)
+
+    @classmethod
+    def from_flat_cfg(cls, cfg, *, bee_model=None, edit_model=None):
+        """Adapt the flat ``n_type*_bees`` config format (captured presets).
+
+        Thin wrapper over :meth:`from_counts` that reads the flat cfg keys with
+        their historical defaults. The flat format is a compatibility surface --
+        new bee sets are written as declarative specs (:meth:`from_specs`).
+        """
+        return cls.from_counts(
+            n_bees=cfg.n_bees,
+            n_type1=cfg.get("n_type1_bees", None),
+            n_type2=cfg.get("n_type2_bees", None),
+            n_type4=cfg.get("n_type4_bees", 0),
+            n_type5=cfg.get("n_type5_bees", 0),
+            n_type6=cfg.get("n_type6_bees", 0),
+            n_type7=cfg.get("n_type7_bees", 0),
+            bee_model=bee_model, edit_model=edit_model,
+            type4_allow_halt=cfg.get("type4_allow_halt", True),
+            type5_allow_halt=cfg.get("type5_allow_halt", True),
+            type6_allow_halt=cfg.get("type6_allow_halt", True),
+            type7_allow_halt=cfg.get("type7_allow_halt", True),
+            ignore_type4_max_route_len=cfg.get(
+                "ignore_type4_max_route_len", False),
+            ignore_type5_max_route_len=cfg.get(
+                "ignore_type5_max_route_len", False),
+            ignore_type6_max_route_len=cfg.get(
+                "ignore_type6_max_route_len", False),
+            ignore_type7_max_route_len=cfg.get(
+                "ignore_type7_max_route_len", False),
+        )
 
     @classmethod
     def from_specs(cls, specs, policies: dict, *, models: dict | None = None,

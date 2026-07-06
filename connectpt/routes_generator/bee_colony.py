@@ -418,7 +418,8 @@ def _choose_route_indices(bee_networks, demand, n_routes,
     return chosen_flat.reshape(bee_networks.shape[:2])
 
 
-def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
+def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
+               passes_per_it=5,
                mod_steps_per_pass=2, shorten_prob=0.2, n_iterations=400,
                *, plan,
                silent=False,
@@ -507,37 +508,7 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         then reassembled. This reduces peak memory for large single graphs
         while preserving the default batched behaviour when False.
     """
-    if edit_model is None and getattr(bee_model, 'supports_trim_actions', False):
-        edit_model = bee_model
-
-    if n_type1_bees is None:
-        n_type1_bees = n_bees // 2
-    if n_type2_bees is None:
-        # assume no type-3/4/5/6/7 bees if not specified
-        n_type2_bees = (n_bees - n_type1_bees - n_type4_bees -
-                        n_type5_bees - n_type6_bees - n_type7_bees)
-    n_type3_bees = (n_bees - n_type1_bees - n_type2_bees -
-                    n_type4_bees - n_type5_bees - n_type6_bees -
-                    n_type7_bees)
-    if n_type3_bees < 0:
-        raise ValueError(
-            "Sum of n_type1/2/4/5/6/7 bees exceeds n_bees: "
-            f"{n_type1_bees}+{n_type2_bees}+{n_type4_bees}+"
-            f"{n_type5_bees}+{n_type6_bees}+{n_type7_bees} "
-            f"> {n_bees}"
-        )
-    trim_bees = n_type5_bees + n_type6_bees + n_type7_bees
-    if trim_bees > 0 and edit_model is None:
-        raise ValueError(
-            "n_type5_bees/n_type6_bees/n_type7_bees > 0 requires an edit_model that "
-            "supports trim actions (set edit_model when calling bee_colony)."
-        )
-    if trim_bees > 0 and not getattr(edit_model, 'supports_trim_actions',
-                                     False):
-        raise ValueError(
-            "edit_model must have supports_trim_actions=True to drive "
-            "type-5/type-6/type-7 mutations."
-        )
+    plan.validate(n_bees)
     if worse_accept_temperature < 0:
         raise ValueError("worse_accept_temperature must be >= 0")
     if worse_accept_decay <= 0:
@@ -557,11 +528,10 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     if trim_grace_period < 0:
         raise ValueError("trim_grace_period must be >= 0")
 
-    if n_type3_bees > 0:
-        # instantiate a random path-combining model
-        rpc_model = lrnu.get_random_path_combiner()
-    else:
-        rpc_model = None
+    # materialize lazily-built operator models (the random path combiner) at
+    # the exact point the legacy engine instantiated them, so the RNG order and
+    # model init match bit-for-bit.
+    plan.materialize()
 
     batch_size = state.batch_size
 
@@ -611,8 +581,11 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     exp_states = sum([[substate] * n_bees 
                       for substate in state.batch_to_list()], [])
     bee_states = RouteGenBatchState.batch_from_list(exp_states)
-    if bee_model is not None:
-        bee_states = bee_model.setup_planning(bee_states)
+    # the construction ("bee") model prepares the bee states; heuristic-only
+    # plans have no such model and skip planning setup (legacy semantics).
+    planning_model = plan.planning_model
+    if planning_model is not None:
+        bee_states = planning_model.setup_planning(bee_states)
     # Sequential neural-bee processing runs the model on one bee at a time and
     # needs a state whose batch equals the number of graphs (not graphs *
     # n_bees), so a single bee's network is not broadcast up to the full bee
@@ -621,8 +594,8 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
     if process_neural_bees_sequentially:
         single_bee_states = RouteGenBatchState.batch_from_list(
             state.batch_to_list())
-        if bee_model is not None:
-            single_bee_states = bee_model.setup_planning(single_bee_states)
+        if planning_model is not None:
+            single_bee_states = planning_model.setup_planning(single_bee_states)
 
     metric_names = cost_obj.get_metric_names()
     
@@ -726,43 +699,19 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
                 gather_idx = gather_idx.expand(-1, -1, -1, max_n_nodes)
                 old_modified_routes = bee_networks.gather(2, gather_idx).squeeze(2)
                 _record_attempted_mutations(
-                    mutation_counts_out,
-                    n_type1=n_type1_bees,
-                    n_type2=n_type2_bees,
-                    n_type3=n_type3_bees,
-                    n_type4=n_type4_bees,
-                    n_type5=n_type5_bees,
-                    n_type6=n_type6_bees,
-                    n_type7=n_type7_bees,
-                )
-                new_bee_networks, mutation_types = \
-                    get_mutants(bee_networks, chosen_route_idxs, n_type1_bees,
-                                n_type2_bees, direct_sat_dmd, shorten_prob,
-                                street_node_neighbours, shortest_paths,
-                                force_linking_unlinked, bee_model, rpc_model,
-                                bee_states, n_type4=n_type4_bees,
-                                n_type5=n_type5_bees,
-                                n_type6=n_type6_bees,
-                                n_type7=n_type7_bees,
-                                edit_model=edit_model,
-                                ignore_type4_max_route_len=
-                                ignore_type4_max_route_len,
-                                type4_allow_halt=type4_allow_halt,
-                                type5_allow_halt=type5_allow_halt,
-                                type6_allow_halt=type6_allow_halt,
-                                type7_allow_halt=type7_allow_halt,
-                                adj_condition_target=adjustment_degree_target,
-                                adj_condition_weight=adjustment_degree_weight,
-                                ignore_type5_max_route_len=
-                                ignore_type5_max_route_len,
-                                ignore_type6_max_route_len=
-                                ignore_type6_max_route_len,
-                                ignore_type7_max_route_len=
-                                ignore_type7_max_route_len,
-                                process_neural_bees_sequentially=
-                                process_neural_bees_sequentially,
-                                single_bee_env_state=single_bee_states,
-                                return_mutation_metadata=True)
+                    mutation_counts_out, **plan.attempted_type_counts())
+                new_bee_networks, mutation_types = plan.get_mutants(
+                    bee_networks, chosen_route_idxs,
+                    direct_sat_dmd=direct_sat_dmd, shorten_prob=shorten_prob,
+                    street_node_neighbours=street_node_neighbours,
+                    shortest_paths=shortest_paths,
+                    force_linking_unlinked=force_linking_unlinked,
+                    env_state=bee_states,
+                    single_bee_env_state=single_bee_states,
+                    adj_condition_target=adjustment_degree_target,
+                    adj_condition_weight=adjustment_degree_weight,
+                    process_neural_bees_sequentially=
+                    process_neural_bees_sequentially)
 
                 new_bee_raw_costs, new_bee_metrics = \
                     batched_cost_fn(new_bee_networks)
@@ -1018,6 +967,87 @@ def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
         cost_obj.adjustment_seed = None
         cost_obj.adjustment_degree_weight = 0.0
     return state, cost_history
+
+
+def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
+               mod_steps_per_pass=2, shorten_prob=0.2, n_iterations=400,
+               n_type1_bees=None, n_type2_bees=None, n_type4_bees=0,
+               n_type5_bees=0, n_type6_bees=0, n_type7_bees=0,
+               silent=False, iteration_callback=None,
+               force_linking_unlinked=False,
+               bee_model=None, edit_model=None,
+               sum_writer=None, mutation_counts_out=None,
+               adjustment_degree_weight=0.0,
+               adjustment_degree_gap=0.1,
+               adjustment_degree_mode='current',
+               adjustment_degree_objective='raw',
+               adjustment_degree_target=0.2,
+               ignore_type4_max_route_len=False,
+               ignore_type5_max_route_len=False,
+               ignore_type6_max_route_len=False,
+               ignore_type7_max_route_len=False,
+               type4_allow_halt=True,
+               type5_allow_halt=True,
+               type6_allow_halt=True,
+               type7_allow_halt=True,
+               use_demand_weighted_route_selection=False,
+               worse_accept_temperature=0.0,
+               worse_accept_decay=0.995,
+               worse_accept_min_temperature=0.001,
+               worse_selection_temperature=0.0,
+               worse_selection_decay=0.995,
+               worse_selection_min_temperature=0.001,
+               worse_selection_uniform_mix=0.05,
+               worse_selection_elite_count=1,
+               trim_grace_period=0,
+               process_neural_bees_sequentially=False,
+               early_stop_patience=None,
+               early_stop_min_delta=0.0):
+    """Backward-compatible bee_colony entry using the legacy per-type counts.
+
+    The engine (:func:`run_bee_colony_plan`) is driven by an ``ExecutablePlan``;
+    this wrapper is the compatibility surface that maps the historical
+    ``n_type1..n_type7`` bee counts + ``bee_model``/``edit_model`` roles + per-
+    type halt/max-len flags onto a plan, then runs it. It preserves the exact
+    signature the frozen notebooks (evaluation.ipynb / experiment.ipynb) and the
+    seeded search path call, so their behaviour is byte-identical.
+    """
+    from .search.executable_plan import ExecutablePlan
+    plan = ExecutablePlan.from_counts(
+        n_bees=n_bees, n_type1=n_type1_bees, n_type2=n_type2_bees,
+        n_type4=n_type4_bees, n_type5=n_type5_bees, n_type6=n_type6_bees,
+        n_type7=n_type7_bees, bee_model=bee_model, edit_model=edit_model,
+        type4_allow_halt=type4_allow_halt, type5_allow_halt=type5_allow_halt,
+        type6_allow_halt=type6_allow_halt, type7_allow_halt=type7_allow_halt,
+        ignore_type4_max_route_len=ignore_type4_max_route_len,
+        ignore_type5_max_route_len=ignore_type5_max_route_len,
+        ignore_type6_max_route_len=ignore_type6_max_route_len,
+        ignore_type7_max_route_len=ignore_type7_max_route_len)
+    return run_bee_colony_plan(
+        state, cost_obj, init_network, n_bees=n_bees,
+        passes_per_it=passes_per_it, mod_steps_per_pass=mod_steps_per_pass,
+        shorten_prob=shorten_prob, n_iterations=n_iterations, plan=plan,
+        silent=silent, iteration_callback=iteration_callback,
+        force_linking_unlinked=force_linking_unlinked,
+        sum_writer=sum_writer, mutation_counts_out=mutation_counts_out,
+        adjustment_degree_weight=adjustment_degree_weight,
+        adjustment_degree_gap=adjustment_degree_gap,
+        adjustment_degree_mode=adjustment_degree_mode,
+        adjustment_degree_objective=adjustment_degree_objective,
+        adjustment_degree_target=adjustment_degree_target,
+        use_demand_weighted_route_selection=use_demand_weighted_route_selection,
+        worse_accept_temperature=worse_accept_temperature,
+        worse_accept_decay=worse_accept_decay,
+        worse_accept_min_temperature=worse_accept_min_temperature,
+        worse_selection_temperature=worse_selection_temperature,
+        worse_selection_decay=worse_selection_decay,
+        worse_selection_min_temperature=worse_selection_min_temperature,
+        worse_selection_uniform_mix=worse_selection_uniform_mix,
+        worse_selection_elite_count=worse_selection_elite_count,
+        trim_grace_period=trim_grace_period,
+        process_neural_bees_sequentially=process_neural_bees_sequentially,
+        early_stop_patience=early_stop_patience,
+        early_stop_min_delta=early_stop_min_delta)
 
 
 def _index_single_bee(bee_networks, chosen_route_idxs, bee_idx):
