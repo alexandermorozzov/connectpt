@@ -10,8 +10,9 @@ from hydra import compose, initialize_config_dir
 
 from connectpt.routes_generator.search import (
     BeeSpec, parse_bee_specs, ConstructionSearchPolicy, EditSearchPolicy,
-    NeuralRouteActionBee, get_route_selector, get_acceptance, BeeColonyPlan,
+    NeuralRouteActionBee, get_route_selector, get_acceptance,
 )
+from connectpt.routes_generator.search.executable_plan import ExecutablePlan
 
 CFG_DIR = Path(__file__).resolve().parents[1] / "connectpt" / "routes_generator" / "cfg"
 
@@ -56,16 +57,17 @@ def test_bco_flexible_bees_yaml_parses_and_plans():
         "construction": ConstructionSearchPolicy(_StubModel(), name="construction"),
         "edit": EditSearchPolicy(_StubModel(), name="edit"),
     }
-    plan = BeeColonyPlan.from_specs(specs, policies)
+    plan = ExecutablePlan.from_specs(specs, policies)
+    counts = plan.attempted_type_counts()
 
     # construction extend -> type4; edit extend -> type5; edit trim-only -> type6;
     # edit full -> type5; compound -> type7
-    assert plan.counts["n_type4"] == 4   # neural_on_construction
-    assert plan.counts["n_type5"] == 6   # extend_only(4) + full(2)
-    assert plan.counts["n_type6"] == 2   # trim_only
-    assert plan.counts["n_type7"] == 2   # compound
+    assert counts["n_type4"] == 4   # neural_on_construction
+    assert counts["n_type5"] == 6   # extend_only(4) + full(2)
+    assert counts["n_type6"] == 2   # trim_only
+    assert counts["n_type7"] == 2   # compound
     assert plan.needs_construction and plan.needs_edit
-    assert len(plan.bees) == len(specs)
+    assert plan.total_bees == sum(s.count for s in specs)
 
 
 def test_beespec_dataclass_defaults():

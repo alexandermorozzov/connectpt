@@ -2,8 +2,9 @@
 
 setup() builds the cost (unified objective), loads each enabled model through
 the factory + strict checkpoint load (no wrapper, so old weights load), builds
-the policy adapters and translates the BeeSpecs into a BeeColonyPlan. The search
-layer never imports the training layer; it consumes checkpoints + configs only.
+the policy adapters and translates the BeeSpecs into an ExecutablePlan. The
+search layer never imports the training layer; it consumes checkpoints + configs
+only.
 
 ``run(dry_run=True)`` validates the whole wiring without running the BCO loop:
 benchmark config, cost, models (strict-loaded), policies, bee operators + plan.
@@ -20,10 +21,10 @@ from ..core.paths import ROOT_DIR
 from ..core.runs import ExperimentRun, RunArtifact
 from ..core.runtime import RunContext
 from ..model_factory import RouteModelFactory
-from ..objectives import CostFactory
+from ..objectives import CostFactory, load_bco_algo_config
 from .bee_colony_runner import BeeColonyRunner
-from .bee_plan import BeeColonyPlan
 from .bee_specs import parse_bee_specs
+from .executable_plan import ExecutablePlan
 from .benchmark_data import BenchmarkDataModule
 from .search_policies import build_policies
 
@@ -74,7 +75,9 @@ class BeeColonySearchRun(ExperimentRun):
 
         self.policies = build_policies(cfg.policies, self.models)
         self.specs = parse_bee_specs(cfg.bees)
-        self.plan = BeeColonyPlan.from_specs(self.specs, self.policies)
+        self.plan = ExecutablePlan.from_specs(
+            self.specs, self.policies, models=self.models,
+            algo_cfg=load_bco_algo_config())
 
         self.data = BenchmarkDataModule(
             city=cfg.data.city,

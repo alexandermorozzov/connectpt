@@ -12,7 +12,7 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from connectpt.routes_generator.search.bee_plan import BeeColonyPlan
+from connectpt.routes_generator.search.executable_plan import ExecutablePlan
 from connectpt.routes_generator.search.bee_specs import parse_bee_specs
 from connectpt.routes_generator.search.search_policies import (
     ConstructionSearchPolicy, EditSearchPolicy)
@@ -32,14 +32,15 @@ def _policies():
 
 def test_our_nbco_bee_set_matches_flat_counts():
     specs = parse_bee_specs(OmegaConf.load(BEE_SET).bees)
-    plan = BeeColonyPlan.from_specs(specs, _policies())
+    plan = ExecutablePlan.from_specs(specs, _policies())
 
     # The flat config's per-type counts are the ground truth.
     flat = OmegaConf.load(FLAT)
     expected = {f"n_type{i}": int(flat.get(f"n_type{i}_bees", 0)) for i in range(1, 8)}
     assert expected["n_type1"] == 5 and expected["n_type5"] == 5  # sanity on the fixture
 
-    assert plan.counts == expected, (plan.counts, expected)
+    counts = plan.attempted_type_counts()
+    assert counts == expected, (counts, expected)
     assert plan.needs_construction is True  # type-1 rebuild drives the construction model
     assert plan.needs_edit is True          # type-5 edit bees drive the edit model
 
@@ -49,10 +50,11 @@ def test_rpc_path_mix_is_type3():
     bee_colony derives the type-3 count as the remainder, so it is not emitted
     explicitly -- but the plan classifies it correctly and needs no models."""
     rpc = CFG / "search" / "bee_sets" / "rpc_trim_extend.yaml"
-    plan = BeeColonyPlan.from_specs(parse_bee_specs(OmegaConf.load(rpc).bees), _policies())
-    assert plan.counts["n_type3"] == 5   # rpc rebuild
-    assert plan.counts["n_type5"] == 5   # edit trim/extend
-    assert plan.counts["n_type1"] == 0 and plan.counts["n_type4"] == 0
+    plan = ExecutablePlan.from_specs(parse_bee_specs(OmegaConf.load(rpc).bees), _policies())
+    counts = plan.attempted_type_counts()
+    assert counts["n_type3"] == 5   # rpc rebuild
+    assert counts["n_type5"] == 5   # edit trim/extend
+    assert counts["n_type1"] == 0 and counts["n_type4"] == 0
     assert plan.needs_construction is False  # type-3 is heuristic, no model
     assert plan.needs_edit is True
 
@@ -63,9 +65,10 @@ def test_neural_rebuild_is_type1_not_type4():
     specs = parse_bee_specs([
         {"name": "r", "count": 3, "operator": "neural_rebuild", "policy": "construction"},
     ])
-    plan = BeeColonyPlan.from_specs(specs, _policies())
-    assert plan.counts["n_type1"] == 3
-    assert plan.counts["n_type4"] == 0
+    plan = ExecutablePlan.from_specs(specs, _policies())
+    counts = plan.attempted_type_counts()
+    assert counts["n_type1"] == 3
+    assert counts["n_type4"] == 0
     assert plan.needs_construction is True
 
 
@@ -84,8 +87,9 @@ from connectpt.routes_generator.core.runtime import seed_everything
 from connectpt.routes_generator.model_factory import RouteModelFactory
 from connectpt.routes_generator.objectives import CostFactory
 from connectpt.routes_generator.citygraph_dataset import get_dataset_from_config
+from connectpt.routes_generator.objectives import load_bco_algo_config
 from connectpt.routes_generator.search.edit_bee import build_edit_bee_model
-from connectpt.routes_generator.search.plan_kwargs import plan_to_search_cfg
+from connectpt.routes_generator.search.plan_kwargs import build_bco_schedule_cfg
 from connectpt.routes_generator.search.seeded_search import run_seeded_bee_colony
 from connectpt.routes_generator.torch_utils import get_batch_tensor_from_routes
 
@@ -152,12 +156,13 @@ def test_declarative_our_nbco_seeded_matches_flat_run():
                                  "min_route_len": spec["min_route_len"],
                                  "max_route_len": spec["max_route_len"]})
 
-    def run(search_cfg):
+    def run(search_cfg, plan):
         seed_everything(0)
         out = run_seeded_bee_colony(dataloader, eval_cfg, cost, R, search_cfg=search_cfg,
-                                    bee_model=construction, edit_model=edit,
-                                    device=device, silent=True)
+                                    plan=plan, device=device, silent=True)
         return _as_tensor(out[4])
+
+    models = {"construction": construction, "edit": edit}
 
     # flat reference == golden our_Mumford0 config
     flat = load_experiment_cfg("nbco_variants/our_nbco_mumford0")
@@ -165,13 +170,17 @@ def test_declarative_our_nbco_seeded_matches_flat_run():
         set_cfg_value(flat, f"eval.{k}", int(spec[k]))
     bco_cfg_set(flat, n_iterations=_N_ITERS, **UNIFIED_ADJ)
     set_cfg_value(flat, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
+    flat_plan = ExecutablePlan.from_flat_cfg(
+        flat, bee_model=construction, edit_model=edit)
 
-    # declarative path: our_nbco bee_set -> plan -> flat search cfg
-    plan = BeeColonyPlan.from_specs(parse_bee_specs(OmegaConf.load(BEE_SET).bees), _policies())
-    declarative = plan_to_search_cfg(plan, n_bees=10, n_iterations=_N_ITERS)
+    # declarative path: our_nbco bee_set -> ExecutablePlan (native) + schedule cfg
+    specs = parse_bee_specs(OmegaConf.load(BEE_SET).bees)
+    decl_plan = ExecutablePlan.from_specs(
+        specs, _policies(), models=models, algo_cfg=load_bco_algo_config())
+    declarative = build_bco_schedule_cfg(n_bees=10, n_iterations=_N_ITERS)
 
-    routes_flat = run(flat)
-    routes_decl = run(declarative)
+    routes_flat = run(flat, flat_plan)
+    routes_decl = run(declarative, decl_plan)
     assert routes_flat.shape == routes_decl.shape
     assert torch.equal(routes_flat, routes_decl), "declarative our_nbco diverged from flat"
 
@@ -185,15 +194,17 @@ def test_declarative_our_nbco_seeded_matches_flat_run():
 ])
 def test_paper_bee_sets_match_flat_counts(bee_set, flat):
     specs = parse_bee_specs(OmegaConf.load(CFG / "search" / "bee_sets" / f"{bee_set}.yaml").bees)
-    plan = BeeColonyPlan.from_specs(specs, _policies())
+    plan = ExecutablePlan.from_specs(specs, _policies())
     fv = OmegaConf.load(CFG / "experiments" / "nbco_variants" / f"{flat}.yaml")
 
+    counts = plan.attempted_type_counts()
     expected = {f"n_type{i}": int(fv.get(f"n_type{i}_bees", 0)) for i in range(1, 8)}
-    assert plan.counts == expected, (bee_set, plan.counts, expected)
+    assert counts == expected, (bee_set, counts, expected)
 
     # halt flags must match the flat variant for every ACTIVE edit type (4-7);
     # inactive types are irrelevant to the run (0 bees) so are not compared.
+    # groups are the canonical slots in order, so groups[i-1] is type-i.
     for i in range(4, 8):
-        if plan.counts[f"n_type{i}"] > 0:
-            assert plan.allow_halt[f"type{i}_allow_halt"] == bool(fv.get(f"type{i}_allow_halt", True)), \
+        if counts[f"n_type{i}"] > 0:
+            assert plan.groups[i - 1].op.allow_halt == bool(fv.get(f"type{i}_allow_halt", True)), \
                 (bee_set, f"type{i}_allow_halt")

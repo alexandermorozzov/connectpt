@@ -3,6 +3,7 @@ import importlib
 import torch
 
 from connectpt.routes_generator.bee_colony import _get_route_selection_weights
+from connectpt.routes_generator.search.executable_plan import ExecutablePlan
 
 
 bee_colony = importlib.import_module("connectpt.routes_generator.bee_colony")
@@ -99,22 +100,19 @@ def test_get_mutants_routes_type7_through_compound_helper(monkeypatch):
         fake_trim_then_extend,
     )
 
-    new_networks, mutation_types = bee_colony.get_mutants(
+    plan = ExecutablePlan.from_counts(
+        n_bees=2, n_type1=0, n_type2=0, n_type7=2,
+        bee_model=extend_model, edit_model=trim_model,
+        ignore_type7_max_route_len=True)
+    new_networks, mutation_types = plan.get_mutants(
         bee_networks,
         chosen_route_idxs,
-        n_type1=0,
-        n_type2=0,
         direct_sat_dmd=torch.zeros((1, 1, 1)),
         shorten_prob=0.0,
         street_node_neighbours=torch.zeros((1, 1, 1), dtype=torch.bool),
         shortest_paths=torch.zeros((1, 1, 1, 1), dtype=torch.long),
         force_linking_unlinked=False,
-        bee_model=extend_model,
         env_state=object(),
-        n_type7=2,
-        edit_model=trim_model,
-        ignore_type7_max_route_len=True,
-        return_mutation_metadata=True,
     )
 
     assert captured == {
@@ -166,25 +164,19 @@ def test_get_mutants_forwards_nohalt_flags_to_edit_bees(monkeypatch):
     monkeypatch.setattr(bee_colony, "get_neural_edit_variants", fake_edit)
     monkeypatch.setattr(bee_colony, "get_neural_trim_variants", fake_trim)
 
-    bee_colony.get_mutants(
+    plan = ExecutablePlan.from_counts(
+        n_bees=3, n_type1=0, n_type2=0, n_type4=1, n_type5=1, n_type6=1,
+        bee_model=extend_model, edit_model=edit_model,
+        type4_allow_halt=False, type5_allow_halt=False, type6_allow_halt=False)
+    plan.get_mutants(
         bee_networks,
         chosen_route_idxs,
-        n_type1=0,
-        n_type2=0,
         direct_sat_dmd=torch.zeros((1, 1, 1)),
         shorten_prob=0.0,
         street_node_neighbours=torch.zeros((1, 1, 1), dtype=torch.bool),
         shortest_paths=torch.zeros((1, 1, 1, 1), dtype=torch.long),
         force_linking_unlinked=False,
-        bee_model=extend_model,
         env_state=object(),
-        n_type4=1,
-        n_type5=1,
-        n_type6=1,
-        edit_model=edit_model,
-        type4_allow_halt=False,
-        type5_allow_halt=False,
-        type6_allow_halt=False,
     )
 
     assert captured == {
@@ -217,20 +209,18 @@ def test_get_mutants_can_process_type1_neural_bees_sequentially(monkeypatch):
     monkeypatch.setattr(
         bee_colony, "get_neural_variants", fake_neural_variants)
 
-    new_networks, mutation_types = bee_colony.get_mutants(
+    plan = ExecutablePlan.from_counts(
+        n_bees=3, n_type1=3, n_type2=0, bee_model=object())
+    new_networks, mutation_types = plan.get_mutants(
         bee_networks,
         chosen_route_idxs,
-        n_type1=3,
-        n_type2=0,
         direct_sat_dmd=torch.zeros((1, 1, 1)),
         shorten_prob=0.0,
         street_node_neighbours=torch.zeros((1, 1, 1), dtype=torch.bool),
         shortest_paths=torch.zeros((1, 1, 1, 1), dtype=torch.long),
         force_linking_unlinked=False,
-        bee_model=object(),
         env_state=object(),
         process_neural_bees_sequentially=True,
-        return_mutation_metadata=True,
     )
 
     assert calls == [1, 1, 1]
@@ -270,22 +260,19 @@ def test_get_mutants_can_process_type5_edit_bees_sequentially(monkeypatch):
 
     monkeypatch.setattr(bee_colony, "get_neural_edit_variants", fake_edit)
 
-    new_networks, mutation_types = bee_colony.get_mutants(
+    plan = ExecutablePlan.from_counts(
+        n_bees=3, n_type1=0, n_type2=0, n_type5=3,
+        bee_model=object(), edit_model=object())
+    new_networks, mutation_types = plan.get_mutants(
         bee_networks,
         chosen_route_idxs,
-        n_type1=0,
-        n_type2=0,
         direct_sat_dmd=torch.zeros((1, 1, 1)),
         shorten_prob=0.0,
         street_node_neighbours=torch.zeros((1, 1, 1), dtype=torch.bool),
         shortest_paths=torch.zeros((1, 1, 1, 1), dtype=torch.long),
         force_linking_unlinked=False,
-        bee_model=object(),
         env_state=object(),
-        n_type5=3,
-        edit_model=object(),
         process_neural_bees_sequentially=True,
-        return_mutation_metadata=True,
     )
 
     assert calls == [1, 1, 1]
@@ -319,16 +306,18 @@ def test_sequential_neural_bees_use_single_bee_env_state(monkeypatch):
 
     full_state = object()
     single_state = object()
-    bee_colony.get_mutants(
-        bee_networks, chosen_route_idxs, n_type1=0, n_type2=0,
+    plan = ExecutablePlan.from_counts(
+        n_bees=2, n_type1=0, n_type2=0, n_type5=2,
+        bee_model=object(), edit_model=object())
+    plan.get_mutants(
+        bee_networks, chosen_route_idxs,
         direct_sat_dmd=torch.zeros((1, 1, 1)), shorten_prob=0.0,
         street_node_neighbours=torch.zeros((1, 1, 1), dtype=torch.bool),
         shortest_paths=torch.zeros((1, 1, 1, 1), dtype=torch.long),
-        force_linking_unlinked=False, bee_model=object(),
-        env_state=full_state, n_type5=2, edit_model=object(),
+        force_linking_unlinked=False,
+        env_state=full_state,
         process_neural_bees_sequentially=True,
-        single_bee_env_state=single_state,
-        return_mutation_metadata=True)
+        single_bee_env_state=single_state)
 
     assert seen_states, "edit variant fn was never called"
     assert all(s is single_state for s in seen_states), \

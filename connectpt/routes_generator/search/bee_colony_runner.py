@@ -1,10 +1,10 @@
-"""BeeColonyRunner -- drive the existing bee_colony from a translated plan.
+"""BeeColonyRunner -- drive the bee-colony engine from an ExecutablePlan.
 
 The runner holds the cost, the loaded models, the policy adapters and the
-``BeeColonyPlan`` (per-type bee counts). ``run_suite`` builds the benchmark
-dataloader + the bee_colony kwargs from the plan and runs the existing
-``bee_colony`` through ``test_method`` -- the trained models are passed straight
-in (no wrapper owns their state_dict). This layer must NOT import training.
+``ExecutablePlan`` (the bee taxonomy: operator groups + models + halt / max-len
+flags). ``run_suite`` builds the benchmark dataloader + the run schedule and
+drives the plan-based engine through ``test_method`` -- the trained models live
+in the plan, not a wrapper. This layer must NOT import training.
 """
 from __future__ import annotations
 
@@ -24,40 +24,33 @@ class BeeColonyRunner:
 
     def plan_summary(self) -> dict:
         search = self.cfg.get("search", {})
+        counts = self.plan.attempted_type_counts()
         return {
-            "counts": dict(self.plan.counts),
+            "counts": counts,
             "needs_construction": self.plan.needs_construction,
             "needs_edit": self.plan.needs_edit,
-            "n_bees": int(search.get("n_bees", sum(self.plan.counts.values()))),
+            "n_bees": int(search.get("n_bees", self.plan.total_bees)),
         }
 
-    def _bco_kwargs(self) -> dict:
-        """Translate the plan + objective into bee_colony keyword arguments."""
-        counts = self.plan.counts
-        obj = CostFactory.load_objective("rtt_wmc_no_demand")
-        adj = obj.adjustment
-        # bee_colony accepts n_type1/2/4/5/6/7 (type3 is not a kwarg).
-        kwargs = {f"n_type{i}_bees": int(counts[f"n_type{i}"])
-                  for i in (1, 2, 4, 5, 6, 7)}
-        kwargs.update(
-            bee_model=self.models.get("construction"),  # type1/type4 neural rebuild/extend
-            edit_model=self.models.get("edit"),         # type5/6/7 edit bees
+    def _adjustment_kwargs(self) -> dict:
+        """The adjustment-degree penalty kwargs from the unified objective."""
+        adj = CostFactory.load_objective("rtt_wmc_no_demand").adjustment
+        return dict(
             adjustment_degree_weight=float(adj.weight),
             adjustment_degree_target=float(adj.target),
-            adjustment_degree_objective=str(adj.objective),  # search -> two-sided "target"
+            adjustment_degree_objective=str(adj.objective),  # two-sided "target"
             adjustment_degree_gap=float(adj.gap),
             adjustment_degree_mode=str(adj.mode),
         )
-        return kwargs
 
     def run_seeded(self, init_routes, tensors, *, eval_dims, n_iterations=None,
                    alpha=None, adj_target=None):
         """Seeded improvement of an EXISTING network (init from ``init_routes``).
 
-        Builds the tensor dataloader from ``tensors``, translates the declarative
-        plan into the flat bee_colony search cfg (:func:`plan_to_search_cfg`) and
-        runs the seeded executor. Reseeds from ``cfg.run.seed`` immediately before
-        the run so the search is reproducible independent of model-init RNG.
+        Builds the tensor dataloader from ``tensors``, assembles the run
+        schedule (:func:`build_bco_schedule_cfg`) and runs the seeded executor on
+        the ExecutablePlan. Reseeds from ``cfg.run.seed`` immediately before the
+        run so the search is reproducible independent of model-init RNG.
 
         ``alpha`` (RTT/WMC trade-off) reconfigures the cost weights in place
         (route_time_weight=alpha, median_connectivity_weight=1-alpha), matching the
@@ -70,7 +63,7 @@ class BeeColonyRunner:
 
         from ..citygraph_dataset import get_dataset_from_config
         from ..core.runtime import seed_everything
-        from .plan_kwargs import plan_to_search_cfg
+        from .plan_kwargs import build_bco_schedule_cfg
         from .seeded_search import run_seeded_bee_colony
 
         if alpha is not None:
@@ -83,8 +76,8 @@ class BeeColonyRunner:
         eval_cfg = OmegaConf.create(dict(eval_dims))
         search = self.cfg.search
         acceptance = search.get("acceptance")
-        search_cfg = plan_to_search_cfg(
-            self.plan, n_bees=int(search.n_bees),
+        search_cfg = build_bco_schedule_cfg(
+            n_bees=int(search.n_bees),
             n_iterations=int(search.n_iterations if n_iterations is None else n_iterations),
             acceptance=None if acceptance is None else dict(acceptance))
         if adj_target is not None:
@@ -93,8 +86,7 @@ class BeeColonyRunner:
         seed_everything(int(self.cfg.run.get("seed", 0)))
         out = run_seeded_bee_colony(
             dataloader, eval_cfg, self.cost_obj, init_routes, search_cfg=search_cfg,
-            bee_model=self.models.get("construction"), edit_model=self.models.get("edit"),
-            device=self.device, silent=True)
+            plan=self.plan, device=self.device, silent=True)
         _mean, _std, unserved, metrics, routes = out
         return routes, unserved, metrics
 
@@ -122,7 +114,7 @@ class BeeColonyRunner:
         from omegaconf import OmegaConf
         from torch_geometric.loader import DataLoader
 
-        from ..bee_colony import bee_colony
+        from ..bee_colony import run_bee_colony_plan
         from ..utils import test_method
 
         if not self.data.dataset:
@@ -142,10 +134,10 @@ class BeeColonyRunner:
         )
 
         out = test_method(
-            bee_colony, dataloader, eval_cfg, init_cfg, self.cost_obj,
+            run_bee_colony_plan, dataloader, eval_cfg, init_cfg, self.cost_obj,
             silent=True, return_routes=True, device=self.device,
             n_bees=int(search.n_bees), n_iterations=int(search.n_iterations),
-            **self._bco_kwargs(),
+            plan=self.plan, **self._adjustment_kwargs(),
         )
         mean_cost, std_cost, unserved, metrics, routes = out
         return {

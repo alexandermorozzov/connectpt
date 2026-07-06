@@ -35,7 +35,7 @@ def make_search_comparison_table(summaries: dict[str, dict]) -> pd.DataFrame:
 
 
 def make_search_plan_table(plan: dict) -> pd.DataFrame:
-    """Turn a BeeColonyPlan summary dict into a readable bee-mix table."""
+    """Turn a plan summary dict (BeeColonyRunner.plan_summary) into a table."""
     counts = plan.get("counts", {})
     rows = [
         {"bee_type": key, "label": _TYPE_LABELS.get(key, key), "count": int(count)}

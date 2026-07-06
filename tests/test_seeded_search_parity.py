@@ -30,6 +30,7 @@ from connectpt.routes_generator.core.paths import CONSTRUCTION_MODEL_WEIGHTS_PAT
 from connectpt.routes_generator.core.runtime import seed_everything
 from connectpt.routes_generator.model_factory import RouteModelFactory
 from connectpt.routes_generator.objectives import CostFactory, load_unified_objective
+from connectpt.routes_generator.search.executable_plan import ExecutablePlan
 from connectpt.routes_generator.search.seeded_search import run_seeded_bee_colony
 from connectpt.routes_generator.torch_utils import get_batch_tensor_from_routes
 
@@ -114,9 +115,10 @@ def _run_library_native_path(spec, tensors, R, use_neural):
         "neural_bees": use_neural,
         **obj.adj_kwargs,
     })
+    plan = ExecutablePlan.from_flat_cfg(search_cfg, bee_model=bee_model)
     _mc, _sc, unserved, metrics, routes = run_seeded_bee_colony(
         dataloader, eval_cfg, cost, R, search_cfg=search_cfg,
-        bee_model=bee_model, device=device, silent=True)
+        plan=plan, device=device, silent=True)
     return _as_tensor(routes)
 
 

@@ -11,24 +11,13 @@ from pathlib import Path
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
-from connectpt.routes_generator.search.bee_plan import BeeColonyPlan
-from connectpt.routes_generator.search.bee_specs import parse_bee_specs
-from connectpt.routes_generator.search.plan_kwargs import plan_to_search_cfg
-from connectpt.routes_generator.search.search_policies import (
-    ConstructionSearchPolicy, EditSearchPolicy)
+from connectpt.routes_generator.search.plan_kwargs import build_bco_schedule_cfg
 
 LIB_CFG = Path(__file__).resolve().parents[1] / "connectpt" / "routes_generator" / "cfg"
 
 
-def _plan():
-    policies = {"construction": ConstructionSearchPolicy(model=None, name="construction"),
-                "edit": EditSearchPolicy(model=None, name="edit")}
-    specs = parse_bee_specs(OmegaConf.load(LIB_CFG / "search" / "bee_sets" / "our_nbco.yaml").bees)
-    return BeeColonyPlan.from_specs(specs, policies)
-
-
 def test_acceptance_default_matches_algo_config():
-    cfg = plan_to_search_cfg(_plan(), n_bees=10, n_iterations=3, acceptance=None)
+    cfg = build_bco_schedule_cfg(n_bees=10, n_iterations=3, acceptance=None)
     # BCO algo-config (cfg/bco_mumford.yaml) greedy defaults
     assert cfg.worse_accept_temperature == 0.0
     assert cfg.worse_selection_uniform_mix == 0.05
@@ -37,7 +26,7 @@ def test_acceptance_default_matches_algo_config():
 
 def test_acceptance_mandl_tuned_overrides_schedule():
     mandl = OmegaConf.load(LIB_CFG / "search" / "acceptance" / "mandl_tuned.yaml").search.acceptance
-    cfg = plan_to_search_cfg(_plan(), n_bees=10, n_iterations=3, acceptance=dict(mandl))
+    cfg = build_bco_schedule_cfg(n_bees=10, n_iterations=3, acceptance=dict(mandl))
     assert cfg.worse_accept_temperature == 0.02
     assert cfg.worse_accept_decay == 0.985
     assert cfg.worse_selection_uniform_mix == 0.10

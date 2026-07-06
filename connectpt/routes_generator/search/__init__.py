@@ -16,7 +16,6 @@ from .search_policies import (
 from .route_selectors import get_route_selector
 from .acceptance import get_acceptance
 from .bee_operators import NeuralRouteActionBee, HeuristicMutationBee, CompoundBee, build_bee
-from .bee_plan import BeeColonyPlan
 from .benchmark_data import BenchmarkDataModule
 from .bee_colony_runner import BeeColonyRunner
 from .runs import BeeColonySearchRun, SearchArtifact
@@ -35,7 +34,6 @@ __all__ = [
     "HeuristicMutationBee",
     "CompoundBee",
     "build_bee",
-    "BeeColonyPlan",
     "BenchmarkDataModule",
     "BeeColonyRunner",
     "BeeColonySearchRun",
