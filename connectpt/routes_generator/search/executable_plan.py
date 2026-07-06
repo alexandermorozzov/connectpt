@@ -259,6 +259,27 @@ class ExecutablePlan:
         return any(g.op.uses_remaining_state and g.count > 0
                    for g in self.groups)
 
+    @property
+    def needs_edit(self) -> bool:
+        """The plan uses a trim-capable edit model (edit / trim-only / compound
+        bees). Lets callers decide whether to load the edit checkpoint from the
+        plan itself instead of peeking at ``n_type5/6/7`` counts."""
+        edit_kinds = ("edit", "trim", "trim_then_extend")
+        return any(g.op.kind in edit_kinds and g.count > 0 for g in self.groups)
+
+    @property
+    def needs_construction(self) -> bool:
+        """The plan uses the construction ("bee") model: a full-route neural
+        rebuild (type-1) or a construction-extend step (type-4)."""
+        for g in self.groups:
+            if g.count <= 0:
+                continue
+            if isinstance(g.op, NeuralRebuildOp) and not g.op.lazy_rpc:
+                return True
+            if isinstance(g.op, ConstructionExtendOp):
+                return True
+        return False
+
     def group_names(self) -> list[str]:
         return [g.op.name for g in self.groups]
 

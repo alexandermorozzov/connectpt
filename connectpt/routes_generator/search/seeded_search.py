@@ -17,9 +17,10 @@ from __future__ import annotations
 
 from omegaconf import OmegaConf
 
-from ..bee_colony import bee_colony
+from ..bee_colony import run_bee_colony_plan
 from ..utils import test_method
 from .bco_invocation import build_bee_colony_kwargs
+from .executable_plan import ExecutablePlan
 
 # The seeded BCO always starts from the provided routes tensor (not a
 # from-scratch heuristic like "john"); this is the paper_combined contract.
@@ -27,23 +28,28 @@ _SEEDED_INIT_CFG = {"method": "tensor"}
 
 
 def run_seeded_bee_colony(dataloader, eval_cfg, cost_obj, init_routes, *,
-                          search_cfg, bee_model=None, edit_model=None,
+                          search_cfg, plan=None, bee_model=None, edit_model=None,
                           mutation_counts_out=None, device=None,
                           silent=False, return_histories=False,
                           iteration_callback=None):
     """Run a seeded bee-colony search and return the raw ``test_method`` output.
 
-    ``search_cfg`` is the composed BCO config (bee counts + schedule + adjustment
-    block) -- translated to bee_colony kwargs by :func:`build_bee_colony_kwargs`.
-    ``init_routes`` is the starting network the search improves. The return value
-    is exactly what ``test_method`` returns (with ``return_routes=True`` and, when
-    ``return_histories`` is set, the trailing cost-history list).
+    ``search_cfg`` is the composed BCO config (schedule + adjustment block);
+    ``plan`` is the ``ExecutablePlan`` that owns the bee taxonomy. Callers that
+    already built a plan pass it directly; for compatibility, a caller may
+    instead pass ``bee_model`` / ``edit_model`` and the plan is built here from
+    the flat ``search_cfg`` counts. ``init_routes`` is the starting network the
+    search improves. The return value is exactly what ``test_method`` returns
+    (with ``return_routes=True`` and, when ``return_histories`` is set, the
+    trailing cost-history list).
     """
+    if plan is None:
+        plan = ExecutablePlan.from_flat_cfg(
+            search_cfg, bee_model=bee_model, edit_model=edit_model)
     bco_kwargs = build_bee_colony_kwargs(
-        search_cfg, bee_model=bee_model, edit_model=edit_model,
-        mutation_counts_out=mutation_counts_out)
+        search_cfg, plan=plan, mutation_counts_out=mutation_counts_out)
     return test_method(
-        bee_colony,
+        run_bee_colony_plan,
         dataloader,
         eval_cfg,
         OmegaConf.create(_SEEDED_INIT_CFG),

@@ -22,6 +22,7 @@ from ..evaluation.cost_breakdown import add_cost_breakdown_to_metrics
 from ..torch_utils import get_batch_tensor_from_routes
 from ..utils import process_standard_experiment_cfg
 from .edit_bee import build_edit_bee_model
+from .executable_plan import ExecutablePlan
 from .seeded_search import run_seeded_bee_colony
 
 
@@ -56,18 +57,22 @@ def run_bco_from_cfg(cfg, init_routes, tensors, *, mutation_counts_out=None,
         bee_model.force_linking_unlinked = force_linking_unlinked
         bee_model.eval()
 
-    n_type5 = int(cfg.get("n_type5_bees", 0))
-    n_type6 = int(cfg.get("n_type6_bees", 0))
-    n_type7 = int(cfg.get("n_type7_bees", 0))
-    edit_model = (
-        build_edit_bee_model(device, edit_weights_path,
-                             n_adjustment_cond_feats=edit_n_adjustment_cond_feats)
-        if (n_type5 > 0 or n_type6 > 0 or n_type7 > 0) else None)
+    # The plan owns the bee taxonomy: build it from the cfg counts and let it
+    # decide whether an edit checkpoint is needed (edit/trim/compound bees),
+    # instead of peeking at n_type5/6/7. If needed, load the edit model and
+    # rebuild the plan with it attached.
+    plan = ExecutablePlan.from_flat_cfg(cfg, bee_model=bee_model)
+    if plan.needs_edit:
+        edit_model = build_edit_bee_model(
+            device, edit_weights_path,
+            n_adjustment_cond_feats=edit_n_adjustment_cond_feats)
+        plan = ExecutablePlan.from_flat_cfg(
+            cfg, bee_model=bee_model, edit_model=edit_model)
     mutation_counts_out = {} if mutation_counts_out is None else mutation_counts_out
 
     output = run_seeded_bee_colony(
         dataloader, cfg.eval, cost_obj, init_routes,
-        search_cfg=cfg, bee_model=bee_model, edit_model=edit_model,
+        search_cfg=cfg, plan=plan,
         mutation_counts_out=mutation_counts_out, device=device, silent=False,
         return_histories=cost_history_out is not None,
         iteration_callback=iteration_callback)
