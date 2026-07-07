@@ -1,0 +1,32 @@
+# @package _global_
+# E2 Our-NBCO Pareto (Mumford1): 2D alpha x adj_target sweep. Replaces
+# flat nbco_variants/our_nbco_mumford1 (sweep from e2_our_pareto.yaml).
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_and_edit_seeded
+  - /search/bee_sets: our_nbco
+  - _self_
+
+run:
+  name: e2/our_pareto/mumford1/our_nbco
+  label: Our NBCO
+  seed: 0
+  cpu: false
+
+paths:
+  output_dir: artifacts/runs/e2/our_pareto/mumford1/our_nbco
+
+# n_bees must match the bee-set total.
+search:
+  n_bees: 10
+
+data:
+  source: benchmark
+  city: Mumford1
+
+sweep:
+  alpha: [0.0, 0.25, 0.5, 0.75, 1.0]
+  adj_target: [0.2, 0.4, 0.6, 0.8, 1.0]
+  n_iterations: 200
+
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]

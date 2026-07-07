@@ -1,0 +1,9 @@
+# @package _global_
+# E1 narrow (Mandl): neural BCO vs Our NBCO alpha sweep (multi-method comparison
+# via ExperimentBatch -- one run per method, each its own alpha sweep).
+batch:
+  name: e1_mandl
+  output_dir: artifacts/runs/e1/mandl
+  runs:
+    - experiments/e1/mandl/neural_bco
+    - experiments/e1/mandl/our_nbco

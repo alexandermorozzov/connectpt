@@ -1,0 +1,22 @@
+# @package _global_
+# Edit model only (no construction), golden seeded checkpoint -- for ablations
+# whose rebuild bee is heuristic (RPC path-mix) and only the edit bees are
+# learned (e.g. e2_ablation rpc_trim_extend). Same edit model + finetune100
+# checkpoint as construction_and_edit_seeded, so the edit behaviour matches the
+# seeded paper runs.
+models:
+  construction:
+    enabled: false
+    config: construction
+    checkpoint_path: null
+    strict_load: true
+  edit:
+    enabled: true
+    config: edit_trim_seeded
+    checkpoint_path: artifacts/model_weights/improvement/improvement_lc_rttconn_adj_w10_t02_finetune100.pt
+    strict_load: true
+
+policies:
+  edit:
+    model_ref: edit
+    adapter: edit_search_policy

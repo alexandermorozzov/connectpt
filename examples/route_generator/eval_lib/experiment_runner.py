@@ -16,8 +16,9 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-import pandas as pd
 from omegaconf import OmegaConf, ListConfig
+
+from connectpt.routes_generator.search import run_sweep_table
 
 from .context import CFG_DIR
 from .data_sources import create_data_source
@@ -28,7 +29,7 @@ from .paper import UNIFIED_ADJ, full_metrics
 @dataclass
 class ExperimentResult:
     name: str
-    table: pd.DataFrame
+    table: Any                       # pd.DataFrame
     routes: dict
     instance: Any
     spec: Any = None
@@ -79,7 +80,11 @@ def run_experiment(spec, *, ctx=None, method_fn: Callable = None,
     inst = create_data_source(spec.data).load()
 
     # one or many methods to compare (each a captured config + label). A single
-    # ``method`` block is treated as a one-element list.
+    # ``method`` block is treated as a one-element list. Route bounds come from
+    # the loaded instance (the data source knows the right n_routes / lengths --
+    # e.g. a MACSA scenario differs from any benchmark city), so one captured
+    # bee-mix config works across sources: the base cfg is composed once per
+    # method, then re-composed per (alpha, adj_target) point.
     methods = spec.get("methods")
     if methods is None:
         methods = [OmegaConf.create({"label": spec.get("method_label", "method"),
@@ -95,37 +100,33 @@ def run_experiment(spec, *, ctx=None, method_fn: Callable = None,
     adj_weight_override = (float(sweep.adj_weight)
                            if sweep.get("adj_weight") is not None else None)
 
-    rows, routes = [], {"Initial": inst.init_routes}
+    method_bases = []
     for method in methods:
-        # route bounds come from the loaded instance (the data source knows the
-        # right n_routes / lengths -- e.g. a MACSA scenario differs from any
-        # benchmark city), so one captured bee-mix config works across sources.
         base_cfg = compose_experiment_cfg(
             method.config, bounds=dict(inst.spec),
             cpu=method.get("force_cpu"),
             seq_bees=method.get("process_neural_bees_sequentially"))
-        label = method.get("label", "method")
+        method_bases.append((method.get("label", "method"), base_cfg))
 
-        for alpha in alphas:
-            for adj_target in adj_targets:
-                adj_kwargs = dict(UNIFIED_ADJ, adjustment_degree_target=adj_target)
-                if adj_weight_override is not None:
-                    adj_kwargs["adjustment_degree_weight"] = adj_weight_override
-                cfg = compose_experiment_cfg(
-                    copy.deepcopy(base_cfg), alpha=alpha,
-                    n_iterations=n_iterations, adj=adj_kwargs)
+    def run_point(label, base_cfg, alpha, adj_target):
+        adj_kwargs = dict(UNIFIED_ADJ, adjustment_degree_target=adj_target)
+        if adj_weight_override is not None:
+            adj_kwargs["adjustment_degree_weight"] = adj_weight_override
+        cfg = compose_experiment_cfg(
+            copy.deepcopy(base_cfg), alpha=alpha,
+            n_iterations=n_iterations, adj=adj_kwargs)
+        out = method_fn(cfg, inst.init_routes, tensors=inst.tensors,
+                        run_name_scope=f"{inst.label}_{label}_a{alpha}_t{adj_target}_")
+        _run_name, m, _unserved, out_routes, *_ = out
+        return out_routes, m
 
-                out = method_fn(cfg, inst.init_routes, tensors=inst.tensors,
-                                run_name_scope=f"{inst.label}_{label}_a{alpha}_t{adj_target}_")
-                _run_name, m, _unserved, out_routes, *_ = out
-
-                row = dict(metrics_fn(m, out_routes, inst.init_routes))
-                row.update(method=label, alpha=alpha, adj_target=adj_target,
-                           n_iterations=n_iterations)
-                rows.append(row)
-                routes[f"{label} a={alpha} t={adj_target}"] = out_routes
+    table, routes = run_sweep_table(
+        methods=method_bases, alpha_grid=alphas, adj_targets=adj_targets,
+        init_routes=inst.init_routes, run_point=run_point,
+        score=lambda m, out_routes: dict(metrics_fn(m, out_routes, inst.init_routes)),
+        extra={"n_iterations": n_iterations})
 
     return ExperimentResult(
-        name=spec.name, table=pd.DataFrame(rows), routes=routes, instance=inst,
+        name=spec.name, table=table, routes=routes, instance=inst,
         spec=spec, meta={"label": inst.label},
     )

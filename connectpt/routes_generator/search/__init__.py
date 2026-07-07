@@ -18,6 +18,7 @@ from .acceptance import get_acceptance
 from .bee_operators import NeuralRouteActionBee, HeuristicMutationBee, CompoundBee, build_bee
 from .benchmark_data import BenchmarkDataModule
 from .bee_colony_runner import BeeColonyRunner
+from .sweep import run_sweep_table
 from .runs import BeeColonySearchRun, SearchArtifact
 
 
@@ -36,6 +37,7 @@ __all__ = [
     "build_bee",
     "BenchmarkDataModule",
     "BeeColonyRunner",
+    "run_sweep_table",
     "BeeColonySearchRun",
     "SearchArtifact",
 ]

@@ -153,16 +153,9 @@ def _pad_routes_to_spec(routes, n_routes, max_route_len):
     return routes
 
 
-def metric_value(metrics, key, default=np.nan):
-    if key not in metrics or metrics[key] is None:
-        return default
-    value = metrics[key]
-    if isinstance(value, torch.Tensor):
-        value = value.detach().cpu()
-        if value.numel() == 0:
-            return default
-        return float(value.float().mean().item())
-    return float(value)
+# metric_value lives in the library (single implementation); re-exported so the
+# existing eval_lib callers keep the same name.
+from connectpt.routes_generator.evaluation import metric_value  # noqa: E402,F401
 
 
 # Cost breakdown now lives in the library (evaluation.cost_breakdown); re-exported

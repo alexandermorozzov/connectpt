@@ -101,6 +101,17 @@ REGISTRY = {
 
 
 def create_data_source(data_cfg) -> DataSource:
-    """Build a DataSource from a ``data:`` config node (``source`` + params)."""
-    params = {k: v for k, v in dict(data_cfg).items() if k != "source"}
-    return REGISTRY[data_cfg["source"]](**params)
+    """Build a DataSource from a ``data:`` config node (``source`` + params).
+
+    Only keys the target source accepts are forwarded, so a ``data:`` block that
+    also carries from-scratch benchmark bounds (``n_routes`` / lengths, inherited
+    from the ``/data`` group when composing on ``bee_colony_base``) is tolerated
+    -- the source reads its own bounds from the loaded instance.
+    """
+    import inspect
+
+    cls = REGISTRY[data_cfg["source"]]
+    accepted = set(inspect.signature(cls.__init__).parameters) - {"self"}
+    params = {k: v for k, v in dict(data_cfg).items()
+              if k != "source" and k in accepted}
+    return cls(**params)

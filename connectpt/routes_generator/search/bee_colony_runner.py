@@ -54,7 +54,7 @@ class BeeColonyRunner:
         )
 
     def run_seeded(self, init_routes, tensors, *, eval_dims, n_iterations=None,
-                   alpha=None, adj_target=None):
+                   alpha=None, adj_target=None, adj_weight=None, sequential=None):
         """Seeded improvement of an EXISTING network (init from ``init_routes``).
 
         Builds the tensor dataloader from ``tensors``, assembles the run
@@ -65,8 +65,11 @@ class BeeColonyRunner:
         ``alpha`` (RTT/WMC trade-off) reconfigures the cost weights in place
         (route_time_weight=alpha, median_connectivity_weight=1-alpha), matching the
         notebook's per-sweep-point weight override; ``adj_target`` overrides the
-        adjustment-degree target the bee-colony optimizes. Returns
-        ``(routes, unserved, metrics)``.
+        adjustment-degree target the bee-colony optimizes. ``adj_weight`` overrides
+        the adjustment-degree weight (``0`` = penalty off). ``sequential`` runs
+        neural/edit bees one at a time (needed for large graphs like EKB); when
+        ``None`` it is read from ``cfg.search.process_neural_bees_sequentially``.
+        Returns ``(routes, unserved, metrics)``.
         """
         from omegaconf import OmegaConf
         from torch_geometric.loader import DataLoader
@@ -86,10 +89,13 @@ class BeeColonyRunner:
         eval_cfg = OmegaConf.create(dict(eval_dims))
         sched = self._schedule()
         acceptance = sched.get("acceptance")
+        seq = (sched.get("process_neural_bees_sequentially", False)
+               if sequential is None else sequential)
         search_cfg = build_bco_schedule_cfg(
             n_bees=int(sched.n_bees),
             n_iterations=int(sched.n_iterations if n_iterations is None else n_iterations),
-            acceptance=None if acceptance is None else dict(acceptance))
+            acceptance=None if acceptance is None else dict(acceptance),
+            process_neural_bees_sequentially=bool(seq), adj_weight=adj_weight)
         if adj_target is not None:
             search_cfg.adjustment_degree_target = float(adj_target)
 
@@ -101,7 +107,7 @@ class BeeColonyRunner:
         return routes, unserved, metrics
 
     def run_sweep(self, init_routes, tensors, *, eval_dims, alpha_grid=(None,),
-                  adj_targets=(None,), n_iterations=None):
+                  adj_targets=(None,), n_iterations=None, adj_weight=None):
         """Run a seeded (alpha x adj_target) sweep -- one seeded search per point.
 
         Replaces the notebook's ``run_experiment`` alpha/adj loop: for each
@@ -114,7 +120,8 @@ class BeeColonyRunner:
             for adj_target in adj_targets:
                 routes, unserved, metrics = self.run_seeded(
                     init_routes, tensors, eval_dims=eval_dims,
-                    n_iterations=n_iterations, alpha=alpha, adj_target=adj_target)
+                    n_iterations=n_iterations, alpha=alpha, adj_target=adj_target,
+                    adj_weight=adj_weight)
                 rows.append({"alpha": alpha, "adj_target": adj_target,
                              "routes": routes, "unserved": unserved, "metrics": metrics})
         return rows

@@ -15,11 +15,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from omegaconf import ListConfig
+
 from ..core.artifacts import ArtifactStore
 from ..core.checkpoints import CheckpointStore
 from ..core.paths import ROOT_DIR
 from ..core.runs import ExperimentRun, RunArtifact
 from ..core.runtime import RunContext
+from ..data import BenchmarkDataSource, create_data_source
+from ..evaluation import full_metric_row, select_metrics
 from ..model_factory import RouteModelFactory
 from ..objectives import CostFactory, load_bco_algo_config
 from .bee_colony_runner import BeeColonyRunner
@@ -27,12 +31,16 @@ from .bee_specs import parse_bee_specs
 from .executable_plan import ExecutablePlan
 from .benchmark_data import BenchmarkDataModule
 from .search_policies import build_policies
+from .sweep import run_sweep_table
 
 
 @dataclass
 class SearchArtifact(RunArtifact):
     result: Any = None
     plan: dict = field(default_factory=dict)
+    table: Any = None                # pd.DataFrame for a sweep (else None)
+    routes: dict = field(default_factory=dict)
+    instance: Any = None             # the loaded Instance for a sweep
 
 
 def _resolve(path) -> Path:
@@ -79,12 +87,19 @@ class BeeColonySearchRun(ExperimentRun):
             self.specs, self.policies, models=self.models,
             algo_cfg=load_bco_algo_config())
 
-        self.data = BenchmarkDataModule(
-            city=cfg.data.city,
-            n_routes=int(cfg.data.n_routes),
-            min_route_len=int(cfg.data.min_route_len),
-            max_route_len=int(cfg.data.max_route_len),
-        )
+        # from-scratch benchmark suite needs a BenchmarkDataModule; a sweep
+        # (``cfg.data.source`` set, or ekb/macsa) loads its instance in run()
+        # instead, so skip the module here.
+        self.data = None
+        if (cfg.data.get("source") is None
+                and cfg.data.get("city") is not None
+                and cfg.data.get("n_routes") is not None):
+            self.data = BenchmarkDataModule(
+                city=cfg.data.city,
+                n_routes=int(cfg.data.n_routes),
+                min_route_len=int(cfg.data.min_route_len),
+                max_route_len=int(cfg.data.max_route_len),
+            )
         self.runner = BeeColonyRunner(
             cfg, cost_obj=self.cost_obj, models=self.models,
             policies=self.policies, plan=self.plan, data_module=self.data,
@@ -118,6 +133,11 @@ class BeeColonySearchRun(ExperimentRun):
                 plan=summary, metadata={"seeded": True},
             )
 
+        # Config-driven sweep: load the instance from ``cfg.data`` and improve it
+        # across the alpha x adj_target grid (the notebook's per-experiment loop).
+        if self.cfg.get("sweep") is not None:
+            return self._run_sweep(summary)
+
         result = self.runner.run_suite()
 
         # persist artifacts so the reports layer can read them back without
@@ -133,4 +153,65 @@ class BeeColonySearchRun(ExperimentRun):
             run_name=self.cfg.run.name, output_dir=self.context.output_dir,
             result=result, plan=summary,
             metadata={"mean_cost": result["mean_cost"]},
+        )
+
+    # -- config-driven sweep ------------------------------------------------
+
+    def _load_instance(self):
+        """Load the experiment instance from ``cfg.data``.
+
+        Supports the source shape (``source: ekb|macsa|benchmark`` + params) and
+        the plain benchmark shape (``city:`` + bounds, the from-scratch data
+        group) -- the latter is loaded as a benchmark source so a benchmark
+        sweep and an ekb/macsa sweep share one code path.
+        """
+        d = self.cfg.data
+        if d.get("source") is not None:
+            return create_data_source(d).load()
+        return BenchmarkDataSource(city=d.city).load()
+
+    def _sweep_grid(self):
+        """Parse the ``cfg.sweep`` block into (alphas, adj_targets, n_iterations).
+
+        ``adj_target`` may be a scalar or a list (2D alpha x target Pareto sweep).
+        """
+        sweep = self.cfg.sweep
+        alphas = list(sweep.get("alpha", [None]))
+        _at = sweep.get("adj_target")
+        if isinstance(_at, (list, ListConfig)):
+            adj_targets = [float(t) for t in _at]
+        else:
+            adj_targets = [None if _at is None else float(_at)]
+        n_iterations = (int(sweep.n_iterations)
+                        if sweep.get("n_iterations") is not None else None)
+        return alphas, adj_targets, n_iterations
+
+    def _run_sweep(self, summary) -> SearchArtifact:
+        inst = self._load_instance()
+        alphas, adj_targets, n_iterations = self._sweep_grid()
+        keep = list(self.cfg.get("metrics", []))
+        label = self.cfg.run.get("label", self.cfg.run.name)
+        # adj_weight override (0 = adjustment penalty off, e.g. E2 5-model).
+        adj_weight = self.cfg.sweep.get("adj_weight")
+
+        def run_point(_label, _method, alpha, adj_target):
+            routes, _unserved, metrics = self.runner.run_seeded(
+                inst.init_routes, inst.tensors, eval_dims=inst.spec,
+                n_iterations=n_iterations, alpha=alpha, adj_target=adj_target,
+                adj_weight=adj_weight)
+            return routes, metrics
+
+        def score(m, routes):
+            row = full_metric_row(m, routes, inst.init_routes)
+            return select_metrics(row, keep) if keep else row
+
+        table, routes = run_sweep_table(
+            methods=[(label, None)], alpha_grid=alphas, adj_targets=adj_targets,
+            init_routes=inst.init_routes, run_point=run_point, score=score,
+            extra=({} if n_iterations is None else {"n_iterations": n_iterations}))
+
+        return SearchArtifact(
+            run_name=self.cfg.run.name, output_dir=self.context.output_dir,
+            table=table, routes=routes, instance=inst, plan=summary,
+            metadata={"sweep": True, "label": inst.label, "n_points": len(table)},
         )

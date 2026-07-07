@@ -1,0 +1,33 @@
+# @package _global_
+# E2 Fig-2 5-model ablation (Mumford1): RPC + type2, adjustment OFF
+# (adj_weight=0). Replaces the flat e2_5model method configs.
+defaults:
+  - /search: bee_colony_base
+  - /search/models: no_neural_models
+  - /search/bee_sets: rpc_type2
+  - _self_
+
+run:
+  name: e2/5model/mumford1/rpc_type2
+  label: RPC + type2
+  seed: 0
+  cpu: false
+
+paths:
+  output_dir: artifacts/runs/e2/5model/mumford1/rpc_type2
+
+# n_bees must match the bee-set total.
+search:
+  n_bees: 10
+
+data:
+  source: benchmark
+  city: Mumford1
+
+sweep:
+  alpha: [0.0, 0.25, 0.5, 0.75, 1.0]
+  adj_target: 0.2
+  adj_weight: 0.0    # 0 = adjustment penalty OFF
+  n_iterations: 200
+
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]

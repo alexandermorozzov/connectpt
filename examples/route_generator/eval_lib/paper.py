@@ -9,13 +9,15 @@ import numpy as np
 import pandas as pd
 import torch
 
-from connectpt.routes_generator.bee_colony import get_adjustment_degrees
-
 from connectpt.routes_generator.objectives import load_unified_objective
+# Metric scoring lives in the library (single implementation); re-exported here
+# so the notebook / frozen callers keep the same names.
+from connectpt.routes_generator.evaluation import (  # noqa: F401
+    adj_vs_init, conn_metric, full_metric_row as full_metrics, metric_value,
+    redundancy_pct)
 
 from .context import ARTIFACTS_DIR
-from .helpers import as_route_tensor, metric_value
-from connectpt.routes_generator.data.route_copies import redundancy_fraction
+from .helpers import as_route_tensor
 
 # --- unified objective ------------------------------------------------------
 # Read from the single source (cfg/objective YAML) via the library factory.
@@ -42,56 +44,8 @@ def ravel_hist(h):
 
 
 # --- metrics ----------------------------------------------------------------
-
-def adj_vs_init(routes, init_routes):
-    """Mean adjustment degree of a route set vs the init network."""
-    r = as_route_tensor(routes)
-    s = as_route_tensor(init_routes)
-    if r.ndim == 2:
-        r = r[None]
-    if s.ndim == 2:
-        s = s[None]
-    nr = min(r.shape[1], s.shape[1])
-    w = min(r.shape[-1], s.shape[-1])
-    return float(get_adjustment_degrees(
-        r[:, :nr, :w], s[:, :nr, :w], True, gap=ADJ_GAP, mode=ADJ_MODE).mean().item())
-
-
-def redundancy_pct(routes):
-    """% of edge traversals that re-cover an already-covered edge."""
-    R = as_route_tensor(routes)
-    if R.ndim == 3:
-        R = R[0]
-    return 100.0 * redundancy_fraction(R)
-
-
-def conn_metric(m):
-    """The optimized weighted connectivity (falls back to the plain median)."""
-    v = metric_value(m, "median_connectivity_weighted")
-    return v if np.isfinite(v) else metric_value(m, "median_connectivity")
-
-
-def full_metrics(m, rt, seed):
-    """Full metric set for every results row: we optimize a subset (RTT+conn+adj)
-    but always compute/report/save ALL of them."""
-    rt = as_route_tensor(rt)
-    return {
-        "ATT": metric_value(m, "ATT"), "RTT": metric_value(m, "RTT"),
-        # WMC = the optimized weighted connectivity (median by default). Both
-        # demand-weighted variants are reported: WMC_mean and WMC_median.
-        "WMC": conn_metric(m),
-        "WMC_mean": metric_value(m, "WMC_mean"),
-        "WMC_median": metric_value(m, "WMC_median"),
-        "adj_vs_seed": adj_vs_init(rt, seed),
-        # normalized cost components -- the RTT / WMC the algorithm actually
-        # optimizes (route_cost and weighted_median_connectivity, /time_normalizer).
-        "rtt_cost": metric_value(m, "cost_route_component"),
-        "wmc_cost": metric_value(m, "cost_connectivity_component"),
-        "cost": metric_value(m, "cost"),
-        "d0": metric_value(m, "$d_0$"), "d1": metric_value(m, "$d_1$"),
-        "d2": metric_value(m, "$d_2$"), "d_un": metric_value(m, "$d_{un}$"),
-        "redun%": redundancy_pct(rt),
-    }
+# adj_vs_init / redundancy_pct / conn_metric / full_metrics (== full_metric_row)
+# / metric_value are imported from the library above -- one implementation.
 
 
 def paper_row(city, method, source, m, rt, seed, duration_s=None):

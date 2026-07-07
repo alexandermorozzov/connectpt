@@ -1,0 +1,7 @@
+# @package _global_
+batch:
+  name: m0_mumford0
+  output_dir: artifacts/runs/m0/mumford0
+  runs:
+    - experiments/m0/mumford0/our_nbco
+    - experiments/m0/mumford0/trim12_extend12
