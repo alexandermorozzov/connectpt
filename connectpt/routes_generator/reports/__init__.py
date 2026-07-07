@@ -10,6 +10,8 @@ from .artifact_loaders import (
 )
 from .search_tables import make_search_plan_table, make_search_comparison_table
 from .comparison_tables import make_comparison_table
+from .figures import plot_routes_grid, plot_pareto, style_table
+from .route_plots import plot_plain_route_set, plot_route_diff
 from .report_run import ReportRun
 
 
@@ -21,5 +23,10 @@ __all__ = [
     "make_search_plan_table",
     "make_search_comparison_table",
     "make_comparison_table",
+    "plot_routes_grid",
+    "plot_pareto",
+    "style_table",
+    "plot_plain_route_set",
+    "plot_route_diff",
     "ReportRun",
 ]

@@ -1,4 +1,10 @@
-"""Persist experiment results as CSV tables under ``artifacts/results``."""
+"""Persist experiment results as CSV tables under ``artifacts/results``.
+
+Thin prefix/subdir/slug wrapper over the library ``ArtifactStore`` (the single
+tabular sink) -- the CSV write itself is not re-implemented here.
+"""
+from connectpt.routes_generator.core import ArtifactStore
+
 from .context import ARTIFACTS_DIR
 
 RESULTS_DIR = ARTIFACTS_DIR / "results"
@@ -20,13 +26,8 @@ def save_table(df, name: str, *, prefix: str = "", subdir: str | None = None):
     the CSV into a child folder beneath ``RESULTS_DIR``; the folder is created
     if missing.
     """
-    if subdir:
-        out_dir = RESULTS_DIR / _safe_name(subdir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        out_dir = RESULTS_DIR
-    path = out_dir / f"{_safe_name(prefix + name)}.csv"
-    df.to_csv(path, index=False)
+    out_dir = RESULTS_DIR / _safe_name(subdir) if subdir else RESULTS_DIR
+    path = ArtifactStore(out_dir).save_table(df, _safe_name(prefix + name))
     print(f"[results] table ({len(df)} rows) -> {path}")
     return path
 

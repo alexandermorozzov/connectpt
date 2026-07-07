@@ -6,8 +6,6 @@ composition (``set_cfg_value`` / ``compose_experiment_cfg`` / scoring cfgs)
 lives in :mod:`eval_lib.experiments`; experiment design stays in YAML.
 """
 import numpy as np
-import pandas as pd
-import torch
 
 from connectpt.routes_generator.objectives import load_unified_objective
 # Metric scoring lives in the library (single implementation); re-exported here
@@ -66,8 +64,13 @@ from connectpt.routes_generator.data.loaders import macsa_eval_bounds  # noqa: F
 # required). The caller threads it from ``RunContext.output_prefix`` ("TEMP_"
 # on smoke runs, "" on full runs) -- there is no module-global prefix anymore.
 
+# The tabular / route-dump IO is the library ArtifactStore (single sink); these
+# stay as thin prefix-aware wrappers over it (the notebook keeps the names).
+from connectpt.routes_generator.core import ArtifactStore
+
 PAPER_DIR = ARTIFACTS_DIR / "paper_results"
 PAPER_DIR.mkdir(parents=True, exist_ok=True)
+_STORE = ArtifactStore(PAPER_DIR)
 
 
 def paper_path(name, *, prefix):
@@ -77,8 +80,7 @@ def paper_path(name, *, prefix):
 
 
 def save_paper_table(df, name, *, prefix):
-    path = PAPER_DIR / f"{prefix}{name}.csv"
-    df.to_csv(path, index=False)
+    path = _STORE.save_table(df, f"{prefix}{name}")
     print(f"[paper] table ({len(df)} rows) -> {path}")
     return path
 
@@ -91,10 +93,7 @@ def reset_paper_table(name, *, prefix):
 
 
 def append_paper_row(row, name, ndigits=3, *, prefix):
-    path = PAPER_DIR / f"{prefix}{name}.csv"
-    header = not path.exists()
-    pd.DataFrame([row]).round(ndigits).to_csv(path, mode="a", header=header,
-                                              index=False)
+    path = _STORE.append_row(row, f"{prefix}{name}", ndigits=ndigits)
     print(f"[paper] row -> {path}", flush=True)
     return path
 
@@ -116,7 +115,6 @@ def save_paper_routes(name, routes, coords=None, street_adj=None, meta=None, *,
         "street_adj": (street_adj.cpu() if hasattr(street_adj, "cpu") else street_adj),
         "meta": meta or {},
     }
-    path = PAPER_DIR / f"{prefix}{name}_routes.pt"
-    torch.save(payload, path)
+    path = _STORE.save_routes(payload, f"{prefix}{name}_routes")
     print(f"[paper] route dump ({len(payload['routes'])} sets) -> {path}")
     return path
