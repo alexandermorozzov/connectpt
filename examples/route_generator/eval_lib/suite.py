@@ -1,20 +1,19 @@
 """Experiment-suite config loader.
 
-``load_suite_config(name)`` composes ``cfg/experiments/<name>.yaml`` into a plain
-OmegaConf config that selects which experiments run, on which cities, with which
-shared parameters. The notebook loads one of these (``suite`` for the full paper
-run, ``suite_smoke`` for an all-on 1-iteration TEMP dry-run) and reads everything
-from it -- mirroring load_train_config so PART 1 and PART 2 share one pattern.
+Thin wrapper over the library ``core.loaders.load_suite`` (one config-compose
+implementation) -- composes ``cfg/experiments/<name>.yaml``. The notebook loads
+one of these (``suite`` for the full paper run, ``suite_smoke`` for an all-on
+1-iteration TEMP dry-run) and reads everything from it.
 """
 from __future__ import annotations
 
+from connectpt.routes_generator.core.loaders import load_suite as _load_suite
+
 
 def load_suite_config(name="suite_smoke", *, overrides=None, cfg_dir=None):
-    """Compose and return the experiment-suite config ``cfg/experiments/<name>``."""
-    from hydra import compose, initialize_config_dir
+    """Compose and return the experiment-suite config ``cfg/experiments/<name>``.
 
-    from .context import CFG_DIR
-
-    cfg_dir = cfg_dir or CFG_DIR
-    with initialize_config_dir(config_dir=str(cfg_dir), version_base=None):
-        return compose(config_name=f"experiments/{name}", overrides=list(overrides or []))
+    ``cfg_dir`` is accepted for backward compatibility; the library loader uses
+    the canonical ``core.paths.CFG_DIR`` (the same directory).
+    """
+    return _load_suite(name, overrides=overrides)
