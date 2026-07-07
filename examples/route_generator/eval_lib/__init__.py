@@ -12,7 +12,6 @@ from .run_context import RunContext  # noqa: F401
 from .plots import *  # noqa: F401,F403
 from .helpers import *  # noqa: F401,F403
 from .baselines import *  # noqa: F401,F403
-from .route_copies import *  # noqa: F401,F403
 from .paper import *  # noqa: F401,F403
 from .ekb import *  # noqa: F401,F403
 from .results_io import *  # noqa: F401,F403

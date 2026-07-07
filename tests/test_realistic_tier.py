@@ -9,7 +9,7 @@ ROUTE_EXAMPLES = REPO_ROOT / "examples" / "route_generator"
 if str(ROUTE_EXAMPLES) not in sys.path:
     sys.path.insert(0, str(ROUTE_EXAMPLES))
 
-from eval_lib.route_copies import (  # noqa: E402
+from connectpt.routes_generator.data.route_copies import (  # noqa: E402
     REALISTIC_TIER_CFG, inject_realistic_tier, redundancy_fraction,
     repair_street_legs, street_legs_valid, try_detour_mutation,
     try_drop_cover_mutation, uncovered_demand_pct,

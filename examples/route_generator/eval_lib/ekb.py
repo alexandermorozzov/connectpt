@@ -17,62 +17,9 @@ EKB_CITY_NAME = "EKB"
 EKB_STATIC_MAP_PATH = ARTIFACTS_DIR / "paper_results" / "ekb_seed_routes_static.png"
 
 
-def load_ekb_tensors(data_dir=EKB_DATA_DIR, travel_time_scale=60.0):
-    """Load EKB coords, travel times, and demand in tensor-dataset format.
-
-    The travel-time files follow the Mumford convention used elsewhere in the
-    repo, so values are interpreted as minutes and converted to seconds.
-    """
-    data_dir = Path(data_dir)
-    coords = np.genfromtxt(data_dir / "EkbCoords.txt", skip_header=1)
-    travel_times = np.genfromtxt(data_dir / "EkbTravelTimes.txt")
-    demand = np.genfromtxt(data_dir / "EkbDemand.txt")
-
-    node_locs = torch.tensor(np.atleast_2d(coords), dtype=torch.float32)
-    street_adj = torch.tensor(np.atleast_2d(travel_times), dtype=torch.float32)
-    demand = torch.tensor(np.atleast_2d(demand), dtype=torch.float32)
-    street_adj = street_adj * float(travel_time_scale)
-
-    n_nodes = node_locs.shape[0]
-    expected = (n_nodes, n_nodes)
-    if tuple(street_adj.shape) != expected:
-        raise ValueError(
-            f"{data_dir}: EkbTravelTimes.txt has shape "
-            f"{tuple(street_adj.shape)}, expected {expected}")
-    if tuple(demand.shape) != expected:
-        raise ValueError(
-            f"{data_dir}: EkbDemand.txt has shape {tuple(demand.shape)}, "
-            f"expected {expected}")
-
-    return {"node_locs": node_locs, "street_adj": street_adj, "demand": demand}
-
-
-def load_ekb_routes(data_dir=EKB_DATA_DIR, batched=True):
-    """Load EKB seed routes as a padded tensor."""
-    data_dir = Path(data_dir)
-    try:
-        routes = torch.load(
-            data_dir / "EkbRoutes.pkl", map_location="cpu",
-            weights_only=False)
-    except TypeError:
-        routes = torch.load(data_dir / "EkbRoutes.pkl", map_location="cpu")
-    routes = as_route_tensor(routes).long()
-    if batched and routes.ndim == 2:
-        routes = routes[None]
-    return routes
-
-
-def ekb_spec(routes=None, city=EKB_CITY_NAME):
-    """Build an eval spec from the supplied EKB seed routes."""
-    routes = load_ekb_routes(batched=True) if routes is None else as_route_tensor(routes)
-    rr = routes[0] if routes.ndim == 3 else routes
-    route_lens = (rr > -1).sum(dim=-1)
-    return {
-        "city": city,
-        "n_routes": int(rr.shape[0]),
-        "min_route_len": int(route_lens[route_lens > 0].min().item()),
-        "max_route_len": int(rr.shape[-1]),
-    }
+# EKB data loading moved to the library -- single implementation.
+from connectpt.routes_generator.data.loaders import (  # noqa: F401
+    load_ekb_tensors, load_ekb_routes, ekb_spec)
 
 
 def make_ekb_crop_case(

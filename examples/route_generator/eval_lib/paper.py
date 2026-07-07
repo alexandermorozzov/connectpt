@@ -15,7 +15,7 @@ from connectpt.routes_generator.objectives import load_unified_objective
 
 from .context import ARTIFACTS_DIR
 from .helpers import as_route_tensor, metric_value
-from .route_copies import redundancy_fraction
+from connectpt.routes_generator.data.route_copies import redundancy_fraction
 
 # --- unified objective ------------------------------------------------------
 # Read from the single source (cfg/objective YAML) via the library factory.
@@ -102,15 +102,8 @@ def paper_row(city, method, source, m, rt, seed, duration_s=None):
             **full_metrics(m, rt, seed)}
 
 
-def macsa_eval_bounds(scenario):
-    """Route-count / length bounds for evaluating a MACSA scenario."""
-    n_nodes = int(scenario["tensors"]["node_locs"].shape[0])
-    n_routes = int(scenario["routes"].shape[1])
-    seed_route_lens = (scenario["routes"] > -1).sum(dim=-1)
-    longest_seed_route = (int(seed_route_lens.max().item())
-                          if seed_route_lens.numel() else MIN_ROUTE_LEN)
-    max_route_len = min(n_nodes, max(MAX_ROUTE_LEN, longest_seed_route))
-    return n_routes, MIN_ROUTE_LEN, max_route_len
+# MACSA eval-bounds moved to the library -- single implementation.
+from connectpt.routes_generator.data.loaders import macsa_eval_bounds  # noqa: F401
 
 
 # --- paper_results output sink ----------------------------------------------

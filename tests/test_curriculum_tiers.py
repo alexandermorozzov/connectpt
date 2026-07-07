@@ -15,7 +15,7 @@ ROUTE_EXAMPLES = REPO_ROOT / "examples" / "route_generator"
 if str(ROUTE_EXAMPLES) not in sys.path:
     sys.path.insert(0, str(ROUTE_EXAMPLES))
 
-from eval_lib.route_copies import (  # noqa: E402
+from connectpt.routes_generator.data.route_copies import (  # noqa: E402
     CURRICULUM_TIER_CFG, inject_curriculum_tier, redundancy_fraction,
     route_nodes, segment_time, street_legs_valid, truncate_route_tails,
     uncovered_demand_pct,
@@ -87,7 +87,7 @@ def test_all_tiers_respect_contract_and_run():
 
 
 def test_corrupt_all_routes_damages_every_route():
-    from eval_lib.route_copies import count_changed_routes
+    from connectpt.routes_generator.data.route_copies import count_changed_routes
 
     adj = _grid_street_adj()
     demand = _uniform_demand()
@@ -104,7 +104,7 @@ def test_corrupt_all_routes_damages_every_route():
 
 
 def test_target_corrupt_routes_respects_minimum_count():
-    from eval_lib.route_copies import count_changed_routes
+    from connectpt.routes_generator.data.route_copies import count_changed_routes
 
     adj = _grid_street_adj()
     demand = _uniform_demand()

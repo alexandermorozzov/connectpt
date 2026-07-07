@@ -13,21 +13,8 @@ from . import plots as _plots
 CITY_NAME = "Mumford0"
 
 
-def load_benchmark_tensors(city_name: str = CITY_NAME) -> dict:
-    """Load a benchmark city's coords / travel-times / demand text files."""
-    node_locs = torch.tensor(
-        np.genfromtxt(BENCHMARK_DIR / f"{city_name}Coords.txt", skip_header=1),
-        dtype=torch.float32,
-    )
-    street_adj = torch.tensor(
-        np.genfromtxt(BENCHMARK_DIR / f"{city_name}TravelTimes.txt"),
-        dtype=torch.float32,
-    ) * 60
-    demand = torch.tensor(
-        np.genfromtxt(BENCHMARK_DIR / f"{city_name}Demand.txt"),
-        dtype=torch.float32,
-    )
-    return {"node_locs": node_locs, "street_adj": street_adj, "demand": demand}
+# Benchmark tensor loading moved to the library -- single implementation.
+from connectpt.routes_generator.data.loaders import load_benchmark_tensors  # noqa: F401
 
 
 # === from the notebook's section 9b (Baseline Optimizers) ===
@@ -375,13 +362,7 @@ import gc
 
 from connectpt.routes_generator import CityGraphData, build_nx_heuristic_routes
 
-BENCHMARK_SPECS = [
-    {"city": "Mandl",    "n_routes": 6,  "min_route_len": 2,  "max_route_len": 8},
-    {"city": "Mumford0", "n_routes": 12, "min_route_len": 2,  "max_route_len": 15},
-    {"city": "Mumford1", "n_routes": 15, "min_route_len": 10, "max_route_len": 30},
-    {"city": "Mumford2", "n_routes": 56, "min_route_len": 10, "max_route_len": 22},
-    {"city": "Mumford3", "n_routes": 60, "min_route_len": 12, "max_route_len": 25},
-]
+from connectpt.routes_generator.data.loaders import BENCHMARK_SPECS  # noqa: F401
 BENCHMARK_NX_SEED = 0
 
 # requested metrics only: Cp (ATT) | Co (RTT) | d0 | d1 | d2 | d_un | cost

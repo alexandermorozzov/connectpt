@@ -30,6 +30,7 @@ from connectpt.routes_generator.search.compat.bco_config import (
     apply_disabled_components as _apply_disabled_components_to_cfg)
 from connectpt.routes_generator.torch_utils import (
     dump_routes, get_batch_tensor_from_routes)
+from connectpt.routes_generator.data.routes import as_route_tensor
 import connectpt.routes_generator.utils as lrnu
 
 from .context import (ROOT_DIR, CFG_DIR, BENCHMARK_DIR, MACSA_DATA_DIR,
@@ -132,12 +133,6 @@ def build_rpc_cfg(
         cfg = compose(config_name="eval_model_mumford", overrides=overrides)
     cfg.batch_size = 1
     return _apply_disabled_components_to_cfg(cfg)
-
-
-def as_route_tensor(routes):
-    if isinstance(routes, torch.Tensor):
-        return routes.detach().cpu()
-    return get_batch_tensor_from_routes(routes).detach().cpu()
 
 
 def _pad_routes_to_spec(routes, n_routes, max_route_len):

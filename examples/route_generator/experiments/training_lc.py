@@ -37,7 +37,7 @@ def copytier_config(cfg) -> "CopyTierConfig":
     from omegaconf import OmegaConf
 
     from eval_lib.context import DATASETS_DIR
-    from eval_lib.route_copies import COPY_TIER_CFG
+    from connectpt.routes_generator.data.route_copies import COPY_TIER_CFG
 
     dg, data = cfg.dataset_gen, cfg.data
     ddir = DATASETS_DIR / data.dataset_dirname
@@ -120,8 +120,9 @@ def build_copytier_dataset(cfg: CopyTierConfig):
 
     from connectpt.routes_generator.citygraph_dataset import DynamicCityGraphDataset
     from eval_lib import build_lc_cfg, dump_routes, run_lc_batch
-    from eval_lib.route_copies import (count_changed_routes, inject_route_copies,
-                                       redundancy_stats, uncovered_demand_pct)
+    from connectpt.routes_generator.data.route_copies import (
+        count_changed_routes, inject_route_copies, redundancy_stats,
+        uncovered_demand_pct)
 
     def _to_fixed(routes):
         return _pad_routes_to(routes, cfg.target_n_routes, cfg.max_route_len)
@@ -468,7 +469,8 @@ def balanced_eval_by_tier(cfg, *, model, cost_obj, device, graphs, seed_routes,
     from connectpt.routes_generator.bee_colony import get_adjustment_degrees
     from connectpt.routes_generator.improvement_learning import (
         get_batch_tensor_from_routes, make_improvement_batch, rollout_lc_improvement)
-    from eval_lib.route_copies import redundancy_stats as _redundancy_stats
+    from connectpt.routes_generator.data.route_copies import (
+        redundancy_stats as _redundancy_stats)
 
     tiers = list(cfg.curriculum.tiers)
     eval_n_per_tier = int(cfg.report.eval_n_per_tier)
