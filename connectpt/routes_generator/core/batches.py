@@ -24,6 +24,7 @@ class BatchArtifact:
     name: str
     artifacts: list[RunArtifact] = field(default_factory=list)
     output_dir: Path | None = None
+    table: Any = None                # combined per-run comparison table (or None)
 
 
 class ExperimentRunFactory:
@@ -65,4 +66,25 @@ class ExperimentBatch:
         return BatchArtifact(
             name=self.cfg.batch.name, artifacts=artifacts,
             output_dir=Path(out_dir) if out_dir else None,
+            table=_combine_tables(artifacts),
         )
+
+
+def _combine_tables(artifacts):
+    """Concat each run's sweep table into one comparison table (multi-method).
+
+    Each artifact that carries a ``table`` (a sweep SearchArtifact) contributes
+    its rows tagged with the run name; runs without a table (dry-run, from-scratch
+    suite) are skipped. Returns ``None`` if no run produced a table.
+    """
+    import pandas as pd
+
+    frames = []
+    for art in artifacts:
+        table = getattr(art, "table", None)
+        if table is None or len(table) == 0:
+            continue
+        frame = table.copy()
+        frame.insert(0, "run", art.run_name)
+        frames.append(frame)
+    return pd.concat(frames, ignore_index=True) if frames else None

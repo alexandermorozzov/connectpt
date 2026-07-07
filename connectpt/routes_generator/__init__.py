@@ -161,6 +161,18 @@ from .torch_utils import (
 # === Build Dataset (Simulation-Based) ===
 from .build_dataset import build_dataset
 
+# === Experiment orchestration API (M010 stage 6) ===
+# The narrow public surface the notebook uses: name an experiment, run it,
+# render it. Everything above is the legacy/library internals surface (narrowed
+# in stage 7 once eval_lib + baselines dissolve).
+from .core import (
+    ExperimentRunFactory,
+    ExperimentBatch,
+    load_experiment,
+    load_suite,
+)
+from .reports import render_report
+
 # Author & license
 # __author__ = "Andrew Holliday"
 # __license__ = "GNU General Public License v3"

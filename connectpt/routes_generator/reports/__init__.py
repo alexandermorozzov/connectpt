@@ -12,6 +12,7 @@ from .search_tables import make_search_plan_table, make_search_comparison_table
 from .comparison_tables import make_comparison_table
 from .figures import plot_routes_grid, plot_pareto, style_table
 from .route_plots import plot_plain_route_set, plot_route_diff
+from .render import render_report, ReportArtifact
 from .report_run import ReportRun
 
 
@@ -28,5 +29,7 @@ __all__ = [
     "style_table",
     "plot_plain_route_set",
     "plot_route_diff",
+    "render_report",
+    "ReportArtifact",
     "ReportRun",
 ]
