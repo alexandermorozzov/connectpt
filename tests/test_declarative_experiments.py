@@ -64,3 +64,18 @@ def _check_run(name, cfg):
     assert cfg.get("sweep") is not None, f"{name}: no sweep block"
     assert list(cfg.get("metrics", [])), f"{name}: no metrics"
     assert isinstance(ExperimentRunFactory.from_cfg(cfg), BeeColonySearchRun)
+
+
+def test_construction_only_from_scratch_config():
+    """The construction-only, NON-SEEDED config (new-logic analog of the deleted
+    frozen evaluation.ipynb learned-construction runs): composes, has no sweep /
+    no data.source (so run() takes the from-scratch run_suite path), and its
+    n_bees matches the construction bee-set total."""
+    cfg = _compose("experiments/construction_only/mandl")
+    assert cfg.run.type == "bee_colony_search"
+    assert cfg.get("sweep") is None, "from-scratch run must NOT declare a sweep"
+    assert cfg.data.get("source") is None, "from-scratch run uses the benchmark city shape"
+    total = sum(int(b["count"]) for b in cfg.bees)
+    assert int(cfg.search.n_bees) == total
+    assert all(b["policy"] == "construction" for b in cfg.bees), "construction-only"
+    assert isinstance(ExperimentRunFactory.from_cfg(cfg), BeeColonySearchRun)
