@@ -22,15 +22,24 @@ class BeeColonyRunner:
         self.data = data_module
         self.device = device
 
+    def _schedule(self):
+        """Schedule knobs (n_bees / n_iterations / acceptance).
+
+        The two shipped BeeColonySearchRun config shapes place them differently:
+        ``bee_colony_base`` (bee_type_comparison experiments) nests them under a
+        ``search:`` block; ``bco_flexible_bees`` puts them at the top level.
+        Read from whichever one is present.
+        """
+        return self.cfg.get("search") or self.cfg
+
     def plan_summary(self) -> dict:
-        search = self.cfg.get("search", {})
         # bee counts keyed by bee name (the plan group's name), not legacy slot.
         counts = self.plan.summary()
         return {
             "counts": counts,
             "needs_construction": self.plan.needs_construction,
             "needs_edit": self.plan.needs_edit,
-            "n_bees": int(search.get("n_bees", self.plan.total_bees)),
+            "n_bees": int(self._schedule().get("n_bees", self.plan.total_bees)),
         }
 
     def _adjustment_kwargs(self) -> dict:
@@ -75,11 +84,11 @@ class BeeColonyRunner:
             get_dataset_from_config(OmegaConf.create({"type": "tensor"}), tensors=tensors),
             batch_size=1)
         eval_cfg = OmegaConf.create(dict(eval_dims))
-        search = self.cfg.search
-        acceptance = search.get("acceptance")
+        sched = self._schedule()
+        acceptance = sched.get("acceptance")
         search_cfg = build_bco_schedule_cfg(
-            n_bees=int(search.n_bees),
-            n_iterations=int(search.n_iterations if n_iterations is None else n_iterations),
+            n_bees=int(sched.n_bees),
+            n_iterations=int(sched.n_iterations if n_iterations is None else n_iterations),
             acceptance=None if acceptance is None else dict(acceptance))
         if adj_target is not None:
             search_cfg.adjustment_degree_target = float(adj_target)
@@ -122,7 +131,6 @@ class BeeColonyRunner:
             self.data.setup()
         dataloader = DataLoader(self.data.dataset, batch_size=1)
 
-        search = self.cfg.search
         eval_cfg = OmegaConf.create({
             "n_routes": int(self.data.n_routes),
             "min_route_len": int(self.data.min_route_len),
@@ -137,7 +145,8 @@ class BeeColonyRunner:
         out = test_method(
             run_bee_colony_plan, dataloader, eval_cfg, init_cfg, self.cost_obj,
             silent=True, return_routes=True, device=self.device,
-            n_bees=int(search.n_bees), n_iterations=int(search.n_iterations),
+            n_bees=int(self._schedule().n_bees),
+            n_iterations=int(self._schedule().n_iterations),
             plan=self.plan, **self._adjustment_kwargs(),
         )
         mean_cost, std_cost, unserved, metrics, routes = out

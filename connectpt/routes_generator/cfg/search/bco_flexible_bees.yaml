@@ -4,9 +4,9 @@
 #     cfg = compose(config_name="search/bco_flexible_bees")
 #
 # The same NeuralRouteActionBee operator is paired with different policies and
-# allowed_actions; BeeColonyPlan translates these specs onto the existing
-# bee_colony per-type counts (see bee_plan.py). Checkpoint paths and model
-# configs use the real shipped names.
+# allowed_actions; the bee specs below are compiled into an ExecutablePlan
+# (ExecutablePlan.from_specs) that the engine runs natively. Checkpoint paths
+# and model configs use the real shipped names.
 
 run:
   name: bco_flexible_bees_v1
