@@ -3,17 +3,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-# bee_colony type -> human label (kept here so reports don't import search/)
-_TYPE_LABELS = {
-    "n_type1": "random path combiner",
-    "n_type2": "shorten",
-    "n_type3": "random path combining",
-    "n_type4": "neural construction (extend)",
-    "n_type5": "neural edit (extend/+trim)",
-    "n_type6": "neural trim-only",
-    "n_type7": "compound trim->extend",
-}
-
 
 def make_search_comparison_table(summaries: dict[str, dict]) -> pd.DataFrame:
     """Compare bee-type search runs from their saved summaries.
@@ -35,11 +24,15 @@ def make_search_comparison_table(summaries: dict[str, dict]) -> pd.DataFrame:
 
 
 def make_search_plan_table(plan: dict) -> pd.DataFrame:
-    """Turn a plan summary dict (BeeColonyRunner.plan_summary) into a table."""
+    """Turn a plan summary dict (BeeColonyRunner.plan_summary) into a table.
+
+    Counts are keyed by bee name (the plan group's name), so the name is the
+    label -- no separate type-slot -> label lookup.
+    """
     counts = plan.get("counts", {})
     rows = [
-        {"bee_type": key, "label": _TYPE_LABELS.get(key, key), "count": int(count)}
-        for key, count in counts.items() if count
+        {"bee": name, "count": int(count)}
+        for name, count in counts.items() if count
     ]
-    df = pd.DataFrame(rows, columns=["bee_type", "label", "count"])
-    return df.sort_values("bee_type").reset_index(drop=True)
+    df = pd.DataFrame(rows, columns=["bee", "count"])
+    return df.sort_values("bee").reset_index(drop=True)

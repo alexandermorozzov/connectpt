@@ -13,6 +13,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from connectpt.routes_generator.search.executable_plan import ExecutablePlan
+from connectpt.routes_generator.search.compat import plan_from_flat_cfg
 from connectpt.routes_generator.search.bee_specs import parse_bee_specs
 from connectpt.routes_generator.search.search_policies import (
     ConstructionSearchPolicy, EditSearchPolicy)
@@ -34,13 +35,15 @@ def test_our_nbco_bee_set_matches_flat_counts():
     specs = parse_bee_specs(OmegaConf.load(BEE_SET).bees)
     plan = ExecutablePlan.from_specs(specs, _policies())
 
-    # The flat config's per-type counts are the ground truth.
-    flat = OmegaConf.load(FLAT)
-    expected = {f"n_type{i}": int(flat.get(f"n_type{i}_bees", 0)) for i in range(1, 8)}
-    assert expected["n_type1"] == 5 and expected["n_type5"] == 5  # sanity on the fixture
+    # The flat preset's per-slot counts are the ground truth; the declarative
+    # bee_set must produce the same canonical-slot group counts (groups are the
+    # canonical slots in order).
+    flat_plan = plan_from_flat_cfg(OmegaConf.load(FLAT))
+    decl_counts = [g.count for g in plan.groups]
+    assert decl_counts == [g.count for g in flat_plan.groups], decl_counts
+    # sanity on the fixture: slot 1 (rebuild) = 5, slot 5 (edit) = 5
+    assert decl_counts[0] == 5 and decl_counts[4] == 5
 
-    counts = plan.attempted_type_counts()
-    assert counts == expected, (counts, expected)
     assert plan.needs_construction is True  # type-1 rebuild drives the construction model
     assert plan.needs_edit is True          # type-5 edit bees drive the edit model
 
@@ -51,10 +54,12 @@ def test_rpc_path_mix_is_type3():
     explicitly -- but the plan classifies it correctly and needs no models."""
     rpc = CFG / "search" / "bee_sets" / "rpc_trim_extend.yaml"
     plan = ExecutablePlan.from_specs(parse_bee_specs(OmegaConf.load(rpc).bees), _policies())
-    counts = plan.attempted_type_counts()
-    assert counts["n_type3"] == 5   # rpc rebuild
-    assert counts["n_type5"] == 5   # edit trim/extend
-    assert counts["n_type1"] == 0 and counts["n_type4"] == 0
+    # groups are the canonical slots in order (1 rebuild, 2 shorten, 3 path-mix,
+    # 4 construction, 5 edit, 6 trim, 7 compound).
+    counts = [g.count for g in plan.groups]
+    assert counts[2] == 5   # slot 3: rpc rebuild
+    assert counts[4] == 5   # slot 5: edit trim/extend
+    assert counts[0] == 0 and counts[3] == 0
     assert plan.needs_construction is False  # type-3 is heuristic, no model
     assert plan.needs_edit is True
 
@@ -66,9 +71,9 @@ def test_neural_rebuild_is_type1_not_type4():
         {"name": "r", "count": 3, "operator": "neural_rebuild", "policy": "construction"},
     ])
     plan = ExecutablePlan.from_specs(specs, _policies())
-    counts = plan.attempted_type_counts()
-    assert counts["n_type1"] == 3
-    assert counts["n_type4"] == 0
+    counts = [g.count for g in plan.groups]
+    assert counts[0] == 3   # slot 1: full rebuild
+    assert counts[3] == 0   # slot 4: construction-extend
     assert plan.needs_construction is True
 
 
@@ -170,7 +175,7 @@ def test_declarative_our_nbco_seeded_matches_flat_run():
         set_cfg_value(flat, f"eval.{k}", int(spec[k]))
     bco_cfg_set(flat, n_iterations=_N_ITERS, **UNIFIED_ADJ)
     set_cfg_value(flat, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
-    flat_plan = ExecutablePlan.from_flat_cfg(
+    flat_plan = plan_from_flat_cfg(
         flat, bee_model=construction, edit_model=edit)
 
     # declarative path: our_nbco bee_set -> ExecutablePlan (native) + schedule cfg
@@ -196,15 +201,16 @@ def test_paper_bee_sets_match_flat_counts(bee_set, flat):
     specs = parse_bee_specs(OmegaConf.load(CFG / "search" / "bee_sets" / f"{bee_set}.yaml").bees)
     plan = ExecutablePlan.from_specs(specs, _policies())
     fv = OmegaConf.load(CFG / "experiments" / "nbco_variants" / f"{flat}.yaml")
+    flat_plan = plan_from_flat_cfg(fv)
 
-    counts = plan.attempted_type_counts()
-    expected = {f"n_type{i}": int(fv.get(f"n_type{i}_bees", 0)) for i in range(1, 8)}
-    assert counts == expected, (bee_set, counts, expected)
+    # groups are the canonical slots in order, so groups[i-1] is type-i. The
+    # declarative bee_set must reproduce the flat preset's per-slot counts.
+    counts = [g.count for g in plan.groups]
+    assert counts == [g.count for g in flat_plan.groups], (bee_set, counts)
 
     # halt flags must match the flat variant for every ACTIVE edit type (4-7);
     # inactive types are irrelevant to the run (0 bees) so are not compared.
-    # groups are the canonical slots in order, so groups[i-1] is type-i.
     for i in range(4, 8):
-        if counts[f"n_type{i}"] > 0:
+        if counts[i - 1] > 0:
             assert plan.groups[i - 1].op.allow_halt == bool(fv.get(f"type{i}_allow_halt", True)), \
                 (bee_set, f"type{i}_allow_halt")

@@ -25,7 +25,7 @@ from connectpt.routes_generator.improvement_learning import (
 from connectpt.routes_generator.utils import get_eval_cfg
 from connectpt.routes_generator.eval_route_generator import eval_model
 from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
-from connectpt.routes_generator.search.bco_config import (
+from connectpt.routes_generator.search.compat.bco_config import (
     compose_bco_cfg as build_bco_cfg, safe_run_name,
     apply_disabled_components as _apply_disabled_components_to_cfg)
 from connectpt.routes_generator.torch_utils import (

@@ -612,7 +612,7 @@ def post_training_convergence(cfg, *, best_model_path, benchmark_specs,
     import pandas as pd
     from omegaconf import OmegaConf
 
-    from connectpt.routes_generator.search.bco_config import compose_bco_cfg as build_bco_cfg
+    from connectpt.routes_generator.search.compat.bco_config import compose_bco_cfg as build_bco_cfg
     from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
 
     city = str(cfg.report.post_train.city)

@@ -3,7 +3,7 @@ import importlib
 import torch
 
 from connectpt.routes_generator.bee_colony import _get_route_selection_weights
-from connectpt.routes_generator.search.executable_plan import ExecutablePlan
+from connectpt.routes_generator.search.compat import plan_from_counts
 
 
 bee_colony = importlib.import_module("connectpt.routes_generator.bee_colony")
@@ -100,7 +100,7 @@ def test_get_mutants_routes_type7_through_compound_helper(monkeypatch):
         fake_trim_then_extend,
     )
 
-    plan = ExecutablePlan.from_counts(
+    plan = plan_from_counts(
         n_bees=2, n_type1=0, n_type2=0, n_type7=2,
         bee_model=extend_model, edit_model=trim_model,
         ignore_type7_max_route_len=True)
@@ -164,7 +164,7 @@ def test_get_mutants_forwards_nohalt_flags_to_edit_bees(monkeypatch):
     monkeypatch.setattr(bee_colony, "get_neural_edit_variants", fake_edit)
     monkeypatch.setattr(bee_colony, "get_neural_trim_variants", fake_trim)
 
-    plan = ExecutablePlan.from_counts(
+    plan = plan_from_counts(
         n_bees=3, n_type1=0, n_type2=0, n_type4=1, n_type5=1, n_type6=1,
         bee_model=extend_model, edit_model=edit_model,
         type4_allow_halt=False, type5_allow_halt=False, type6_allow_halt=False)
@@ -209,7 +209,7 @@ def test_get_mutants_can_process_type1_neural_bees_sequentially(monkeypatch):
     monkeypatch.setattr(
         bee_colony, "get_neural_variants", fake_neural_variants)
 
-    plan = ExecutablePlan.from_counts(
+    plan = plan_from_counts(
         n_bees=3, n_type1=3, n_type2=0, bee_model=object())
     new_networks, mutation_types = plan.get_mutants(
         bee_networks,
@@ -260,7 +260,7 @@ def test_get_mutants_can_process_type5_edit_bees_sequentially(monkeypatch):
 
     monkeypatch.setattr(bee_colony, "get_neural_edit_variants", fake_edit)
 
-    plan = ExecutablePlan.from_counts(
+    plan = plan_from_counts(
         n_bees=3, n_type1=0, n_type2=0, n_type5=3,
         bee_model=object(), edit_model=object())
     new_networks, mutation_types = plan.get_mutants(
@@ -306,7 +306,7 @@ def test_sequential_neural_bees_use_single_bee_env_state(monkeypatch):
 
     full_state = object()
     single_state = object()
-    plan = ExecutablePlan.from_counts(
+    plan = plan_from_counts(
         n_bees=2, n_type1=0, n_type2=0, n_type5=2,
         bee_model=object(), edit_model=object())
     plan.get_mutants(
@@ -329,11 +329,13 @@ def test_mutation_stats_include_type7_and_worse_acceptance_bucket():
     mutation_types = torch.tensor([1, 7], dtype=torch.long)
     accepted = torch.tensor([[True, True], [False, True]])
     worse_accepted = torch.tensor([[False, True], [False, False]])
+    # stats are keyed by bee name; slot i maps to bee_names[i - 1].
+    bee_names = ["type1", "type2", "type3", "type4", "type5", "type6", "type7"]
 
     bee_colony._record_accepted_mutations(
-        mutation_stats, mutation_types, accepted)
+        mutation_stats, mutation_types, accepted, bee_names)
     bee_colony._record_worse_accepted_mutations(
-        mutation_stats, mutation_types, worse_accepted)
+        mutation_stats, mutation_types, worse_accepted, bee_names)
 
     assert mutation_stats["accepted"]["type1"] == 1
     assert mutation_stats["accepted"]["type7"] == 2

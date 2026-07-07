@@ -84,7 +84,8 @@ from .initialization import (
 )
 
 # === Optimization & Search ===
-from .bee_colony import bee_colony
+# ``bee_colony`` is the legacy per-type entry; it lives in search.compat now.
+from .search.compat import bee_colony
 
 # === Comparison Baselines (ported from AHolliday/transit_learning) ===
 from .simulated_annealing import simulated_annealing_with_reheating

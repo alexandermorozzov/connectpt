@@ -58,14 +58,15 @@ def test_bco_flexible_bees_yaml_parses_and_plans():
         "edit": EditSearchPolicy(_StubModel(), name="edit"),
     }
     plan = ExecutablePlan.from_specs(specs, policies)
-    counts = plan.attempted_type_counts()
+    # groups are the canonical slots in order (slot i -> groups[i-1]).
+    counts = [g.count for g in plan.groups]
 
     # construction extend -> type4; edit extend -> type5; edit trim-only -> type6;
     # edit full -> type5; compound -> type7
-    assert counts["n_type4"] == 4   # neural_on_construction
-    assert counts["n_type5"] == 6   # extend_only(4) + full(2)
-    assert counts["n_type6"] == 2   # trim_only
-    assert counts["n_type7"] == 2   # compound
+    assert counts[3] == 4   # slot 4: neural_on_construction
+    assert counts[4] == 6   # slot 5: extend_only(4) + full(2)
+    assert counts[5] == 2   # slot 6: trim_only
+    assert counts[6] == 2   # slot 7: compound
     assert plan.needs_construction and plan.needs_edit
     assert plan.total_bees == sum(s.count for s in specs)
 

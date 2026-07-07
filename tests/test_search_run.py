@@ -31,9 +31,11 @@ def test_search_dry_run(tmp_path):
     assert artifact.metadata["dry_run"] is True
     assert artifact.metadata["models_loaded"] == ["construction", "edit"]
     assert sorted(artifact.metadata["policies"]) == ["construction", "edit"]
-    # the flexible specs translate to the expected per-type bee counts
-    assert artifact.plan["counts"]["n_type4"] == 4
-    assert artifact.plan["counts"]["n_type5"] == 6
-    assert artifact.plan["counts"]["n_type6"] == 2
-    assert artifact.plan["counts"]["n_type7"] == 2
+    # the flexible specs translate to per-slot bee groups, keyed by bee name;
+    # the two edit-extend specs merge into one slot-5 group (names joined).
+    counts = artifact.plan["counts"]
+    assert counts["neural_on_construction"] == 4
+    assert counts["neural_on_edit_extend_only+neural_on_edit_full"] == 6
+    assert counts["neural_on_edit_trim_only"] == 2
+    assert counts["compound_trim_then_extend"] == 2
     assert artifact.plan["needs_construction"] and artifact.plan["needs_edit"]

@@ -17,8 +17,8 @@ from __future__ import annotations
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
-from ..core.paths import CFG_DIR, CONSTRUCTION_MODEL_WEIGHTS_PATH
-from ..objectives import load_bco_algo_config, load_unified_objective
+from ...core.paths import CFG_DIR, CONSTRUCTION_MODEL_WEIGHTS_PATH
+from ...objectives import load_bco_algo_config, load_unified_objective
 
 _OBJ = load_unified_objective()
 

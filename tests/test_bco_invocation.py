@@ -9,12 +9,12 @@ override behaviour, and that the plan is threaded straight through.
 from omegaconf import OmegaConf
 
 from connectpt.routes_generator.search.bco_invocation import build_bee_colony_kwargs
-from connectpt.routes_generator.search.executable_plan import ExecutablePlan
+from connectpt.routes_generator.search.compat import plan_from_flat_cfg
 
 
 def test_defaults_match_historical_run_bco():
     cfg = OmegaConf.create({"n_bees": 10, "n_iterations": 3})
-    plan = ExecutablePlan.from_flat_cfg(cfg)
+    plan = plan_from_flat_cfg(cfg)
     kw = build_bee_colony_kwargs(cfg, plan=plan)
     # the plan owns the taxonomy and is threaded through untouched
     assert kw["plan"] is plan
@@ -41,7 +41,7 @@ def test_cfg_values_override_defaults():
         "worse_accept_temperature": 0.02, "early_stop_patience": 7,
     })
     edit = object()
-    plan = ExecutablePlan.from_flat_cfg(cfg, edit_model=edit)
+    plan = plan_from_flat_cfg(cfg, edit_model=edit)
     counts = {}
     kw = build_bee_colony_kwargs(cfg, plan=plan, mutation_counts_out=counts)
     assert kw["n_bees"] == 20 and kw["n_iterations"] == 100
@@ -53,7 +53,7 @@ def test_cfg_values_override_defaults():
     assert kw["worse_accept_temperature"] == 0.02
     assert kw["early_stop_patience"] == 7
     assert kw["mutation_counts_out"] is counts
-    # the plan captured the taxonomy from the flat cfg
-    assert plan.attempted_type_counts()["n_type1"] == 5
-    assert plan.attempted_type_counts()["n_type5"] == 5
+    # the plan captured the taxonomy from the flat cfg (compat bee names)
+    assert plan.summary()["type1"] == 5
+    assert plan.summary()["type5"] == 5
     assert plan.needs_edit

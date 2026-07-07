@@ -22,10 +22,6 @@ from .import utils as lrnu
 from .initialization import get_direct_sat_dmd
 
 
-MUTATION_TYPE_NAMES = (
-    'type1', 'type2', 'type3', 'type4', 'type5', 'type6', 'type7')
-
-
 def _reverse_padded_routes(routes):
     """Reverse the valid part of each padded route and keep -1 padding at end."""
     route_lens = (routes > -1).sum(dim=-1)
@@ -232,62 +228,66 @@ def get_adjustment_penalties(adjustment_degrees, objective='raw', target=0.2):
     )
 
 
-def _ensure_mutation_stats_bucket(mutation_counts_out, bucket_name):
+def _ensure_mutation_stats_bucket(mutation_counts_out, bucket_name, bee_names):
     if mutation_counts_out is None:
         return None
     bucket = mutation_counts_out.setdefault(bucket_name, {})
-    for type_name in MUTATION_TYPE_NAMES:
-        bucket.setdefault(type_name, 0)
+    for name in bee_names:
+        bucket.setdefault(name, 0)
     return bucket
 
 
-def _record_attempted_mutations(mutation_counts_out, *, n_type1, n_type2,
-                                n_type3, n_type4, n_type5=0, n_type6=0,
-                                n_type7=0):
+def _record_attempted_mutations(mutation_counts_out, attempted_counts):
+    """Record attempted mutations per bee name.
+
+    ``attempted_counts`` maps a bee name (the plan group's name, e.g. the
+    declarative BeeSpec name) to how many bees ran that operator this step --
+    ``plan.summary()``. Stats are keyed by bee name, not by legacy type slot.
+    """
     if mutation_counts_out is None:
         return
-    attempted = _ensure_mutation_stats_bucket(mutation_counts_out, 'attempted')
-    increments = {
-        'type1': int(n_type1),
-        'type2': int(n_type2),
-        'type3': int(n_type3),
-        'type4': int(n_type4),
-        'type5': int(n_type5),
-        'type6': int(n_type6),
-        'type7': int(n_type7),
-    }
-    for type_name, inc in increments.items():
-        attempted[type_name] += inc
-        # Keep the legacy flat keys as aliases for attempted counts so older
-        # callers keep seeing the same numbers.
-        mutation_counts_out[type_name] = attempted[type_name]
+    attempted = _ensure_mutation_stats_bucket(
+        mutation_counts_out, 'attempted', attempted_counts.keys())
+    for name, inc in attempted_counts.items():
+        attempted[name] += int(inc)
+        # Flat alias at the top level so callers reading the bare name see the
+        # running attempted total.
+        mutation_counts_out[name] = attempted[name]
 
 
 def _record_mutation_mask(mutation_counts_out, bucket_name, mutation_types,
-                          mask):
+                          mask, bee_names):
+    """Add ``mask`` hits to ``bucket_name``, keyed by bee name.
+
+    ``bee_names`` is the plan's ordered group names; ``mutation_types`` holds
+    each bee's 1-based group slot, so slot ``i`` maps to ``bee_names[i - 1]``.
+    """
     if mutation_counts_out is None:
         return
-    bucket = _ensure_mutation_stats_bucket(mutation_counts_out, bucket_name)
+    bucket = _ensure_mutation_stats_bucket(
+        mutation_counts_out, bucket_name, bee_names)
     if mutation_types is None:
         return
 
-    for type_idx, type_name in enumerate(MUTATION_TYPE_NAMES, start=1):
-        type_mask = mutation_types == type_idx
+    for slot, name in enumerate(bee_names, start=1):
+        type_mask = mutation_types == slot
         if not type_mask.any():
             continue
-        bucket[type_name] += int(mask[:, type_mask].sum().item())
+        bucket[name] += int(mask[:, type_mask].sum().item())
 
 
 def _record_accepted_mutations(mutation_counts_out, mutation_types,
-                               accepted_mask):
+                               accepted_mask, bee_names):
     _record_mutation_mask(
-        mutation_counts_out, 'accepted', mutation_types, accepted_mask)
+        mutation_counts_out, 'accepted', mutation_types, accepted_mask,
+        bee_names)
 
 
 def _record_worse_accepted_mutations(mutation_counts_out, mutation_types,
-                                     accepted_mask):
+                                     accepted_mask, bee_names):
     _record_mutation_mask(
-        mutation_counts_out, 'worse_accepted', mutation_types, accepted_mask)
+        mutation_counts_out, 'worse_accepted', mutation_types, accepted_mask,
+        bee_names)
 
 
 def _ensure_selection_stats_bucket(mutation_counts_out):
@@ -462,9 +462,9 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
     plan -- an ExecutablePlan (search.executable_plan): the ordered mutation-
         operator groups (rebuild / shorten / RPC / construction-extend /
         edit / trim / trim-then-extend) with their bee counts, models and
-        per-operator halt/max-len flags. Built from the flat ``n_type*_bees``
-        config format via ``ExecutablePlan.from_flat_cfg`` or from declarative
-        BeeSpecs via ``ExecutablePlan.from_specs``.
+        per-operator halt/max-len flags. Built from declarative BeeSpecs via
+        ``ExecutablePlan.from_specs``, or from the legacy flat ``n_type*_bees``
+        config via ``search.compat.plan_from_flat_cfg``.
     silent -- if true, no tqdm output or printing
     adjustment_degree_weight -- penalty weight for changing routes too much
         relative to the original initialized network.
@@ -699,7 +699,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                 gather_idx = gather_idx.expand(-1, -1, -1, max_n_nodes)
                 old_modified_routes = bee_networks.gather(2, gather_idx).squeeze(2)
                 _record_attempted_mutations(
-                    mutation_counts_out, **plan.attempted_type_counts())
+                    mutation_counts_out, plan.summary())
                 new_bee_networks, mutation_types = plan.get_mutants(
                     bee_networks, chosen_route_idxs,
                     direct_sat_dmd=direct_sat_dmd, shorten_prob=shorten_prob,
@@ -779,15 +779,18 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                         mutation_counts_out,
                         forced_accepts=int(forced_trim_accepts.sum().item()))
 
+                bee_names = plan.group_names()
                 _record_accepted_mutations(
                     mutation_counts_out,
                     mutation_types,
                     accepted_idxs,
+                    bee_names,
                 )
                 _record_worse_accepted_mutations(
                     mutation_counts_out,
                     mutation_types,
                     worse_accepted,
+                    bee_names,
                 )
                 bee_networks[accepted_idxs] = new_bee_networks[accepted_idxs]
                 bee_raw_costs[accepted_idxs] = new_bee_raw_costs[accepted_idxs]
@@ -967,87 +970,6 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
         cost_obj.adjustment_seed = None
         cost_obj.adjustment_degree_weight = 0.0
     return state, cost_history
-
-
-def bee_colony(state, cost_obj, init_network, n_bees=10, passes_per_it=5,
-               mod_steps_per_pass=2, shorten_prob=0.2, n_iterations=400,
-               n_type1_bees=None, n_type2_bees=None, n_type4_bees=0,
-               n_type5_bees=0, n_type6_bees=0, n_type7_bees=0,
-               silent=False, iteration_callback=None,
-               force_linking_unlinked=False,
-               bee_model=None, edit_model=None,
-               sum_writer=None, mutation_counts_out=None,
-               adjustment_degree_weight=0.0,
-               adjustment_degree_gap=0.1,
-               adjustment_degree_mode='current',
-               adjustment_degree_objective='raw',
-               adjustment_degree_target=0.2,
-               ignore_type4_max_route_len=False,
-               ignore_type5_max_route_len=False,
-               ignore_type6_max_route_len=False,
-               ignore_type7_max_route_len=False,
-               type4_allow_halt=True,
-               type5_allow_halt=True,
-               type6_allow_halt=True,
-               type7_allow_halt=True,
-               use_demand_weighted_route_selection=False,
-               worse_accept_temperature=0.0,
-               worse_accept_decay=0.995,
-               worse_accept_min_temperature=0.001,
-               worse_selection_temperature=0.0,
-               worse_selection_decay=0.995,
-               worse_selection_min_temperature=0.001,
-               worse_selection_uniform_mix=0.05,
-               worse_selection_elite_count=1,
-               trim_grace_period=0,
-               process_neural_bees_sequentially=False,
-               early_stop_patience=None,
-               early_stop_min_delta=0.0):
-    """Backward-compatible bee_colony entry using the legacy per-type counts.
-
-    The engine (:func:`run_bee_colony_plan`) is driven by an ``ExecutablePlan``;
-    this wrapper is the compatibility surface that maps the historical
-    ``n_type1..n_type7`` bee counts + ``bee_model``/``edit_model`` roles + per-
-    type halt/max-len flags onto a plan, then runs it. It preserves the exact
-    signature the frozen notebooks (evaluation.ipynb / experiment.ipynb) and the
-    seeded search path call, so their behaviour is byte-identical.
-    """
-    from .search.executable_plan import ExecutablePlan
-    plan = ExecutablePlan.from_counts(
-        n_bees=n_bees, n_type1=n_type1_bees, n_type2=n_type2_bees,
-        n_type4=n_type4_bees, n_type5=n_type5_bees, n_type6=n_type6_bees,
-        n_type7=n_type7_bees, bee_model=bee_model, edit_model=edit_model,
-        type4_allow_halt=type4_allow_halt, type5_allow_halt=type5_allow_halt,
-        type6_allow_halt=type6_allow_halt, type7_allow_halt=type7_allow_halt,
-        ignore_type4_max_route_len=ignore_type4_max_route_len,
-        ignore_type5_max_route_len=ignore_type5_max_route_len,
-        ignore_type6_max_route_len=ignore_type6_max_route_len,
-        ignore_type7_max_route_len=ignore_type7_max_route_len)
-    return run_bee_colony_plan(
-        state, cost_obj, init_network, n_bees=n_bees,
-        passes_per_it=passes_per_it, mod_steps_per_pass=mod_steps_per_pass,
-        shorten_prob=shorten_prob, n_iterations=n_iterations, plan=plan,
-        silent=silent, iteration_callback=iteration_callback,
-        force_linking_unlinked=force_linking_unlinked,
-        sum_writer=sum_writer, mutation_counts_out=mutation_counts_out,
-        adjustment_degree_weight=adjustment_degree_weight,
-        adjustment_degree_gap=adjustment_degree_gap,
-        adjustment_degree_mode=adjustment_degree_mode,
-        adjustment_degree_objective=adjustment_degree_objective,
-        adjustment_degree_target=adjustment_degree_target,
-        use_demand_weighted_route_selection=use_demand_weighted_route_selection,
-        worse_accept_temperature=worse_accept_temperature,
-        worse_accept_decay=worse_accept_decay,
-        worse_accept_min_temperature=worse_accept_min_temperature,
-        worse_selection_temperature=worse_selection_temperature,
-        worse_selection_decay=worse_selection_decay,
-        worse_selection_min_temperature=worse_selection_min_temperature,
-        worse_selection_uniform_mix=worse_selection_uniform_mix,
-        worse_selection_elite_count=worse_selection_elite_count,
-        trim_grace_period=trim_grace_period,
-        process_neural_bees_sequentially=process_neural_bees_sequentially,
-        early_stop_patience=early_stop_patience,
-        early_stop_min_delta=early_stop_min_delta)
 
 
 def _index_single_bee(bee_networks, chosen_route_idxs, bee_idx):
@@ -1652,14 +1574,6 @@ def main(cfg: DictConfig, tensors:dict):
     test_dl = DataLoader(test_ds, batch_size=cfg.batch_size)
 
     force_linking_unlinked = cfg.get('force_linking_unlinked', False)
-    ignore_type4_max_route_len = cfg.get('ignore_type4_max_route_len', False)
-    ignore_type5_max_route_len = cfg.get('ignore_type5_max_route_len', False)
-    ignore_type6_max_route_len = cfg.get('ignore_type6_max_route_len', False)
-    ignore_type7_max_route_len = cfg.get('ignore_type7_max_route_len', False)
-    type4_allow_halt = cfg.get('type4_allow_halt', True)
-    type5_allow_halt = cfg.get('type5_allow_halt', True)
-    type6_allow_halt = cfg.get('type6_allow_halt', True)
-    type7_allow_halt = cfg.get('type7_allow_halt', True)
     use_demand_weighted_route_selection = \
         cfg.get('use_demand_weighted_route_selection', False)
     worse_accept_temperature = cfg.get('worse_accept_temperature', 0.0)
@@ -1687,39 +1601,29 @@ def main(cfg: DictConfig, tensors:dict):
     else:
         edit_model = None
 
-    nt1b = cfg.get('n_type1_bees', None)
-    nt2b = cfg.get('n_type2_bees', None)
-    nt4b = cfg.get('n_type4_bees', 0)
-    nt5b = cfg.get('n_type5_bees', 0)
-    nt6b = cfg.get('n_type6_bees', 0)
-    nt7b = cfg.get('n_type7_bees', 0)
+    # The plan owns the bee taxonomy (per-type counts, models, halt / max-len
+    # flags), read from the flat cfg via the compat builder; the engine
+    # (run_bee_colony_plan) runs it -- the same verified path as cfg_run.
+    from .search.compat import plan_from_flat_cfg
+    plan = plan_from_flat_cfg(cfg, bee_model=bee_model, edit_model=edit_model)
+
     adjustment_degree_weight = cfg.get('adjustment_degree_weight', 0.0)
     adjustment_degree_gap = cfg.get('adjustment_degree_gap', 0.1)
     adjustment_degree_mode = cfg.get('adjustment_degree_mode', 'current')
     adjustment_degree_objective = cfg.get('adjustment_degree_objective', 'raw')
     adjustment_degree_target = cfg.get('adjustment_degree_target', 0.2)
     test_output = \
-        lrnu.test_method(bee_colony, test_dl, cfg.eval, cfg.init, cost_obj, 
+        lrnu.test_method(run_bee_colony_plan, test_dl, cfg.eval, cfg.init,
+            cost_obj,
             sum_writer=sum_writer, silent=True, n_bees=cfg.n_bees,
-            n_iterations=cfg.n_iterations, n_type1_bees=nt1b, n_type2_bees=nt2b,  
-            n_type4_bees=nt4b, n_type5_bees=nt5b, n_type6_bees=nt6b,
-            n_type7_bees=nt7b,
-            device=DEVICE, bee_model=bee_model, edit_model=edit_model,
-            return_routes=True,
+            n_iterations=cfg.n_iterations, plan=plan,
+            device=DEVICE, return_routes=True,
             force_linking_unlinked=force_linking_unlinked,
             adjustment_degree_weight=adjustment_degree_weight,
             adjustment_degree_gap=adjustment_degree_gap,
             adjustment_degree_mode=adjustment_degree_mode,
             adjustment_degree_objective=adjustment_degree_objective,
             adjustment_degree_target=adjustment_degree_target,
-            ignore_type4_max_route_len=ignore_type4_max_route_len,
-            ignore_type5_max_route_len=ignore_type5_max_route_len,
-            ignore_type6_max_route_len=ignore_type6_max_route_len,
-            ignore_type7_max_route_len=ignore_type7_max_route_len,
-            type4_allow_halt=type4_allow_halt,
-            type5_allow_halt=type5_allow_halt,
-            type6_allow_halt=type6_allow_halt,
-            type7_allow_halt=type7_allow_halt,
             use_demand_weighted_route_selection=
             use_demand_weighted_route_selection,
             worse_accept_temperature=worse_accept_temperature,

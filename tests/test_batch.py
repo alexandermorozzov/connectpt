@@ -36,6 +36,7 @@ def test_batch_dry_run_all_experiments():
     batch = ExperimentBatch(cfg, cfg_dir=CFG_DIR).run(dry_run=True)
     assert batch.name == "bee_type_comparison"
     assert len(batch.artifacts) == 7
-    # first is classic BCO (no neural models), last is compound (type7)
-    assert batch.artifacts[0].plan["counts"]["n_type1"] == 20
-    assert batch.artifacts[-1].plan["counts"]["n_type7"] == 20
+    # first is classic BCO (no neural models), last is compound (slot 7).
+    # counts are keyed by bee name (the plan group's name).
+    assert batch.artifacts[0].plan["counts"]["random_mutation"] == 20
+    assert batch.artifacts[-1].plan["counts"]["compound_trim_then_construct"] == 20

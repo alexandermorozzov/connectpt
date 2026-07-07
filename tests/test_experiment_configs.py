@@ -19,16 +19,17 @@ _HAVE_CKPTS = (
     and (WEIGHTS / "inductive_random_graphs_weighted_connectivity.pt").exists()
 )
 
-# experiment -> (expected non-zero counts, models loaded)
+# experiment -> (expected non-zero counts keyed by bee name, models loaded)
 EXPECTED = {
-    "00_classic_bco": ({"n_type1": 20}, []),
-    "01_nbco_construction": ({"n_type4": 20}, ["construction"]),
-    "02_nbco_edit_extend": ({"n_type5": 20}, ["edit"]),
-    "03_nbco_edit_trim": ({"n_type6": 20}, ["edit"]),
-    "04_nbco_edit_full": ({"n_type5": 20}, ["edit"]),
-    "05_nbco_construction_plus_edit": ({"n_type4": 10, "n_type5": 10},
+    "00_classic_bco": ({"random_mutation": 20}, []),
+    "01_nbco_construction": ({"neural_construction": 20}, ["construction"]),
+    "02_nbco_edit_extend": ({"neural_edit_extend": 20}, ["edit"]),
+    "03_nbco_edit_trim": ({"neural_edit_trim": 20}, ["edit"]),
+    "04_nbco_edit_full": ({"neural_edit_full": 20}, ["edit"]),
+    "05_nbco_construction_plus_edit": ({"neural_construction": 10,
+                                        "neural_edit_full": 10},
                                        ["construction", "edit"]),
-    "06_nbco_compound_trim_then_construct": ({"n_type7": 20},
+    "06_nbco_compound_trim_then_construct": ({"compound_trim_then_construct": 20},
                                              ["construction", "edit"]),
 }
 

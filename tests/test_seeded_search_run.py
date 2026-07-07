@@ -33,7 +33,7 @@ from connectpt.routes_generator.core.runtime import seed_everything
 from connectpt.routes_generator.model_factory import RouteModelFactory
 from connectpt.routes_generator.objectives import CostFactory
 from connectpt.routes_generator.search.edit_bee import build_edit_bee_model
-from connectpt.routes_generator.search.executable_plan import ExecutablePlan
+from connectpt.routes_generator.search.compat import plan_from_flat_cfg
 from connectpt.routes_generator.search.runs import BeeColonySearchRun
 from connectpt.routes_generator.search.seeded_search import run_seeded_bee_colony
 from connectpt.routes_generator.torch_utils import get_batch_tensor_from_routes
@@ -105,7 +105,7 @@ def test_seeded_beecolonysearchrun_matches_flat_our_nbco():
     bco_cfg_set(flat, n_iterations=N_ITERS, **UNIFIED_ADJ)
     set_cfg_value(flat, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
     seed_everything(0)
-    plan = ExecutablePlan.from_flat_cfg(flat, bee_model=construction, edit_model=edit)
+    plan = plan_from_flat_cfg(flat, bee_model=construction, edit_model=edit)
     out = run_seeded_bee_colony(dl, OmegaConf.create(eval_dims), cost, R, search_cfg=flat,
                                 plan=plan, device=device, silent=True)
     routes_a = _as(out[4])
@@ -175,7 +175,7 @@ def test_seeded_classic_bco_matches_flat():
     bco_cfg_set(flat, n_iterations=N_ITERS, **UNIFIED_ADJ)
     set_cfg_value(flat, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
     seed_everything(0)
-    plan = ExecutablePlan.from_flat_cfg(flat)
+    plan = plan_from_flat_cfg(flat)
     out = run_seeded_bee_colony(dl, OmegaConf.create(eval_dims), cost, R, search_cfg=flat,
                                 plan=plan, device=torch.device("cpu"), silent=True)
     routes_a = _as(out[4])
@@ -221,7 +221,7 @@ def test_seeded_neural_bco_matches_flat():
     bco_cfg_set(flat, n_iterations=N_ITERS, **UNIFIED_ADJ)
     set_cfg_value(flat, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
     seed_everything(0)
-    plan = ExecutablePlan.from_flat_cfg(flat, bee_model=construction)
+    plan = plan_from_flat_cfg(flat, bee_model=construction)
     out = run_seeded_bee_colony(dl, OmegaConf.create(eval_dims), cost, R, search_cfg=flat,
                                 plan=plan, device=device, silent=True)
     routes_a = _as(out[4])

@@ -24,7 +24,8 @@ class BeeColonyRunner:
 
     def plan_summary(self) -> dict:
         search = self.cfg.get("search", {})
-        counts = self.plan.attempted_type_counts()
+        # bee counts keyed by bee name (the plan group's name), not legacy slot.
+        counts = self.plan.summary()
         return {
             "counts": counts,
             "needs_construction": self.plan.needs_construction,

@@ -22,13 +22,14 @@ def test_reports_do_not_import_training_or_search():
 
 
 def test_make_search_plan_table():
-    plan = {"counts": {"n_type4": 4, "n_type5": 6, "n_type6": 2, "n_type7": 2,
-                       "n_type1": 0}}
+    plan = {"counts": {"neural_construction": 4, "neural_edit_full": 6,
+                       "neural_edit_trim": 2, "compound": 2,
+                       "random_mutation": 0}}
     df = make_search_plan_table(plan)
-    # zero-count types dropped; labels attached
-    assert set(df["bee_type"]) == {"n_type4", "n_type5", "n_type6", "n_type7"}
-    assert df.loc[df.bee_type == "n_type4", "count"].item() == 4
-    assert "neural construction" in df.loc[df.bee_type == "n_type4", "label"].item()
+    # zero-count bees dropped; bee name is the label
+    assert set(df["bee"]) == {"neural_construction", "neural_edit_full",
+                              "neural_edit_trim", "compound"}
+    assert df.loc[df.bee == "neural_construction", "count"].item() == 4
 
 
 def test_search_comparison_table_from_artifacts(tmp_path):
@@ -39,11 +40,11 @@ def test_search_comparison_table_from_artifacts(tmp_path):
     store = ArtifactStore(tmp_path)
     store.save_json(
         {"mean_cost": 2.0, "metrics": {"RTT": 1.0},
-         "plan": {"counts": {"n_type1": 20}}},
+         "plan": {"counts": {"random_mutation": 20}}},
         "bee_type_comparison_00_classic_bco_search")
     store.save_json(
         {"mean_cost": 1.5, "metrics": {"RTT": 0.8},
-         "plan": {"counts": {"n_type5": 20}}},
+         "plan": {"counts": {"neural_edit_full": 20}}},
         "bee_type_comparison_04_nbco_edit_full_search")
 
     s0 = load_search_summary(tmp_path, "bee_type_comparison/00_classic_bco")
@@ -52,7 +53,7 @@ def test_search_comparison_table_from_artifacts(tmp_path):
     # sorted by mean_cost ascending -> edit_full (1.5) first
     assert list(df["run"]) == ["edit_full", "classic"]
     assert df.iloc[0]["mean_cost"] == 1.5
-    assert "n_type5=20" in df.iloc[0]["bee_mix"]
+    assert "neural_edit_full=20" in df.iloc[0]["bee_mix"]
 
 
 def test_make_comparison_table():
