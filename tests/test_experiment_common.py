@@ -42,7 +42,7 @@ def test_pad_strict_validates_route_count_and_width():
 
 
 def test_modules_still_import_helpers():
-    import experiments.macsa as m
+    import connectpt.routes_generator.paper_experiments.macsa as m
     import experiments.training_lc as t
     assert callable(m.macsa_pad_routes) and callable(m.macsa_2d)
     assert callable(t._pad_routes_to)

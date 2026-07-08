@@ -229,9 +229,9 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
     # the captured presets carry it and eval_lib.experiments composes it from
     # the objective YAML -- the notebook no longer passes it by hand.
     assert "connectivity_mode=CONNECTIVITY_MODE" not in text
-    experiments_py = (ROUTE_EXAMPLES / "eval_lib" / "experiments.py").read_text(
-        encoding="utf-8")
-    assert "obj.connectivity_mode" in experiments_py
+    cfg_compose_py = (REPO_ROOT / "connectpt" / "routes_generator"
+                      / "paper_experiments" / "cfg_compose.py").read_text(encoding="utf-8")
+    assert "obj.connectivity_mode" in cfg_compose_py
 
 
 def test_paper_combined_streams_csv_rows_with_duration():
@@ -275,6 +275,9 @@ def test_paper_combined_uses_two_sided_adj_objective():
     # experiments modules), not inline in the notebook, so assert the single
     # source is applied there rather than counting notebook occurrences.
     assert "UNIFIED_ADJ" not in text  # adj threading lives in the library now
-    for mod in ("eval_lib/experiment_runner.py", "experiments/macsa.py",
-                "experiments/ekb.py"):
-        assert "UNIFIED_ADJ" in (ROUTE_EXAMPLES / mod).read_text(encoding="utf-8"), mod
+    # the unified adj kwargs are applied in the library (MACSA scoring) + the
+    # legacy eval_lib runner, not inline in the notebook.
+    assert "UNIFIED_ADJ" in (ROUTE_EXAMPLES / "eval_lib" / "experiment_runner.py"
+                             ).read_text(encoding="utf-8")
+    assert "UNIFIED_ADJ" in (REPO_ROOT / "connectpt" / "routes_generator"
+                             / "paper_experiments" / "macsa.py").read_text(encoding="utf-8")

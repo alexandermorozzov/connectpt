@@ -23,19 +23,21 @@ import matplotlib.pyplot as plt
 import torch
 from IPython.display import Image, display
 
-from eval_lib import plots as route_plots
-from eval_lib.baselines import _run_baseline
-from eval_lib.context import DATASETS_DIR
-from eval_lib.experiments import compose_experiment_cfg, scoring_cfg
-from eval_lib.helpers import as_route_tensor
-from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
-from eval_lib.paper import PAPER_DIR, UNIFIED_ADJ, paper_row as _row
-from connectpt.routes_generator.objectives import load_unified_objective as _load_objective
+from ..reports import route_plots
+from ..baselines import _run_baseline
+from ..core.paths import DATASETS_DIR
+from .cfg_compose import scoring_cfg
+from ..data.routes import as_route_tensor
+from ..reports.paper_io import PAPER_DIR, paper_row as _row
+from ..objectives import load_unified_objective as _load_objective
 
 _OBJ = _load_objective()
 ADJ_OBJECTIVE = _OBJ.adj_objective
 ADJ_TARGET = _OBJ.adj_target
 CONNECTIVITY_MODE = _OBJ.connectivity_mode
+# Two-sided |adj - target| penalty kwargs (from the objective YAML) -- the
+# scoring path spreads these over the fixed-route metric evaluation.
+UNIFIED_ADJ = dict(_OBJ.adj_kwargs)
 
 # --- static scenario constants -------------------------------------------------
 MACSA_SCENARIO_NAME = "mandl_8"
@@ -173,35 +175,32 @@ def macsa_score_routes(method, source, routes, *, seed_routes, tensors, spec,
     return row, as_route_tensor(scored_routes)
 
 
-def macsa_build_our_cfg(spec, *, alpha, adj_target, adj_objective,
-                         n_iterations, seed, force_cpu):
-    """Our-NBCO cfg for the MACSA case: captured preset + the sweep point.
-
-    The bee composition (5 GNN-rebuild + 5 trim/extend, forced-mutation edit
-    bees) and the worse-accept schedule live in
-    ``cfg/experiments/macsa/our_nbco_mandl8.yaml``; only the sweep point and
-    run identity are applied here.
-    """
-    return compose_experiment_cfg(
-        "macsa/our_nbco_mandl8", bounds=spec, seed=int(seed),
-        cpu=bool(force_cpu), alpha=alpha, n_iterations=int(n_iterations),
-        adj=dict(UNIFIED_ADJ,
-                 adjustment_degree_target=float(adj_target),
-                 adjustment_degree_objective=str(adj_objective)))
-
-
 def macsa_run_our_nbco(seed_routes, *, tensors, spec, alpha, adj_target,
-                        adj_objective, n_iterations, seed, force_cpu,
-                        edit_weights_path, edit_adj_cond_feats=0):
-    cfg = macsa_build_our_cfg(spec, alpha=alpha, adj_target=adj_target,
-                               adj_objective=adj_objective,
-                               n_iterations=n_iterations,
-                               seed=seed, force_cpu=force_cpu)
+                        adj_objective, n_iterations, n_bees=MACSA_SWEEP_BEES,
+                        seed, force_cpu, edit_weights_path=None,
+                        edit_adj_cond_feats=0):
+    """Run Our NBCO on the MACSA seed network via the top C-API (BeeColonySearchRun).
+
+    The declarative config ``cfg/experiments/macsa/mandl8/our_nbco.yaml`` owns the
+    bee composition + golden seeded models; the seeded runner improves the given
+    MACSA network at this sweep point (``alpha`` RTT/WMC trade-off + adjustment
+    ``adj_target``). ``edit_weights_path`` / ``adj_objective`` are baked into the
+    config (finetune100 edit model, two-sided objective) -- kept as ignored
+    kwargs for call-site compatibility. Returns ``(routes, duration_s)``.
+    """
+    from ..core import load_experiment
+    from ..search import BeeColonySearchRun
+
+    cfg = load_experiment(
+        "macsa/mandl8/our_nbco",
+        overrides=[f"run.seed={int(seed)}", f"run.cpu={str(bool(force_cpu)).lower()}",
+                   f"search.n_bees={int(n_bees)}"])
+    run = BeeColonySearchRun(cfg)
+    run.setup()
     t0 = _t.perf_counter()
-    _run_name, _metrics, _unserved, routes, _mutation_counts = run_bco_from_cfg(
-        cfg, seed_routes, tensors, run_name_scope=f"{MACSA_SCENARIO_NAME}_",
-        edit_weights_path=edit_weights_path,
-        edit_n_adjustment_cond_feats=int(edit_adj_cond_feats))
+    routes, _unserved, _metrics = run.runner.run_seeded(
+        seed_routes, tensors, eval_dims=spec, alpha=float(alpha),
+        adj_target=float(adj_target), n_iterations=int(n_iterations))
     return as_route_tensor(routes), _t.perf_counter() - t0
 
 
