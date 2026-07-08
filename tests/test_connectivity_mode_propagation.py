@@ -12,7 +12,10 @@ ROUTE_EXAMPLES = REPO_ROOT / "examples" / "route_generator"
 if str(ROUTE_EXAMPLES) not in sys.path:
     sys.path.insert(0, str(ROUTE_EXAMPLES))
 
-import eval_lib.baselines as baselines  # noqa: E402
+# baselines moved to the library; patch the module that owns run_nsgaii so the
+# monkeypatched names (make_tensor_dataloader / RouteGenBatchState / NSGAII)
+# resolve in the same namespace run_nsgaii uses.
+import connectpt.routes_generator.baselines as baselines  # noqa: E402
 import eval_lib.helpers as helpers  # noqa: E402
 
 
