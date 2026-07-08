@@ -1,0 +1,11 @@
+# @package _global_
+# Smoke batch: e2_5model_mumford1 runs at 2 iterations (TEMP_ dry-run).
+batch:
+  name: e2_5model_mumford1_smoke
+  output_dir: artifacts/runs/e2/5model/mumford1_smoke
+  runs:
+    - experiments/e2/5model/mumford1/our_nbco_smoke
+    - experiments/e2/5model/mumford1/rpc_trim_extend_smoke
+    - experiments/e2/5model/mumford1/gnn_type2_smoke
+    - experiments/e2/5model/mumford1/rpc_type2_smoke
+    - experiments/e2/5model/mumford1/trim12_extend12_smoke
