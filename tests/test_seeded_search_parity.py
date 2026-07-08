@@ -71,9 +71,11 @@ def _init_routes(spec, tensors):
 
 
 def _run_builder_path(spec, tensors, R, use_neural):
-    from eval_lib.helpers import build_bco_cfg, run_bco
-    from eval_lib.experiments import bco_cfg_set, set_cfg_value
-    from eval_lib.paper import UNIFIED_ADJ
+    from connectpt.routes_generator.search.compat.bco_config import compose_bco_cfg as build_bco_cfg
+    from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
+    from connectpt.routes_generator.paper_experiments.cfg_compose import bco_cfg_set, set_cfg_value
+    from connectpt.routes_generator.paper_experiments.macsa import UNIFIED_ADJ
+    from connectpt.routes_generator.core.paths import EDIT_MODEL_WEIGHTS_DIR
 
     cfg = build_bco_cfg("parity_builder", spec["n_routes"], spec["min_route_len"],
                         spec["max_route_len"], use_neural_bees=use_neural, n_bees=10,
@@ -84,7 +86,11 @@ def _run_builder_path(spec, tensors, R, use_neural):
     set_cfg_value(cfg, "experiment.cost_function.kwargs.use_weighted_connectivity", True)
     set_cfg_value(cfg, "experiment.seed", 0)
     seed_everything(0)
-    _run, _metrics, unserved, routes, _mc = run_bco(cfg, R, tensors=tensors)
+    # the old eval_lib.helpers.run_bco wrapper: run_bco_from_cfg pinned to the
+    # golden finetune100 edit checkpoint.
+    _edit = EDIT_MODEL_WEIGHTS_DIR / "improvement_lc_rttconn_adj_w10_t02_finetune100.pt"
+    _run, _metrics, unserved, routes, _mc = run_bco_from_cfg(
+        cfg, R, tensors, edit_weights_path=_edit, edit_n_adjustment_cond_feats=0)
     return _as_tensor(routes)
 
 
@@ -126,7 +132,7 @@ def _run_library_native_path(spec, tensors, R, use_neural):
 def test_library_native_seeded_bco_matches_builder_path(use_neural):
     if use_neural and not CONSTRUCTION_MODEL_WEIGHTS_PATH.exists():
         pytest.skip(f"construction weights not present: {CONSTRUCTION_MODEL_WEIGHTS_PATH}")
-    from eval_lib.baselines import load_benchmark_tensors, BENCHMARK_SPECS
+    from connectpt.routes_generator.data.loaders import load_benchmark_tensors, BENCHMARK_SPECS
 
     spec = next(s for s in BENCHMARK_SPECS if s["city"] == CITY)
     tensors = load_benchmark_tensors(CITY)

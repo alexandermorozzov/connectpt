@@ -25,7 +25,7 @@ from connectpt.routes_generator.improvement_learning import (
     RouteGenBatchState, evaluate_lc_improvement, load_raw_graphs_and_lc_routes,
     make_improvement_batch)
 from connectpt.routes_generator.objectives import load_unified_objective
-from eval_lib.context import CFG_DIR, DATASETS_DIR, EDIT_MODEL_WEIGHTS_DIR, ROOT_DIR
+from connectpt.routes_generator.core.paths import CFG_DIR, DATASETS_DIR, EDIT_MODEL_WEIGHTS_DIR, ROOT_DIR
 
 _OBJ = load_unified_objective()
 CONNECTIVITY_MODE = _OBJ.connectivity_mode

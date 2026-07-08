@@ -16,7 +16,15 @@ if str(ROUTE_EXAMPLES) not in sys.path:
 # monkeypatched names (make_tensor_dataloader / RouteGenBatchState / NSGAII)
 # resolve in the same namespace run_nsgaii uses.
 import connectpt.routes_generator.baselines as baselines  # noqa: E402
-import eval_lib.helpers as helpers  # noqa: E402
+# The eval_lib cfg builders moved to the library; expose them under the historical
+# ``helpers`` name so the propagation tests read unchanged.
+from types import SimpleNamespace as _NS  # noqa: E402
+from connectpt.routes_generator import lc_eval as _lc_eval  # noqa: E402
+from connectpt.routes_generator.search.compat.bco_config import (  # noqa: E402
+    compose_bco_cfg as _build_bco_cfg)
+from connectpt.routes_generator.objectives import load_unified_objective as _luo  # noqa: E402
+helpers = _NS(build_lc_cfg=_lc_eval.build_lc_cfg, build_bco_cfg=_build_bco_cfg,
+              DISABLED_COST_COMPONENTS=list(_luo().disabled_components))
 
 
 MEAN_WEIGHTED = "mean_weighted"
@@ -166,7 +174,7 @@ def test_run_nsgaii_applies_runtime_connectivity_mode(monkeypatch):
 
 def test_accessor_is_single_source_of_unified_objective():
     from connectpt.routes_generator.objectives import load_unified_objective
-    import eval_lib.paper as paper
+    from connectpt.routes_generator.paper_experiments import macsa as paper
 
     o = load_unified_objective()
     assert o.connectivity_mode == "median_weighted"
@@ -242,14 +250,14 @@ def test_paper_combined_streams_csv_rows_with_duration():
         "".join(cell.get("source", [])) for cell in notebook["cells"]
     )
 
-    # Results IO lives in eval_lib.paper; the notebook saves tables through it
-    # while the EKB row streaming lives in experiments/ekb.py. Anchor on the
-    # stable helper names, not on volatile per-experiment call sites.
+    # Results IO lives in the library reports layer (reports.paper_io); the
+    # notebook saves tables through it. Anchor on the stable helper names.
     assert "paper_row as _row" in text
     assert "save_paper_table" in text
-    ekb_py = (ROUTE_EXAMPLES / "experiments" / "ekb.py").read_text(encoding="utf-8")
-    assert "append_paper_row" in ekb_py
-    assert "reset_paper_table" in ekb_py
+    paper_io = (REPO_ROOT / "connectpt" / "routes_generator" / "reports"
+                / "paper_io.py").read_text(encoding="utf-8")
+    assert "append_paper_row" in paper_io
+    assert "reset_paper_table" in paper_io
 
 
 def test_paper_combined_uses_two_sided_adj_objective():
@@ -275,9 +283,7 @@ def test_paper_combined_uses_two_sided_adj_objective():
     # experiments modules), not inline in the notebook, so assert the single
     # source is applied there rather than counting notebook occurrences.
     assert "UNIFIED_ADJ" not in text  # adj threading lives in the library now
-    # the unified adj kwargs are applied in the library (MACSA scoring) + the
-    # legacy eval_lib runner, not inline in the notebook.
-    assert "UNIFIED_ADJ" in (ROUTE_EXAMPLES / "eval_lib" / "experiment_runner.py"
-                             ).read_text(encoding="utf-8")
+    # the unified adj kwargs are applied in the library (MACSA scoring), sourced
+    # from the objective YAML -- not inline in the notebook.
     assert "UNIFIED_ADJ" in (REPO_ROOT / "connectpt" / "routes_generator"
                              / "paper_experiments" / "macsa.py").read_text(encoding="utf-8")

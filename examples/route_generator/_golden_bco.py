@@ -10,10 +10,10 @@ Usage: python _golden_bco.py capture|compare [tag]
 import sys, time, random
 import torch
 
-from eval_lib.baselines import load_benchmark_tensors, BENCHMARK_SPECS
-from eval_lib.experiments import compose_experiment_cfg
-from eval_lib.context import EDIT_MODEL_WEIGHTS_DIR, ARTIFACTS_DIR
-from eval_lib.paper import UNIFIED_ADJ
+from connectpt.routes_generator.data.loaders import load_benchmark_tensors, BENCHMARK_SPECS
+from connectpt.routes_generator.paper_experiments.cfg_compose import compose_experiment_cfg
+from connectpt.routes_generator.core.paths import EDIT_MODEL_WEIGHTS_DIR, ARTIFACTS_DIR
+from connectpt.routes_generator.paper_experiments.macsa import UNIFIED_ADJ
 from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
 
 EDIT_WEIGHTS_PATH = EDIT_MODEL_WEIGHTS_DIR / \

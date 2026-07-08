@@ -37,20 +37,18 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from connectpt.routes_generator.citygraph_dataset import load_macsa_tensors  # noqa: E402
 
-from eval_lib import plots as route_plots  # noqa: E402
-from eval_lib.baselines import _run_baseline  # noqa: E402
-from eval_lib.context import ARTIFACTS_DIR, DATASETS_DIR  # noqa: E402
-from eval_lib.helpers import as_route_tensor  # noqa: E402
-from eval_lib.context import EDIT_MODEL_WEIGHTS_PATH  # noqa: E402
+from connectpt.routes_generator.reports import route_plots  # noqa: E402
+from connectpt.routes_generator.baselines import _run_baseline  # noqa: E402
+from connectpt.routes_generator.core.paths import ARTIFACTS_DIR, DATASETS_DIR  # noqa: E402
+from connectpt.routes_generator.data import as_route_tensor  # noqa: E402
+from connectpt.routes_generator.core.paths import EDIT_MODEL_WEIGHTS_DIR
+EDIT_MODEL_WEIGHTS_PATH = EDIT_MODEL_WEIGHTS_DIR / "improvement_lc_rttconn_adj_w10_t02_finetune100.pt"  # noqa: E402
 from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg  # noqa: E402
-from eval_lib.experiments import compose_experiment_cfg, scoring_cfg  # noqa: E402
-from eval_lib.paper import (  # noqa: E402
-    UNIFIED_ADJ,
-    adj_vs_init,
-    paper_row,
-    save_paper_routes,
-    save_paper_table,
-)
+from connectpt.routes_generator.paper_experiments.cfg_compose import compose_experiment_cfg, scoring_cfg  # noqa: E402
+from connectpt.routes_generator.paper_experiments.macsa import UNIFIED_ADJ  # noqa: E402
+from connectpt.routes_generator.evaluation import adj_vs_init  # noqa: E402
+from connectpt.routes_generator.reports.paper_io import (  # noqa: E402
+    paper_row, save_paper_routes, save_paper_table)
 from connectpt.routes_generator.objectives import load_unified_objective  # noqa: E402
 CONNECTIVITY_MODE = load_unified_objective().connectivity_mode
 

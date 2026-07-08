@@ -138,10 +138,10 @@ def test_declarative_our_nbco_seeded_matches_flat_run():
     route_examples = str(Path(__file__).resolve().parents[1] / "examples" / "route_generator")
     if route_examples not in sys.path:
         sys.path.insert(0, route_examples)
-    from eval_lib.baselines import load_benchmark_tensors, BENCHMARK_SPECS
-    from eval_lib.experiments import load_experiment_cfg
-    from eval_lib.experiments import bco_cfg_set, set_cfg_value
-    from eval_lib.paper import UNIFIED_ADJ
+    from connectpt.routes_generator.data.loaders import load_benchmark_tensors, BENCHMARK_SPECS
+    from connectpt.routes_generator.paper_experiments.cfg_compose import load_experiment_cfg
+    from connectpt.routes_generator.paper_experiments.cfg_compose import bco_cfg_set, set_cfg_value
+    from connectpt.routes_generator.paper_experiments.macsa import UNIFIED_ADJ
 
     device = torch.device("cpu")
     spec = next(s for s in BENCHMARK_SPECS if s["city"] == _CITY)

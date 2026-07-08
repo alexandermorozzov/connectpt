@@ -323,7 +323,7 @@ def load_benchmark_graph(spec, init_mode="nx"):
     """
     tensors = load_benchmark_tensors(spec["city"])
     if init_mode == "rpc":
-        from eval_lib.helpers import build_rpc_routes  # transitional (LC plumbing)
+        from .lc_eval import build_rpc_routes  # RPC/pi_random init (LC plumbing)
         init_routes = build_rpc_routes(
             spec, tensors, run_name=f"benchmark_rpc_init_{spec['city']}", n_samples=1)
     elif init_mode == "nx":

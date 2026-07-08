@@ -17,7 +17,7 @@ ROUTE_EXAMPLES = REPO_ROOT / "examples" / "route_generator"
 if str(ROUTE_EXAMPLES) not in sys.path:
     sys.path.insert(0, str(ROUTE_EXAMPLES))
 
-from eval_lib.plots import plot_route_diff  # noqa: E402
+from connectpt.routes_generator.reports import plot_route_diff  # noqa: E402
 
 
 def _count_removed_artists(ax):

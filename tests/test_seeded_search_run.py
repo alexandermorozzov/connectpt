@@ -71,10 +71,10 @@ def _init_routes(spec, tensors):
 def test_seeded_beecolonysearchrun_matches_flat_our_nbco():
     if not (CONSTRUCTION_MODEL_WEIGHTS_PATH.exists() and EDIT_CKPT.exists()):
         pytest.skip("construction/edit weights not present")
-    from eval_lib.baselines import BENCHMARK_SPECS, load_benchmark_tensors
-    from eval_lib.experiments import load_experiment_cfg
-    from eval_lib.experiments import bco_cfg_set, set_cfg_value
-    from eval_lib.paper import UNIFIED_ADJ
+    from connectpt.routes_generator.data.loaders import BENCHMARK_SPECS, load_benchmark_tensors
+    from connectpt.routes_generator.paper_experiments.cfg_compose import load_experiment_cfg
+    from connectpt.routes_generator.paper_experiments.cfg_compose import bco_cfg_set, set_cfg_value
+    from connectpt.routes_generator.paper_experiments.macsa import UNIFIED_ADJ
 
     spec = next(s for s in BENCHMARK_SPECS if s["city"] == "Mumford0")
     tensors = load_benchmark_tensors("Mumford0")
@@ -120,7 +120,7 @@ def test_run_sweep_varies_alpha_per_point():
     reconfigured to the last swept point."""
     if not (CONSTRUCTION_MODEL_WEIGHTS_PATH.exists() and EDIT_CKPT.exists()):
         pytest.skip("construction/edit weights not present")
-    from eval_lib.baselines import BENCHMARK_SPECS, load_benchmark_tensors
+    from connectpt.routes_generator.data.loaders import BENCHMARK_SPECS, load_benchmark_tensors
 
     spec = next(s for s in BENCHMARK_SPECS if s["city"] == "Mumford0")
     tensors = load_benchmark_tensors("Mumford0")
@@ -148,10 +148,10 @@ def test_seeded_classic_bco_matches_flat():
     """Heuristic classic BCO (no neural models) via BeeColonySearchRun == flat
     nbco_variants/classic_bco_mumford0, seeded. Validates the type1-heuristic +
     type2 path end-to-end (no weights needed)."""
-    from eval_lib.baselines import BENCHMARK_SPECS, load_benchmark_tensors
-    from eval_lib.experiments import load_experiment_cfg
-    from eval_lib.experiments import bco_cfg_set, set_cfg_value
-    from eval_lib.paper import UNIFIED_ADJ
+    from connectpt.routes_generator.data.loaders import BENCHMARK_SPECS, load_benchmark_tensors
+    from connectpt.routes_generator.paper_experiments.cfg_compose import load_experiment_cfg
+    from connectpt.routes_generator.paper_experiments.cfg_compose import bco_cfg_set, set_cfg_value
+    from connectpt.routes_generator.paper_experiments.macsa import UNIFIED_ADJ
 
     spec = next(s for s in BENCHMARK_SPECS if s["city"] == "Mumford0")
     tensors = load_benchmark_tensors("Mumford0")
@@ -190,10 +190,10 @@ def test_seeded_neural_bco_matches_flat():
     bit-for-bit. Completes the E1 method parity gate (neural_bco + our_nbco)."""
     if not CONSTRUCTION_MODEL_WEIGHTS_PATH.exists():
         pytest.skip("construction weights not present")
-    from eval_lib.baselines import BENCHMARK_SPECS, load_benchmark_tensors
-    from eval_lib.experiments import load_experiment_cfg
-    from eval_lib.experiments import bco_cfg_set, set_cfg_value
-    from eval_lib.paper import UNIFIED_ADJ
+    from connectpt.routes_generator.data.loaders import BENCHMARK_SPECS, load_benchmark_tensors
+    from connectpt.routes_generator.paper_experiments.cfg_compose import load_experiment_cfg
+    from connectpt.routes_generator.paper_experiments.cfg_compose import bco_cfg_set, set_cfg_value
+    from connectpt.routes_generator.paper_experiments.macsa import UNIFIED_ADJ
 
     spec = next(s for s in BENCHMARK_SPECS if s["city"] == "Mumford0")
     tensors = load_benchmark_tensors("Mumford0")
