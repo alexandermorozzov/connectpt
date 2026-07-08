@@ -13,6 +13,8 @@ from .comparison_tables import make_comparison_table
 from .figures import plot_routes_grid, plot_pareto, style_table
 from .route_plots import plot_plain_route_set, plot_route_diff
 from .render import render_report, ReportArtifact
+from .geo import (project_coords, route_stats, network_connectivity_stats,
+                 street_underlay_adj, route_underlay_adj)
 from .paper_io import (PAPER_DIR, paper_path, paper_row, save_paper_table,
                       save_paper_routes, append_paper_row, reset_paper_table,
                       save_paper_fig, ravel_hist)
@@ -34,6 +36,11 @@ __all__ = [
     "plot_route_diff",
     "render_report",
     "ReportArtifact",
+    "project_coords",
+    "route_stats",
+    "network_connectivity_stats",
+    "street_underlay_adj",
+    "route_underlay_adj",
     "PAPER_DIR",
     "paper_path",
     "paper_row",

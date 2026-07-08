@@ -27,11 +27,14 @@ STYLE = dict(
 
 def plot_routes_grid(route_sets: Mapping, coords, street_adj, *, ncols: int = 4,
                      title: str | None = None, diff_against: str | None = None,
-                     demand=None, max_panels: int | None = None):
+                     demand=None, max_panels: int | None = None, **panel_kwargs):
     """Grid of route-set panels (the one route plotter for EKB/MACSA/benchmark).
 
     ``route_sets`` maps a label -> route tensor; ``diff_against`` (a label) draws
     every other panel as a diff vs that reference instead of a plain set.
+    ``panel_kwargs`` (e.g. ``node_size`` / ``palette`` / ``with_overlap_curves``
+    / ``show_node_labels``) are forwarded to each panel plotter -- the geo/GIS
+    render path uses them to style panels over a street underlay.
     """
     import matplotlib.pyplot as plt
 
@@ -47,9 +50,10 @@ def plot_routes_grid(route_sets: Mapping, coords, street_adj, *, ncols: int = 4,
     flat = axes.flat
     for ax, (label, routes) in zip(flat, items):
         if diff_against is not None and label != diff_against and diff_against in route_sets:
-            plot_route_diff(ax, routes, route_sets[diff_against], coords, street_adj)
+            plot_route_diff(ax, routes, route_sets[diff_against], coords, street_adj,
+                            **panel_kwargs)
         else:
-            plot_plain_route_set(ax, routes, coords, street_adj)
+            plot_plain_route_set(ax, routes, coords, street_adj, **panel_kwargs)
         ax.set_title(str(label), fontsize=STYLE["title_fontsize"])
         ax.set_axis_off()
     for ax in list(flat)[n:]:

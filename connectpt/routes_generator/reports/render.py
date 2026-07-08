@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .figures import plot_pareto, plot_routes_grid, style_table
+from .geo import street_underlay_adj
 
 
 @dataclass
@@ -34,6 +35,10 @@ def _report_kind(result, explicit):
     meta = getattr(result, "metadata", None) or {}
     if meta.get("report_kind"):
         return meta["report_kind"]
+    # a geo instance (real-world coords with a CRS) renders on a street underlay.
+    inst = getattr(result, "instance", None)
+    if inst is not None and (getattr(inst, "meta", None) or {}).get("crs"):
+        return "gis"
     # infer: a multi-row RTT x WMC table is a Pareto front; else route panels.
     table = getattr(result, "table", None)
     if table is not None and len(table) > 1 and {"RTT", "WMC"} <= set(table.columns):
@@ -52,16 +57,32 @@ def render_report(result, *, kind: str | None = None, max_route_panels: int = 4,
     """
     table = result.table
     name = title or getattr(result, "run_name", None) or getattr(result, "name", "experiment")
+    resolved = _report_kind(result, kind)
     figures: dict = {}
 
-    if _report_kind(result, kind) == "pareto":
+    if resolved == "pareto":
         figures["pareto"] = plot_pareto(table, title=f"{name}: RTT x WMC front")
     else:
         inst = getattr(result, "instance", None)
         routes = getattr(result, "routes", None) or {}
         if inst is not None and routes:
-            figures["routes"] = plot_routes_grid(
-                routes, inst.coords, inst.street_adj,
-                title=getattr(inst, "label", str(name)), max_panels=max_route_panels)
+            label = getattr(inst, "label", str(name))
+            if resolved == "gis":
+                # geo panels over the street underlay (any city with real coords),
+                # plus a diff-vs-Initial grid. Style knobs are geo defaults.
+                underlay = street_underlay_adj(inst.street_adj)
+                geo = dict(node_size=8, with_overlap_curves=True,
+                           show_node_labels=False, palette="tab20")
+                figures["routes"] = plot_routes_grid(
+                    routes, inst.coords, underlay, title=f"{label} routes",
+                    max_panels=max_route_panels, **geo)
+                if "Initial" in routes:
+                    figures["diff"] = plot_routes_grid(
+                        routes, inst.coords, underlay, diff_against="Initial",
+                        title=f"{label}: diff vs Initial", **geo)
+            else:  # "network" -- plain route-set panels
+                figures["routes"] = plot_routes_grid(
+                    routes, inst.coords, inst.street_adj, title=label,
+                    max_panels=max_route_panels)
 
     return ReportArtifact(table=style_table(table), figures=figures)
