@@ -84,8 +84,8 @@ from .initialization import (
 )
 
 # === Optimization & Search ===
-# ``bee_colony`` is the legacy per-type entry; it lives in search.compat now.
-from .search.compat import bee_colony
+# The bee-colony engine is ``bee_colony.run_bee_colony_plan`` (plan-driven);
+# the search application wraps it via ``search.BeeColonySearchRun``.
 
 # === Comparison Baselines (ported from AHolliday/transit_learning) ===
 from .simulated_annealing import simulated_annealing_with_reheating

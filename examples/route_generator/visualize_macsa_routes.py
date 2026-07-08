@@ -43,8 +43,7 @@ from connectpt.routes_generator.core.paths import ARTIFACTS_DIR, DATASETS_DIR  #
 from connectpt.routes_generator.data import as_route_tensor  # noqa: E402
 from connectpt.routes_generator.core.paths import EDIT_MODEL_WEIGHTS_DIR
 EDIT_MODEL_WEIGHTS_PATH = EDIT_MODEL_WEIGHTS_DIR / "improvement_lc_rttconn_adj_w10_t02_finetune100.pt"  # noqa: E402
-from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg  # noqa: E402
-from connectpt.routes_generator.paper_experiments.cfg_compose import compose_experiment_cfg, scoring_cfg  # noqa: E402
+from connectpt.routes_generator.paper_experiments.cfg_compose import scoring_cfg  # noqa: E402
 from connectpt.routes_generator.paper_experiments.macsa import UNIFIED_ADJ  # noqa: E402
 from connectpt.routes_generator.evaluation import adj_vs_init  # noqa: E402
 from connectpt.routes_generator.reports.paper_io import (  # noqa: E402
@@ -192,34 +191,6 @@ def score_fixed_routes(
     return row, as_route_tensor(scored_routes)
 
 
-def build_our_nbco_cfg(
-    *,
-    spec: dict,
-    adj_target: float,
-    n_iterations: int,
-    seed: int,
-    force_cpu: bool,
-    alpha: float,
-    adj_objective: str,
-):
-    """Mirror paper_combined's Our NBCO: GNN rebuild bees + trim/extend bees.
-
-    The bee composition (5 rebuild + 5 trim/extend) and worse-accept schedule
-    live in the captured ``cfg/experiments/macsa/our_nbco_mandl8.yaml`` preset;
-    only the sweep point and run identity are applied here.
-    """
-    return compose_experiment_cfg(
-        "macsa/our_nbco_mandl8", bounds=spec,
-        run_name=f"{SCENARIO_NAME}_macsa_target_our_nbco_gnn_rebuild_trimext",
-        seed=int(seed), cpu=bool(force_cpu), alpha=alpha,
-        n_iterations=int(n_iterations),
-        adj=dict(
-            UNIFIED_ADJ,
-            adjustment_degree_target=float(adj_target),
-            adjustment_degree_objective=str(adj_objective),
-        ))
-
-
 def load_cached_routes(path: Path, method: str) -> torch.Tensor | None:
     if not path.exists():
         return None
@@ -284,24 +255,20 @@ def run_our_nbco(
     adj_objective: str,
     edit_weights_path: Path,
 ) -> tuple[dict, torch.Tensor]:
-    cfg = build_our_nbco_cfg(
-        spec=spec,
-        adj_target=adj_target,
-        n_iterations=n_iterations,
-        seed=seed,
-        force_cpu=force_cpu,
-        alpha=alpha,
-        adj_objective=adj_objective,
-    )
+    # C-native: BeeColonySearchRun seeded on the MACSA network (config-first).
+    from connectpt.routes_generator import load_experiment
+    from connectpt.routes_generator.search import BeeColonySearchRun
+
+    run_cfg = load_experiment(
+        "macsa/mandl8/our_nbco",
+        overrides=[f"run.seed={int(seed)}", f"run.cpu={str(bool(force_cpu)).lower()}",
+                   f"search.n_iterations={int(n_iterations)}"])
+    _run = BeeColonySearchRun(run_cfg)
+    _run.setup()
     t0 = time.perf_counter()
-    _run_name, metrics, _unserved, routes, _mutation_counts = run_bco_from_cfg(
-        cfg,
-        seed_routes,
-        tensors,
-        run_name_scope=f"{SCENARIO_NAME}_",
-        edit_weights_path=edit_weights_path,
-        edit_n_adjustment_cond_feats=0,
-    )
+    routes, _unserved, metrics = _run.runner.run_seeded(
+        seed_routes, tensors, eval_dims=spec, alpha=float(alpha),
+        adj_target=float(adj_target), n_iterations=int(n_iterations))
     row = paper_row(
         SCENARIO_NAME,
         method,

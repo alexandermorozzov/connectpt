@@ -615,45 +615,39 @@ def post_training_convergence(cfg, *, best_model_path, benchmark_specs,
     import pandas as pd
     from omegaconf import OmegaConf
 
-    from connectpt.routes_generator.search.compat.bco_config import compose_bco_cfg as build_bco_cfg
-    from connectpt.routes_generator.search.cfg_run import run_bco_from_cfg
+    from connectpt.routes_generator import load_experiment
+    from connectpt.routes_generator.search import BeeColonySearchRun
 
     city = str(cfg.report.post_train.city)
     iters = int(cfg.report.post_train.iters)
     alpha = float(cfg.report.post_train.alpha)
-    connectivity_mode = str(cfg.experiment.cost_function.kwargs.connectivity_mode)
-    condition_on_adj_target = bool(int(
-        cfg.model.route_generator.kwargs.get("n_adjustment_cond_feats", 0)) > 0)
-
-    edit_adj_cond_feats = 1 if condition_on_adj_target else 0
-    print(f"[post-train] edit bee model <- {best_model_path.name} "
-          f"(adj_cond_feats={edit_adj_cond_feats})")
+    print(f"[post-train] edit bee model <- {best_model_path.name}")
 
     spec = next(s for s in benchmark_specs if s["city"] == city)
     tensors, init = load_benchmark_graph(spec)
 
-    models = [dict(label="RPC + trim/extend", n_type2=0, n_type5=5),
-              dict(label="RPC + type2", n_type2=5, n_type5=0)]
+    # Config-first, C-native: the two ablation bee sets live in declarative configs;
+    # the RPC + trim/extend edit bees use the just-trained checkpoint (set after
+    # compose to avoid hydra-override parsing of a Windows path).
+    variants = [("RPC + trim/extend", "e2/5model/mumford1/rpc_trim_extend", True),
+                ("RPC + type2", "e2/5model/mumford1/rpc_type2", False)]
     conv, rows = {}, []
-    for m in models:
-        bco_cfg = build_bco_cfg(
-            run_name=f"posttrain_{city}_{m['label']}".replace(" ", "_").replace("/", "_"),
-            n_routes=spec["n_routes"], min_route_len=spec["min_route_len"],
-            max_route_len=spec["max_route_len"], use_neural_bees=False, n_bees=10,
-            n_type1_bees=0, n_type2_bees=m["n_type2"], n_type5_bees=m["n_type5"],
-            route_time_weight=alpha, median_connectivity_weight=1.0 - alpha,
-            connectivity_mode=connectivity_mode)
-        OmegaConf.update(bco_cfg, "n_iterations", int(iters), force_add=True)
-        hist_out = {}
+    for label, cfg_name, needs_edit in variants:
+        run_cfg = load_experiment(cfg_name, overrides=[f"search.n_iterations={int(iters)}"])
+        if needs_edit:
+            OmegaConf.set_struct(run_cfg, False)
+            run_cfg.models.edit.checkpoint_path = str(best_model_path)
+        run = BeeColonySearchRun(run_cfg)
+        run.setup()
         t0 = _time.perf_counter()
-        run_bco_from_cfg(bco_cfg, init, tensors, run_name_scope=f"{city}_",
-                         cost_history_out=hist_out,
-                         edit_weights_path=best_model_path,
-                         edit_n_adjustment_cond_feats=edit_adj_cond_feats)
+        _routes, _unserved, _metrics, histories = run.runner.run_seeded(
+            init, tensors, eval_dims=spec, alpha=alpha, n_iterations=int(iters),
+            return_histories=True)
         dt = _time.perf_counter() - t0
-        h = hist_out.get("history")
+        h = histories[0] if histories else None
         y = (np.asarray(h.numpy() if hasattr(h, "numpy") else h).reshape(-1)
              if h is not None else None)
+        m = {"label": label}
         if y is not None and y.size:
             conv[m["label"]] = y
             final, best = float(y[-1]), float(np.min(y))

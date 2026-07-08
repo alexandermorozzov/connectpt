@@ -16,14 +16,13 @@ if str(ROUTE_EXAMPLES) not in sys.path:
 # monkeypatched names (make_tensor_dataloader / RouteGenBatchState / NSGAII)
 # resolve in the same namespace run_nsgaii uses.
 import connectpt.routes_generator.baselines as baselines  # noqa: E402
-# The eval_lib cfg builders moved to the library; expose them under the historical
-# ``helpers`` name so the propagation tests read unchanged.
+# The LC eval builder moved to the library; expose it under the historical
+# ``helpers`` name so the propagation test reads unchanged. (The flat BCO cfg
+# builder was removed with the compat orchestration in M010.)
 from types import SimpleNamespace as _NS  # noqa: E402
 from connectpt.routes_generator import lc_eval as _lc_eval  # noqa: E402
-from connectpt.routes_generator.search.compat.bco_config import (  # noqa: E402
-    compose_bco_cfg as _build_bco_cfg)
 from connectpt.routes_generator.objectives import load_unified_objective as _luo  # noqa: E402
-helpers = _NS(build_lc_cfg=_lc_eval.build_lc_cfg, build_bco_cfg=_build_bco_cfg,
+helpers = _NS(build_lc_cfg=_lc_eval.build_lc_cfg,
               DISABLED_COST_COMPONENTS=list(_luo().disabled_components))
 
 
@@ -37,16 +36,6 @@ def _cost_kwargs(cfg):
 def test_eval_lib_builders_propagate_mean_weighted():
     lc_cfg = helpers.build_lc_cfg(
         "conn_mode_lc", 2, 2, 5, connectivity_mode=MEAN_WEIGHTED
-    )
-    bco_cfg = helpers.build_bco_cfg(
-        "conn_mode_bco",
-        2,
-        2,
-        5,
-        n_bees=2,
-        n_type1_bees=1,
-        n_type2_bees=1,
-        connectivity_mode=MEAN_WEIGHTED,
     )
     sa_cfg = baselines.build_sa_cfg(
         "conn_mode_sa",
@@ -83,30 +72,10 @@ def test_eval_lib_builders_propagate_mean_weighted():
         connectivity_mode=MEAN_WEIGHTED,
     )
 
-    cfgs = [lc_cfg, bco_cfg, sa_cfg, ga_cfg, hh_cfg, nsgaii_cfg]
+    cfgs = [lc_cfg, sa_cfg, ga_cfg, hh_cfg, nsgaii_cfg]
     assert all(
         _cost_kwargs(cfg).connectivity_mode == MEAN_WEIGHTED for cfg in cfgs
     )
-
-
-def test_eval_lib_builders_use_runtime_disabled_components(monkeypatch):
-    monkeypatch.setattr(helpers, "DISABLED_COST_COMPONENTS", ["demand"])
-
-    cfg = helpers.build_bco_cfg(
-        "runtime_disabled_components",
-        2,
-        2,
-        5,
-        n_bees=2,
-        n_type1_bees=1,
-        n_type2_bees=1,
-        demand_time_weight=0.0,
-        route_time_weight=0.25,
-        median_connectivity_weight=0.75,
-        connectivity_mode=MEAN_WEIGHTED,
-    )
-
-    assert list(_cost_kwargs(cfg).disabled_components) == ["demand"]
 
 
 def test_run_nsgaii_applies_runtime_connectivity_mode(monkeypatch):

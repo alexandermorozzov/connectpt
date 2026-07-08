@@ -1,22 +1,11 @@
-"""Legacy ``n_type1..n_type7`` taxonomy compatibility surface.
+"""Legacy ``n_type1..n_type7`` taxonomy: minimal plan-from-counts builder.
 
-Isolated here so the engine, the invocation layer and the declarative bee-set
-path carry no per-type taxonomy of their own. New code should not import from
-this package -- bee sets are declarative specs
-(:meth:`~connectpt.routes_generator.search.executable_plan.ExecutablePlan.from_specs`).
+The legacy flat-cfg orchestration (``compose_bco_cfg`` / ``plan_from_flat_cfg`` /
+``run_bco_from_cfg`` + the numeric ``bee_colony`` engine) was removed in M010 --
+the canonical path is declarative (``ExecutablePlan.from_specs``). Only
+``plan_from_counts`` survives, as a plan builder for the engine unit tests
+(``test_bee_colony``) that exercise ``get_mutants`` over specific type mixes.
 """
-from .bco_config import (
-    apply_disabled_components,
-    compose_bco_cfg,
-    safe_run_name,
-)
-from .plans import bee_colony, plan_from_counts, plan_from_flat_cfg
+from .plans import plan_from_counts
 
-__all__ = [
-    "apply_disabled_components",
-    "bee_colony",
-    "compose_bco_cfg",
-    "plan_from_counts",
-    "plan_from_flat_cfg",
-    "safe_run_name",
-]
+__all__ = ["plan_from_counts"]
