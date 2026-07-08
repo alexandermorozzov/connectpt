@@ -24,7 +24,7 @@ def load_train_config(name="edit_scratch", *, overrides=None, cfg_dir=None):
     composed cfg to the factory helpers below; no constants in the notebook."""
     from hydra import compose, initialize_config_dir
 
-    from eval_lib.context import CFG_DIR
+    from connectpt.routes_generator.core.paths import CFG_DIR
 
     cfg_dir = cfg_dir or CFG_DIR
     with initialize_config_dir(config_dir=str(cfg_dir), version_base=None):
@@ -36,7 +36,7 @@ def copytier_config(cfg) -> "CopyTierConfig":
     reads cfg.dataset_gen / cfg.data / cfg.curriculum, not notebook constants)."""
     from omegaconf import OmegaConf
 
-    from eval_lib.context import DATASETS_DIR
+    from connectpt.routes_generator.core.paths import DATASETS_DIR
     from connectpt.routes_generator.data.route_copies import COPY_TIER_CFG
 
     dg, data = cfg.dataset_gen, cfg.data
@@ -119,7 +119,8 @@ def build_copytier_dataset(cfg: CopyTierConfig):
     from tqdm.auto import tqdm
 
     from connectpt.routes_generator.citygraph_dataset import DynamicCityGraphDataset
-    from eval_lib import build_lc_cfg, dump_routes, run_lc_batch
+    from connectpt.routes_generator.lc_eval import build_lc_cfg, run_lc_batch
+    from connectpt.routes_generator.torch_utils import dump_routes
     from connectpt.routes_generator.data.route_copies import (
         count_changed_routes, inject_route_copies, redundancy_stats,
         uncovered_demand_pct)
@@ -228,7 +229,7 @@ def clean_lc_baseline(cfg, *, graphs, seed_routes, meta_df, device, baseline_pat
     from connectpt.routes_generator.improvement_learning import (
         RouteGenBatchState, make_improvement_batch, _clone_cost_weights)
     from connectpt.routes_generator.objectives import CostFactory
-    from eval_lib import build_lc_cfg, run_lc_batch
+    from connectpt.routes_generator.lc_eval import build_lc_cfg, run_lc_batch
 
     ct_cfg = copytier_config(cfg)
     batch = int(cfg.report.baseline.batch)
@@ -570,7 +571,7 @@ def plot_balanced_examples(visual_examples, graphs, tiers):
     import matplotlib.pyplot as plt
     from tqdm.auto import tqdm
 
-    from eval_lib import plots as route_plots
+    from connectpt.routes_generator.reports import route_plots
 
     if not visual_examples:
         print("Run the evaluation cell first.")
@@ -679,7 +680,7 @@ def build_edit_model_and_cost(run_name, *, device, vary_weights=True,
 
     from connectpt.routes_generator.model_factory import RouteModelFactory
     from connectpt.routes_generator.objectives import CostFactory
-    from eval_lib.context import CFG_DIR, EDIT_MODEL_WEIGHTS_DIR
+    from connectpt.routes_generator.core.paths import CFG_DIR, EDIT_MODEL_WEIGHTS_DIR
 
     cfg_dir = cfg_dir or CFG_DIR
     weights_dir = weights_dir or EDIT_MODEL_WEIGHTS_DIR

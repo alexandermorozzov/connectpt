@@ -10,7 +10,8 @@ ROUTE_EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "route_gener
 if str(ROUTE_EXAMPLES) not in sys.path:
     sys.path.insert(0, str(ROUTE_EXAMPLES))
 
-from experiments._common import pad_routes_to, route_2d  # noqa: E402
+from connectpt.routes_generator.paper_experiments._common import (  # noqa: E402
+    pad_routes_to, route_2d)
 
 
 def test_route_2d_squeezes_batch_dim():
@@ -43,6 +44,6 @@ def test_pad_strict_validates_route_count_and_width():
 
 def test_modules_still_import_helpers():
     import connectpt.routes_generator.paper_experiments.macsa as m
-    import experiments.training_lc as t
+    import connectpt.routes_generator.paper_experiments.training_lc as t
     assert callable(m.macsa_pad_routes) and callable(m.macsa_2d)
     assert callable(t._pad_routes_to)

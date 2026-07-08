@@ -10,7 +10,7 @@ def route_2d(routes):
     The ``x[0] if x.ndim == 3 else x`` pattern was repeated across macsa / ekb /
     training_lc; this is the single source.
     """
-    from eval_lib import as_route_tensor
+    from connectpt.routes_generator.data import as_route_tensor
 
     t = as_route_tensor(routes)
     return t[0] if t.ndim == 3 else t
@@ -27,7 +27,7 @@ def pad_routes_to(routes, n_routes, max_route_len, *, strict=False):
     """
     import torch
 
-    from eval_lib import as_route_tensor
+    from connectpt.routes_generator.data import as_route_tensor
 
     t = as_route_tensor(routes).long()
     if t.ndim == 3:
