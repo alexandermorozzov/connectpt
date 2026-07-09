@@ -556,7 +556,7 @@ def build_edit_model(device, weights_path=None, load_weights=True):
 
 def run_bco(cfg, init_routes, mutation_counts_out=None, *,
             tensors=None, run_name_scope="", cost_history_out=None,
-            iteration_callback=None):
+            iteration_callback=None, sum_writer=None):
     # tensors=None -> Mumford0 dataloader; tensors=<dict> -> explicit
     # tensor dataset. run_name_scope prefixes the run name so the
     # benchmark paths can keep their dataset/run-name labels.
@@ -594,6 +594,7 @@ def run_bco(cfg, init_routes, mutation_counts_out=None, *,
         OmegaConf.create({"method": "tensor"}),
         cost_obj,
         silent=False,   # show bee_colony's per-iteration tqdm (outer 1-sample bar is auto-hidden)
+        sum_writer=sum_writer,   # per-iteration TensorBoard logging (best cost / adjustment)
         device=device,
         return_routes=True,
         return_histories=cost_history_out is not None,
