@@ -87,7 +87,8 @@ class BeeColonyRunner:
         dataloader = DataLoader(
             get_dataset_from_config(OmegaConf.create({"type": "tensor"}), tensors=tensors),
             batch_size=1)
-        eval_cfg = OmegaConf.create(dict(eval_dims))
+        # csv default: the non-silent eval path reads eval_cfg.csv strictly.
+        eval_cfg = OmegaConf.create({"csv": False, **dict(eval_dims)})
         sched = self._schedule()
         acceptance = sched.get("acceptance")
         seq = (sched.get("process_neural_bees_sequentially", False)
@@ -103,7 +104,8 @@ class BeeColonyRunner:
         seed_everything(int(self.cfg.run.get("seed", 0)))
         out = run_seeded_bee_colony(
             dataloader, eval_cfg, self.cost_obj, init_routes, search_cfg=search_cfg,
-            plan=self.plan, device=self.device, silent=True,
+            plan=self.plan, device=self.device,
+            silent=bool(self.cfg.run.get("silent", True)),
             return_histories=return_histories)
         if return_histories:
             _mean, _std, unserved, metrics, routes, histories = out
@@ -156,7 +158,8 @@ class BeeColonyRunner:
 
         out = test_method(
             run_bee_colony_plan, dataloader, eval_cfg, init_cfg, self.cost_obj,
-            silent=True, return_routes=True, device=self.device,
+            silent=bool(self.cfg.run.get("silent", True)),
+            return_routes=True, device=self.device,
             n_bees=int(self._schedule().n_bees),
             n_iterations=int(self._schedule().n_iterations),
             plan=self.plan, **self._adjustment_kwargs(),

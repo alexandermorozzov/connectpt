@@ -97,8 +97,11 @@ def _compose(config_name: str, overrides: list[str]):
 
 
 def _run_sweep(config_name: str, tmp_path: Path, extra_overrides: list[str]):
+    # run.silent=false turns the BCO per-iteration tqdm on; pytest captures it
+    # unless run with -s, so use ``pytest -s`` to watch search progress live.
     cfg = _compose(config_name,
-                   [f"paths.output_dir={tmp_path.as_posix()}", *extra_overrides])
+                   [f"paths.output_dir={tmp_path.as_posix()}",
+                    "+run.silent=false", *extra_overrides])
     art = BeeColonySearchRun(cfg).run()
     assert art.table is not None and len(art.table) > 0
     return art.table
