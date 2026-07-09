@@ -94,3 +94,58 @@ def select_metrics(row: dict, keep) -> dict:
     """Filter a metric row to the ``keep`` keys (preserving present ones)."""
     keep = list(keep)
     return {k: row[k] for k in keep if k in row}
+
+
+def score_fixed_routes(routes, tensors, spec, *, alpha=None, adj_target=None,
+                       adj_objective=None, seed_routes=None, device=None):
+    """Score a FIXED route set under the unified objective -- no search at all.
+
+    The atomic evaluation every "compare against an external network" experiment
+    uses (MACSA Table-B, the pinned-Initial parity check): build the unified cost
+    (``CostFactory.build_unified``), evaluate ``routes`` on the instance
+    ``tensors`` with the ``spec`` route bounds, and return the engine metrics
+    (with the cost breakdown attached) plus the scored route tensor.
+
+    ``alpha`` sets the RTT/WMC trade-off (``route_time_weight=alpha``,
+    ``median_connectivity_weight=1-alpha``). The adjustment penalty is applied
+    only when both ``adj_target`` and ``seed_routes`` are given (weight/gap/mode
+    come from the objective YAML; ``adj_objective`` optionally overrides the
+    two-sided default) -- otherwise it is off, matching how the paper scores
+    Initial rows. Runs on CPU unless ``device`` says otherwise.
+    """
+    from omegaconf import OmegaConf
+    from torch_geometric.loader import DataLoader
+
+    from ..citygraph_dataset import get_dataset_from_config
+    from ..objectives import CostFactory
+    from ..utils import test_method
+    from .cost_breakdown import add_cost_breakdown_to_metrics
+
+    device = torch.device("cpu") if device is None else device
+    cost_obj = CostFactory.build_unified("rtt_wmc_no_demand", for_training=False)
+    if alpha is not None:
+        cost_obj.route_time_weight = float(alpha)
+        cost_obj.median_connectivity_weight = float(1.0 - float(alpha))
+    if adj_target is not None and seed_routes is not None:
+        cost_obj.adjustment_degree_target = float(adj_target)
+        if adj_objective is not None:
+            cost_obj.adjustment_degree_objective = str(adj_objective)
+        seed = as_route_tensor(seed_routes)
+        cost_obj.adjustment_seed = (seed[None] if seed.dim() == 2 else seed).to(device)
+    else:
+        cost_obj.adjustment_degree_weight = 0.0
+    cost_obj.to(device)
+
+    dataloader = DataLoader(
+        get_dataset_from_config(OmegaConf.create({"type": "tensor"}), tensors=tensors),
+        batch_size=1)
+    eval_cfg = OmegaConf.create({"csv": False, **dict(spec)})
+    out = test_method(
+        None, dataloader, eval_cfg, OmegaConf.create({"method": "tensor"}),
+        cost_obj, silent=True, device=device, return_routes=True,
+        routes_tensor=as_route_tensor(routes))
+    _mean, _std, _unserved, metrics, scored = out
+    scored = as_route_tensor(scored)
+    metrics = add_cost_breakdown_to_metrics(
+        metrics, dataloader, eval_cfg, cost_obj, scored, device)
+    return metrics, scored

@@ -8,7 +8,8 @@ must not import training/ or search/ internals (it consumes checkpoints).
 from .result_schema import EvaluationResult
 from .metrics import MetricComputer
 from .route_scoring import (adj_vs_init, conn_metric, full_metric_row,
-                           metric_value, redundancy_pct, select_metrics)
+                           metric_value, redundancy_pct, score_fixed_routes,
+                           select_metrics)
 from .evaluators import EditModelEvaluator
 from .runs import ModelEvaluationRun
 
@@ -21,6 +22,7 @@ __all__ = [
     "full_metric_row",
     "metric_value",
     "redundancy_pct",
+    "score_fixed_routes",
     "select_metrics",
     "EditModelEvaluator",
     "ModelEvaluationRun",

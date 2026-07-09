@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from typing import Mapping
 
-from .route_plots import plot_plain_route_set, plot_route_diff
+from .route_plots import plot_demand_graph, plot_plain_route_set, plot_route_diff
 
 # One shared style for every figure/table.
 STYLE = dict(
@@ -27,11 +27,19 @@ STYLE = dict(
 
 def plot_routes_grid(route_sets: Mapping, coords, street_adj, *, ncols: int = 4,
                      title: str | None = None, diff_against: str | None = None,
-                     demand=None, max_panels: int | None = None, **panel_kwargs):
+                     diff_ref_routes=None, demand=None,
+                     max_panels: int | None = None,
+                     subtitles: Mapping | None = None,
+                     node_label_offset: int = 0, **panel_kwargs):
     """Grid of route-set panels (the one route plotter for EKB/MACSA/benchmark).
 
     ``route_sets`` maps a label -> route tensor; ``diff_against`` (a label) draws
-    every other panel as a diff vs that reference instead of a plain set.
+    every other panel as a diff vs that reference instead of a plain set;
+    ``diff_ref_routes`` (a route tensor) does the same against an external
+    reference that is not itself a panel.
+    ``demand`` (an OD matrix) prepends an OD-demand panel; ``subtitles`` maps a
+    panel label -> subtitle string (e.g. its metric row); ``node_label_offset``
+    shifts the drawn node ids (MACSA figures are 1-indexed).
     ``panel_kwargs`` (e.g. ``node_size`` / ``palette`` / ``with_overlap_curves``
     / ``show_node_labels``) are forwarded to each panel plotter -- the geo/GIS
     render path uses them to style panels over a street underlay.
@@ -41,22 +49,42 @@ def plot_routes_grid(route_sets: Mapping, coords, street_adj, *, ncols: int = 4,
     items = list(route_sets.items())
     if max_panels is not None:
         items = items[:max_panels]
-    n = len(items)
+    subtitles = subtitles or {}
+    n = len(items) + (1 if demand is not None else 0)
     ncols = max(1, min(ncols, n))
     nrows = math.ceil(n / ncols)
     fp = STYLE["figsize_per_panel"]
     fig, axes = plt.subplots(nrows, ncols, figsize=(fp * ncols, fp * nrows),
                              squeeze=False)
-    flat = axes.flat
+    flat = list(axes.flat)
+
+    def _relabel(ax):
+        if not node_label_offset:
+            return
+        for txt in ax.texts:
+            value = txt.get_text()
+            if value.isdigit():
+                txt.set_text(str(int(value) + node_label_offset))
+
+    if demand is not None:
+        plot_demand_graph(flat[0], demand, coords, street_adj, title="OD demand",
+                          subtitle="edge color/width = demand")
+        _relabel(flat[0])
+        flat = flat[1:]
     for ax, (label, routes) in zip(flat, items):
-        if diff_against is not None and label != diff_against and diff_against in route_sets:
-            plot_route_diff(ax, routes, route_sets[diff_against], coords, street_adj,
+        ref = (route_sets.get(diff_against) if diff_against is not None
+               else diff_ref_routes)
+        if ref is not None and label != diff_against:
+            plot_route_diff(ax, routes, ref, coords, street_adj,
                             **panel_kwargs)
         else:
             plot_plain_route_set(ax, routes, coords, street_adj, **panel_kwargs)
-        ax.set_title(str(label), fontsize=STYLE["title_fontsize"])
+        subtitle = subtitles.get(label)
+        ax.set_title(f"{label}\n{subtitle}" if subtitle else str(label),
+                     fontsize=STYLE["title_fontsize"])
+        _relabel(ax)
         ax.set_axis_off()
-    for ax in list(flat)[n:]:
+    for ax in flat[len(items):]:
         ax.set_axis_off()
     if title:
         fig.suptitle(title, fontsize=STYLE["suptitle_fontsize"], fontweight="bold")

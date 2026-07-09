@@ -30,3 +30,8 @@ sweep:
   n_iterations: 200
 
 metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
+
+# Output filename stem under the suite's paper folder (artifacts/paper_results_v2).
+# Clean name -- a fresh folder, so no legacy paper_results continuity to preserve.
+output:
+  paper_stem: e2_our_pareto_mumford1

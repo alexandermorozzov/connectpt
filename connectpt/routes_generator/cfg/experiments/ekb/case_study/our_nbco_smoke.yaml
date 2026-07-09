@@ -12,3 +12,6 @@ paths:
 
 sweep:
   n_iterations: 2
+
+output:
+  paper_stem: ekb_our_nbco_smoke

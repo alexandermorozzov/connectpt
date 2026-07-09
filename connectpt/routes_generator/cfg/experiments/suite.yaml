@@ -7,12 +7,14 @@ profile: full
 smoke: false
 quick: false
 output_prefix: ""          # set to "TEMP_" (smoke profile) for throwaway runs
+# Fresh output folder for the refactored notebook -- kept SEPARATE from the
+# curated artifacts/paper_results + artifacts/paper_final so a re-run never
+# clobbers existing paper artifacts. Resolved against the repo root inside the
+# library (paper_runs); the notebook never sees a path.
+paper_output_dir: artifacts/paper_results_v2
 seeds: [0]
 cities: [Mandl, Mumford0, Mumford1, Mumford2, Mumford3]
 
-model:
-  edit_checkpoint: improvement_lc_rttconn_adj_w10_t02_finetune100.pt
-  edit_adj_cond_feats: 0   # the finetune100 checkpoint is unconditioned
 benchmark_init_mode: nx
 include_edit_rebuild: false
 early_stop_patience: null

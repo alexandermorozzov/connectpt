@@ -6,3 +6,6 @@ batch:
   runs:
     - experiments/e1/mandl/neural_bco_smoke
     - experiments/e1/mandl/our_nbco_smoke
+
+output:
+  paper_stem: e1_mandl_smoke

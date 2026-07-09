@@ -143,7 +143,7 @@ def test_run_nsgaii_applies_runtime_connectivity_mode(monkeypatch):
 
 def test_accessor_is_single_source_of_unified_objective():
     from connectpt.routes_generator.objectives import load_unified_objective
-    from connectpt.routes_generator.paper_experiments import macsa as paper
+    from connectpt.routes_generator.paper_experiments import macsa_run
 
     o = load_unified_objective()
     assert o.connectivity_mode == "median_weighted"
@@ -157,8 +157,10 @@ def test_accessor_is_single_source_of_unified_objective():
     assert o.adj_target == 0.2
     assert o.adj_objective == "target"        # search / BCO acceptance
     assert o.adj_train_objective == "cap"     # PPO reward shaping
-    # eval_lib.paper.UNIFIED_ADJ is built from the accessor's adj_kwargs.
-    assert paper.UNIFIED_ADJ == o.adj_kwargs
+    # MACSA's fixed-network scoring point is read off the accessor (M013):
+    # the atom itself takes weight/gap/mode from the objective via CostFactory.
+    assert macsa_run.EVAL_ADJ_TARGET == o.adj_target
+    assert macsa_run.EVAL_ADJ_OBJECTIVE == o.adj_objective
 
 
 def test_paper_combined_sets_connectivity_mode_everywhere():
@@ -182,11 +184,14 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
         assert not re.search(rf"^{name} *= *{re.escape(literal)}", text, re.M), \
             f"{name} is bound to a hardcoded objective literal in the notebook"
     # Experiment selection is now config-driven via the suite profile
-    # (cfg/experiments/suite*.yaml), loaded once as SUITE -- not inline RUN_*
-    # constants. The notebook drives the experiment switches from SUITE.run, and
-    # the full-run default keeps the (heaviest) NSGA-II baseline off.
-    assert "SUITE = load_suite(" in text
-    assert "SUITE.run." in text
+    # (cfg/experiments/suite*.yaml), loaded once as the lowercase ``suite`` handle
+    # (M012 -- no UPPERCASE constants / RunContext in the notebook). The notebook
+    # drives the experiment switches from suite.run, and the full-run default keeps
+    # the (heaviest) NSGA-II baseline off.
+    assert "suite = load_suite(" in text
+    assert "suite.run." in text
+    assert "SUITE" not in text          # M012: no UPPERCASE handle
+    assert "CTX" not in text            # M012: RunContext removed
     suite_yaml = (REPO_ROOT / "connectpt" / "routes_generator" / "cfg"
                   / "experiments" / "suite.yaml").read_text(encoding="utf-8")
     assert "nsgaii_baselines: false" in suite_yaml
@@ -203,12 +208,14 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
     assert 'f"++experiment.cost_function.kwargs.connectivity_mode=' not in text
 
     # PART 2 (experiments) threads the unified connectivity mode config-first:
-    # the captured presets carry it and eval_lib.experiments composes it from
-    # the objective YAML -- the notebook no longer passes it by hand.
+    # search runs build the cost via CostFactory from the objective YAML, and
+    # fixed-network scoring goes through the evaluation atom (M013) -- the
+    # notebook no longer passes a connectivity mode by hand.
     assert "connectivity_mode=CONNECTIVITY_MODE" not in text
-    cfg_compose_py = (REPO_ROOT / "connectpt" / "routes_generator"
-                      / "paper_experiments" / "cfg_compose.py").read_text(encoding="utf-8")
-    assert "obj.connectivity_mode" in cfg_compose_py
+    scoring_py = (REPO_ROOT / "connectpt" / "routes_generator"
+                  / "evaluation" / "route_scoring.py").read_text(encoding="utf-8")
+    assert "def score_fixed_routes" in scoring_py
+    assert "build_unified" in scoring_py
 
 
 def test_paper_combined_streams_csv_rows_with_duration():
@@ -219,12 +226,18 @@ def test_paper_combined_streams_csv_rows_with_duration():
         "".join(cell.get("source", [])) for cell in notebook["cells"]
     )
 
-    # Results IO lives in the library reports layer (reports.paper_io); the
-    # notebook saves tables through it. Anchor on the stable helper names.
-    assert "paper_row as _row" in text
-    assert "save_paper_table" in text
+    # Results IO lives entirely in the library (M012): the notebook never calls
+    # save_paper_table / paper_row directly -- it runs config-first wrappers
+    # (run_experiment / run_batch / run_macsa_table_b) that persist internally
+    # with the prefix + folder read from the suite. Anchor on the wrappers here
+    # and on the sink helpers in the library.
+    assert "save_paper_table" not in text          # no direct sink calls in cells
+    assert "run_macsa_table_b(" in text
+    assert ("run_experiment(" in text) or ("run_batch(" in text)
     paper_io = (REPO_ROOT / "connectpt" / "routes_generator" / "reports"
                 / "paper_io.py").read_text(encoding="utf-8")
+    assert "paper_row" in paper_io
+    assert "save_paper_table" in paper_io
     assert "append_paper_row" in paper_io
     assert "reset_paper_table" in paper_io
 
@@ -247,12 +260,14 @@ def test_paper_combined_uses_two_sided_adj_objective():
     edit_yaml = (REPO_ROOT / "connectpt" / "routes_generator" / "cfg" / "train"
                  / "edit.yaml").read_text(encoding="utf-8")
     assert "adjustment_degree_objective: cap" in edit_yaml
-    # PART 2 search spreads the unified adj kwargs (UNIFIED_ADJ). The per-method
-    # threading now lives in the library (experiment_runner + the one-off
-    # experiments modules), not inline in the notebook, so assert the single
-    # source is applied there rather than counting notebook occurrences.
+    # PART 2 search spreads the unified adj kwargs. The threading lives in the
+    # library, not inline in the notebook: fixed-network scoring takes the
+    # penalty (weight/gap/mode) from the objective via CostFactory inside the
+    # evaluation atom (M013), and MACSA reads its eval point off the accessor.
     assert "UNIFIED_ADJ" not in text  # adj threading lives in the library now
-    # the unified adj kwargs are applied in the library (MACSA scoring), sourced
-    # from the objective YAML -- not inline in the notebook.
-    assert "UNIFIED_ADJ" in (REPO_ROOT / "connectpt" / "routes_generator"
-                             / "paper_experiments" / "macsa.py").read_text(encoding="utf-8")
+    scoring_py = (REPO_ROOT / "connectpt" / "routes_generator"
+                  / "evaluation" / "route_scoring.py").read_text(encoding="utf-8")
+    assert "adjustment_degree_target" in scoring_py
+    macsa_py = (REPO_ROOT / "connectpt" / "routes_generator"
+                / "paper_experiments" / "macsa_run.py").read_text(encoding="utf-8")
+    assert "load_unified_objective" in macsa_py

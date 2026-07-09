@@ -20,7 +20,7 @@ def save_table(df, name: str, *, prefix: str = "", subdir: str | None = None):
     """Save a results DataFrame to ``artifacts/results/[<subdir>/]<name>.csv``.
 
     ``prefix`` is the explicit output-filename prefix (thread it from
-    ``RunContext.output_prefix``; ``"TEMP_"`` on smoke runs keeps throwaway
+    ``suite.output_prefix``; ``"TEMP_"`` on smoke runs keeps throwaway
     outputs from overwriting real result files). ``subdir`` (optional) routes
     the CSV into a child folder beneath ``RESULTS_DIR``; the folder is created
     if missing.

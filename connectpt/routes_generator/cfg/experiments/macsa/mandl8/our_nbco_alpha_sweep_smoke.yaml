@@ -1,8 +1,10 @@
 # @package _global_
 # MACSA Table-B (Mandl8 scenario): Our NBCO single-step alpha sweep -- the
-# paper's Table "macsa-alpha-sweep" (iter=1). Adjustment target is pinned to
-# the adjustment degree MACSA itself realizes vs the original network
-# (0.051588, rounded to 0.052 in the manuscript). Targets live in
+# paper's Table "macsa-alpha-sweep" (iter=1) AND the smoke variant of
+# our_nbco_alpha_sweep (they coincide: the paper's lightest experiment is one
+# BCO iteration per point). Adjustment target is pinned to the adjustment
+# degree MACSA itself realizes vs the original network (0.051588, rounded to
+# 0.052 in the manuscript). Targets live in
 # artifacts/paper_final/table6_macsa_alpha_sweep_iter1/.
 defaults:
   - /search: bee_colony_base
@@ -33,3 +35,6 @@ sweep:
   n_iterations: 1
 
 metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
+
+output:
+  paper_stem: final_macsa_mandl8_alpha_sweep_iter1

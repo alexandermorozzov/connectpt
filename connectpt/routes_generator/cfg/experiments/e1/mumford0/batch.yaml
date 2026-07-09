@@ -7,3 +7,6 @@ batch:
   runs:
     - experiments/e1/mumford0/neural_bco
     - experiments/e1/mumford0/our_nbco
+
+output:
+  paper_stem: e1_mumford0

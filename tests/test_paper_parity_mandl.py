@@ -21,8 +21,6 @@ Two tiers:
 The full-budget tier takes minutes to hours -- it is for the user to run
 manually, never part of the fast suite.
 """
-import contextlib
-import io
 import math
 from pathlib import Path
 
@@ -114,11 +112,9 @@ def test_initial_network_scoring_matches_table1():
     """Metric pipeline parity, no search: score the pinned Table-1 initial
     network under the unified objective (alpha=0.5, target=0.2) and compare
     with the 'Initial (LC+realistic)' row. Deterministic."""
-    from connectpt.routes_generator.baselines import _run_baseline
     from connectpt.routes_generator.data.sources import BenchmarkDataSource
-    from connectpt.routes_generator.evaluation import full_metric_row
-    from connectpt.routes_generator.objectives import load_unified_objective
-    from connectpt.routes_generator.paper_experiments.cfg_compose import scoring_cfg
+    from connectpt.routes_generator.evaluation import (full_metric_row,
+                                                       score_fixed_routes)
 
     targets = _targets(TABLE1_CSV)
     if not TABLE1_ROUTES.exists():
@@ -126,17 +122,11 @@ def test_initial_network_scoring_matches_table1():
     inst = BenchmarkDataSource(
         city="Mandl", init_dump=str(TABLE1_ROUTES)).load()
 
-    obj = load_unified_objective()
-    cfg = scoring_cfg("Mandl", inst.spec, cpu=True, csv=False, alpha=0.5)
     # The paper's Initial rows are scored WITHOUT the adjustment penalty (vs
-    # its own seed it is a degenerate constant 10*|0-target|), so leave the
-    # adjustment kwargs at their off defaults here.
-    with contextlib.redirect_stdout(io.StringIO()):
-        _name, metrics, _unserved, scored = _run_baseline(
-            None, cfg, inst.init_routes, "mandl_parity_score_", {},
-            tensors=inst.tensors, use_weighted_connectivity=True,
-            connectivity_mode=obj.connectivity_mode,
-            adjustment_seed_routes=inst.init_routes)
+    # its own seed it is a degenerate constant 10*|0-target|), so pass no
+    # adj_target -- the atom keeps the penalty off.
+    metrics, scored = score_fixed_routes(
+        inst.init_routes, inst.tensors, inst.spec, alpha=0.5)
     row = full_metric_row(metrics, scored, inst.init_routes)
 
     problems = _compare(row, _target_row(targets, "Initial (LC+realistic)"),
@@ -160,7 +150,8 @@ def test_macsa_alpha_sweep_iter1_parity(tmp_path):
     * realized adjustment degree within 0.05 of the paper's.
     """
     targets = _targets(TABLE6_CSV)
-    table = _run_sweep("experiments/macsa/mandl8/our_nbco_alpha_sweep_iter1",
+    # the smoke variant IS the paper's iter=1 experiment (Table 6).
+    table = _run_sweep("experiments/macsa/mandl8/our_nbco_alpha_sweep_smoke",
                        tmp_path, [])
 
     problems = []

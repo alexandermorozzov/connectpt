@@ -6,3 +6,6 @@ batch:
   runs:
     - experiments/m0/mumford0/our_nbco_smoke
     - experiments/m0/mumford0/trim12_extend12_smoke
+
+output:
+  paper_stem: m0_nbco_variants_smoke

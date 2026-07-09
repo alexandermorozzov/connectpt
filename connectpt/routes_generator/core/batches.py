@@ -55,11 +55,12 @@ class ExperimentBatch:
         self.cfg = cfg
         self.cfg_dir = Path(cfg_dir)
 
-    def run(self, *, dry_run: bool = False) -> BatchArtifact:
+    def run(self, *, dry_run: bool = False, overrides=None) -> BatchArtifact:
         artifacts: list[RunArtifact] = []
         for config_name in self.cfg.batch.runs:
             with initialize_config_dir(config_dir=str(self.cfg_dir), version_base=None):
-                run_cfg = compose(config_name=str(config_name))
+                run_cfg = compose(config_name=str(config_name),
+                                  overrides=list(overrides or []))
             run = ExperimentRunFactory.from_cfg(run_cfg)
             artifacts.append(run.run(dry_run=dry_run))
         out_dir = self.cfg.batch.get("output_dir")

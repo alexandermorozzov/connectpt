@@ -14,7 +14,38 @@ via the library factories, exactly like the dormant balanced-eval cell needs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from ..core.paths import MODEL_OUTPUTS_DIR
+
+
+def training_artifact_path(cfg, suffix: str) -> Path:
+    """Path of a per-run training artifact under the outputs dir (resolved here,
+    not in the notebook): ``<MODEL_OUTPUTS_DIR>/<run.name>_<suffix>``."""
+    MODEL_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    return MODEL_OUTPUTS_DIR / f"{cfg.run.name}_{suffix}"
+
+
+def save_visual_examples(cfg, visual_examples) -> Path:
+    """Persist the balanced-eval visual examples for the dormant viz cell."""
+    import torch
+    path = training_artifact_path(cfg, "visual_examples.pt")
+    torch.save(visual_examples, path)
+    print(f"[eval] saved visual_examples -> {path}")
+    return path
+
+
+def load_visual_examples(cfg):
+    """Load persisted visual examples (empty dict if none saved yet)."""
+    import torch
+    path = training_artifact_path(cfg, "visual_examples.pt")
+    if not path.exists():
+        return {}
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
 
 
 def load_train_config(name="edit_scratch", *, overrides=None, cfg_dir=None):
@@ -216,13 +247,17 @@ def build_copytier_dataset(cfg: CopyTierConfig):
     return (_time.perf_counter() - _tg) / max(1, cfg.n_graphs)
 
 
-def clean_lc_baseline(cfg, *, graphs, seed_routes, meta_df, device, baseline_path):
+def clean_lc_baseline(cfg, *, graphs, seed_routes, meta_df, device,
+                      baseline_path=None):
     """Per-curriculum-stage clean-LC baseline cost CSV for the history figure.
 
     Config-driven: geometry/combos/curriculum + baseline knobs all read from the
     composed train ``cfg`` (cfg.report.baseline, cfg.curriculum, cfg.dataset_gen).
+    The output CSV path is resolved here from the run name unless given.
     Returns the baseline DataFrame.
     """
+    if baseline_path is None:
+        baseline_path = training_artifact_path(cfg, "clean_lc_baseline_cost.csv")
     import pandas as pd
     import torch
 
@@ -331,13 +366,17 @@ def clean_lc_baseline(cfg, *, graphs, seed_routes, meta_df, device, baseline_pat
     return clean_lc_baseline_df
 
 
-def stitch_history(*, prior_history_files=(), history_df=None,
+def stitch_history(*, cfg=None, prior_history_files=(), history_df=None,
                    full_history_checkpoint=None):
     """Concatenate prior history part(s) + this run's continuation into one
-    epoch-indexed frame, and derive the curriculum-stage spans. Returns (h, spans)."""
-    from pathlib import Path
+    epoch-indexed frame, and derive the curriculum-stage spans. Returns (h, spans).
 
+    When ``full_history_checkpoint`` is omitted it is resolved from ``cfg`` (the
+    per-run partial-history CSV) so the notebook passes no paths."""
     import pandas as pd
+
+    if full_history_checkpoint is None and cfg is not None:
+        full_history_checkpoint = training_artifact_path(cfg, "training_history_partial.csv")
 
     parts, labels = [], []
     for f in (prior_history_files or []):
@@ -366,14 +405,17 @@ def stitch_history(*, prior_history_files=(), history_df=None,
     return h, spans
 
 
-def plot_training_history(h, spans, cfg, *, model_outputs_dir):
+def plot_training_history(h, spans, cfg, *, model_outputs_dir=None):
     """Actor curves + curriculum shading (inline figure) and mirror every scalar
     column to a TensorBoard run. Config-driven: run name + the scalar allow-list
-    come from cfg (cfg.run.name, cfg.report.tensorboard_scalars)."""
+    come from cfg (cfg.run.name, cfg.report.tensorboard_scalars). The outputs dir
+    is resolved here unless given."""
     import matplotlib.pyplot as plt
     import pandas as pd
     from torch.utils.tensorboard import SummaryWriter
 
+    if model_outputs_dir is None:
+        model_outputs_dir = MODEL_OUTPUTS_DIR
     run_name = full_history_run = cfg.run.name
     _tbs = cfg.report.get("tensorboard_scalars") if cfg.get("report") else None
     tensorboard_scalars = list(_tbs) if _tbs else None
@@ -430,6 +472,7 @@ def plot_training_history(h, spans, cfg, *, model_outputs_dir):
     writer.flush(); writer.close()
     plt.close(fig)
     print(f"[tensorboard] {n_scalars} scalar series ({len(epochs)} epochs) -> {tb_dir}")
+    print(f'[tensorboard] launch:  tensorboard --logdir "{model_outputs_dir / "tensorboard"}"')
     return _shade
 
 

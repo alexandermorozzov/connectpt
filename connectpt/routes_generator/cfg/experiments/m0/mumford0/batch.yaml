@@ -5,3 +5,6 @@ batch:
   runs:
     - experiments/m0/mumford0/our_nbco
     - experiments/m0/mumford0/trim12_extend12
+
+output:
+  paper_stem: m0_nbco_variants

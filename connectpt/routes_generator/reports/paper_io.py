@@ -6,11 +6,14 @@ the single tabular/route sink) and ``paper_row`` (identity columns + the full
 metric set). Figures are intentionally not persisted -- the underlying data is
 (CSV tables + route ``.pt`` dumps), so any figure rebuilds from disk.
 
-Every sink takes the output-filename prefix EXPLICITLY (keyword-only): the caller
-threads it from ``RunContext.output_prefix`` ("TEMP_" on smoke runs, "" on full
-runs) -- there is no module-global prefix.
+Every sink takes the output-filename prefix and (optional) output folder
+EXPLICITLY (keyword-only): the caller threads them from the loaded ``suite``
+(``suite.output_prefix`` = "TEMP_" on smoke runs, "" on full runs;
+``suite.paper_output_dir``) -- there is no module-global prefix.
 """
 from __future__ import annotations
+
+from pathlib import Path
 
 import numpy as np
 
@@ -22,6 +25,13 @@ from ..evaluation import full_metric_row
 PAPER_DIR = ARTIFACTS_DIR / "paper_results"
 PAPER_DIR.mkdir(parents=True, exist_ok=True)
 _STORE = ArtifactStore(PAPER_DIR)
+
+
+def _store_for(out_dir):
+    """Sink for an explicit output dir (created on demand), else the default."""
+    if out_dir is None:
+        return _STORE
+    return ArtifactStore(Path(out_dir))
 
 
 def ravel_hist(h):
@@ -40,13 +50,13 @@ def paper_row(city, method, source, m, rt, seed, duration_s=None):
             **full_metric_row(m, rt, seed)}
 
 
-def paper_path(name, *, prefix):
-    """Prefix-aware path under paper_results (e.g. to read back a saved dump)."""
-    return PAPER_DIR / f"{prefix}{name}"
+def paper_path(name, *, prefix, out_dir=None):
+    """Prefix-aware path under the paper output dir (to read back a saved dump)."""
+    return (Path(out_dir) if out_dir is not None else PAPER_DIR) / f"{prefix}{name}"
 
 
-def save_paper_table(df, name, *, prefix):
-    path = _STORE.save_table(df, f"{prefix}{name}")
+def save_paper_table(df, name, *, prefix, out_dir=None):
+    path = _store_for(out_dir).save_table(df, f"{prefix}{name}")
     print(f"[paper] table ({len(df)} rows) -> {path}")
     return path
 
@@ -64,23 +74,31 @@ def append_paper_row(row, name, ndigits=3, *, prefix):
     return path
 
 
-def save_paper_fig(fig, name):
-    # Figures are intentionally NOT persisted as images -- the underlying data is
-    # (CSV tables + route .pt dumps), so any figure can be rebuilt.
-    print(f"[paper] figure '{name}' shown inline (rebuild from CSV / route dump)")
+def save_paper_fig(fig, name, *, prefix="", out_dir=None, dpi=220):
+    """Persist a manuscript figure PNG under the paper output dir.
+
+    Most figures are NOT persisted -- they rebuild from the saved CSV tables and
+    route dumps. This sink is only for panels that go into the manuscript as
+    rendered images (the MACSA route grids)."""
+    base = Path(out_dir) if out_dir is not None else PAPER_DIR
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / f"{prefix}{name}.png"
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    print(f"[paper] figure -> {path}")
+    return path
     return None
 
 
 def save_paper_routes(name, routes, coords=None, street_adj=None, meta=None, *,
-                      prefix):
-    """Dump a {label: route_tensor} mapping (+ coords/street_adj) to paper_results
-    so the route figures can be reconstructed later."""
+                      prefix, out_dir=None):
+    """Dump a {label: route_tensor} mapping (+ coords/street_adj) to the paper
+    output dir so the route figures can be reconstructed later."""
     payload = {
         "routes": {k: as_route_tensor(v).cpu() for k, v in routes.items()},
         "coords": (coords.cpu() if hasattr(coords, "cpu") else coords),
         "street_adj": (street_adj.cpu() if hasattr(street_adj, "cpu") else street_adj),
         "meta": meta or {},
     }
-    path = _STORE.save_routes(payload, f"{prefix}{name}_routes")
+    path = _store_for(out_dir).save_routes(payload, f"{prefix}{name}_routes")
     print(f"[paper] route dump ({len(payload['routes'])} sets) -> {path}")
     return path

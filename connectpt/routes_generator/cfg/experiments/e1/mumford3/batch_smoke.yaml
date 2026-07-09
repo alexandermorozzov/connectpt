@@ -6,3 +6,6 @@ batch:
   runs:
     - experiments/e1/mumford3/neural_bco_smoke
     - experiments/e1/mumford3/our_nbco_smoke
+
+output:
+  paper_stem: e1_mumford3_smoke

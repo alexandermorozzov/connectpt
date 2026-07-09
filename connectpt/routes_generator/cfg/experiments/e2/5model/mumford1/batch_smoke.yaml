@@ -9,3 +9,6 @@ batch:
     - experiments/e2/5model/mumford1/gnn_type2_smoke
     - experiments/e2/5model/mumford1/rpc_type2_smoke
     - experiments/e2/5model/mumford1/trim12_extend12_smoke
+
+output:
+  paper_stem: e2_5model_mumford1_smoke

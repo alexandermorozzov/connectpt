@@ -15,3 +15,6 @@ paths:
 
 sweep:
   n_iterations: 2
+
+output:
+  paper_stem: e2_our_pareto_mumford1_smoke

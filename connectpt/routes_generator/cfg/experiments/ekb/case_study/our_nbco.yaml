@@ -32,3 +32,6 @@ sweep:
   n_iterations: 50
 
 metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
+
+output:
+  paper_stem: ekb_our_nbco
