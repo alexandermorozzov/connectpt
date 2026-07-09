@@ -73,6 +73,14 @@ docs = [ # зависимости, необходимые для сборки д
 "Bug Tracker" = "https://github.com/vasilstar97/python-package-boilerplate/issues"
 
 # всякие истории, связанные с форматированием кода
+[tool.pytest.ini_options]
+# paper_full = full-budget paper parity runs (minutes to hours); deselected by
+# default, run manually: pytest -m paper_full tests/test_paper_parity_mandl.py
+markers = [
+    "paper_full: full-budget paper parity runs (opt-in, run manually)",
+]
+addopts = "-m \"not paper_full\""
+
 [tool.black]
 line-length = 120
 target-version = ['py311']

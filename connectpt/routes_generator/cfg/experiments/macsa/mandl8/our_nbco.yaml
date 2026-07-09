@@ -22,7 +22,7 @@ search:
 
 data:
   source: macsa
-  scenario: Mandl8
+  scenario: mandl_8  # directory name under datasets/MACSA_data/
 
 sweep:
   alpha: [0.0, 0.5, 1.0]
