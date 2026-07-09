@@ -4,6 +4,7 @@ import pandas as pd
 import geopandas as gpd
 import networkx as nx
 import momepy as mp
+from shapely.geometry import Polygon
 
 from .types import Modality
 from .stops import get_agg_stops
@@ -101,3 +102,10 @@ def preprocess(blocks : gpd.GeoDataFrame, modalities : list[Modality]) :
         result[modality] = (stops_gdf, time_matrix, simplified_graph_largest)
 
     return result, simplified_graph_largest
+
+def get_boundary_gdf(polygons_gdf):
+    union = polygons_gdf.geometry.union_all()
+    boundary = Polygon(union.exterior)
+    boundary_gdf = gpd.GeoDataFrame(geometry=[boundary], crs=polygons_gdf.crs)
+    return boundary_gdf
+

@@ -7,7 +7,7 @@ import neatnet
 import shapely
 
 from shapely.geometry import Polygon, MultiPolygon
-from iduedu import get_drive_graph, graph_to_gdf
+from iduedu import get_drive_graph, graph_to_gdf, get_public_transport_graph
 from typing import Dict
 
 from .types import Modality, MODALITY_LINE_TAGS
@@ -16,6 +16,25 @@ from .utils import _close_gaps, restore_linestrings
 ox.settings.useful_tags_way.append("railway")
 warnings.filterwarnings("ignore", category=UserWarning)
 
+
+def get_drive_graph_iduedu(territory):
+    G_drive = get_drive_graph(territory=territory,
+                          osm_edge_tags=['highway', 'maxspeed', 'reg', 'name', 'lanes', 'ref'],
+                          simplify=True)
+    
+    G_drive_edges = graph_to_gdf(G_drive, nodes=False, restore_edge_geom=True)
+    G_drive_nodes = graph_to_gdf(G_drive, edges=False, restore_edge_geom=True)
+    return G_drive, G_drive_edges, G_drive_nodes
+
+def get_bus_graph_iduedu(territory):
+    G_pt = get_public_transport_graph(territory=territory,
+                                      transport_types='bus',
+                                      clip_by_territory=True
+                                      )
+    
+    G_pt_edges = graph_to_gdf(G_pt, nodes=False, restore_edge_geom=True)
+    G_pt_nodes = graph_to_gdf(G_pt, edges=False, restore_edge_geom=True)
+    return G_pt, G_pt_edges, G_pt_nodes
 
 
 def _get_electric_lines(polygon: Polygon | MultiPolygon, filter_tags: str) -> gpd.GeoDataFrame:

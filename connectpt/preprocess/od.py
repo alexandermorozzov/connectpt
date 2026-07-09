@@ -5,8 +5,13 @@ import pandas as pd
 import geopandas as gpd
 import networkx as nx  # for type hints
 from sklearn.preprocessing import MinMaxScaler
+from shapely.strtree import STRtree
+from tqdm import tqdm
+
 
 from iduedu import get_adj_matrix_gdf_to_gdf
+
+from .utils import _remove_water_objects
 
 
 def get_OD(blocks: gpd.GeoDataFrame, stops: gpd.GeoDataFrame, walk_graph: networkx.Graph, crs: int):
@@ -152,3 +157,100 @@ def get_OD(blocks: gpd.GeoDataFrame, stops: gpd.GeoDataFrame, walk_graph: networ
     ).fillna(0)
 
     return od_matrix
+
+def _check_prepare_data_for_reform_matrix(
+        initial_matrix : np.ndarray,
+        initial_zones_gdf : gpd.GeoDataFrame,
+        new_zones_gdf : gpd.GeoDataFrame,
+        utm_crs : str | int,
+        water_gdf : gpd.GeoDataFrame = None,
+        remove_water : bool = False
+):
+    assert initial_matrix.shape[0] == initial_matrix.shape[1] == len(initial_zones_gdf), \
+          "Initial matrix must be square and equal number of initial zones"
+    
+    initial_zones_gdf_utm = initial_zones_gdf.copy().to_crs(utm_crs)
+    new_zones_gdf_utm = new_zones_gdf.copy().to_crs(utm_crs)
+    water_utm = water_gdf.copy().to_crs(utm_crs)
+    
+    if remove_water:
+        if water_gdf is None:
+            raise ValueError("If remove_water is True, water must be provided")
+        
+        initial_zones_gdf_utm = _remove_water_objects(water_utm, initial_zones_gdf_utm)
+        new_zones_gdf_utm = _remove_water_objects(water_utm, new_zones_gdf_utm)
+
+        new_zones_tree = STRtree(new_zones_gdf_utm.geometry.values)
+
+    return initial_zones_gdf_utm, new_zones_gdf_utm, new_zones_tree
+
+
+def _calculate_inters_ratio_zones(initial_zones_gdf : gpd.GeoDataFrame, 
+                                  new_zones_tree: STRtree, 
+                                  new_zones_gdf : gpd.GeoDataFrame):
+    init_to_new_cache = {}
+    for init_id in tqdm(range(len(initial_zones_gdf)), desc="Calculating intercestions initial and new zones"):
+        poly = initial_zones_gdf.geometry.iloc[init_id]
+        input_area = poly.area
+        possible_idx = [idx for idx in new_zones_tree.query(poly) if poly.intersects(new_zones_gdf.geometry.iloc[idx])]
+
+        if not possible_idx:
+            init_to_new_cache[init_id] = pd.DataFrame()
+            continue
+
+        candidates = new_zones_gdf.iloc[possible_idx].copy()
+        candidates['intersection_area'] = candidates.geometry.intersection(poly).area
+        candidates['overlap_ratio'] = candidates['intersection_area'] / input_area
+        init_to_new_cache[init_id] = candidates
+    return init_to_new_cache
+
+
+def reform_od_matrix(
+        initial_matrix : np.ndarray,
+        initial_zones_gdf : gpd.GeoDataFrame,
+        new_zones_gdf : gpd.GeoDataFrame,
+        utm_crs : str | int,
+        water_gdf : gpd.geodataframe = None,
+        remove_water : bool = False
+) -> np.ndarray:
+
+    print("Checking and preparing data...")
+    initial_zones_gdf_utm, new_zones_gdf_utm, new_zones_tree = _check_prepare_data_for_reform_matrix(initial_matrix,
+                                                                                     initial_zones_gdf,
+                                                                                     new_zones_gdf,
+                                                                                     utm_crs,
+                                                                                     water_gdf,
+                                                                                     remove_water)
+    print("Calculatind intersections for zones...")
+    init_to_new_cache = _calculate_inters_ratio_zones(initial_zones_gdf_utm, new_zones_tree, new_zones_gdf_utm)
+
+    new_len = len(new_zones_gdf_utm)
+
+    new_matrix = np.zeros((new_len, new_len), dtype=float)
+
+    od_matrix_initial = np.asarray(initial_matrix, dtype=float)
+    init_len = len(initial_zones_gdf_utm)
+
+    for i in tqdm(range(init_len), desc="Computing new matrix"):
+        for j in range(init_len):
+            flow = od_matrix_initial[i, j]
+
+            if flow <= 0:
+                continue
+            
+            row_overlap = init_to_new_cache.get(i)
+            col_overlap = init_to_new_cache.get(j)
+
+            if row_overlap is None or col_overlap is None or row_overlap.empty or col_overlap.empty:
+                continue
+            
+            row_flows = row_overlap['overlap_ratio'].values * flow          
+            col_ratios = col_overlap['overlap_ratio'].values 
+
+            row_idx = row_overlap.index.values
+            col_idx = col_overlap.index.values
+
+            new_matrix[np.ix_(row_idx, col_idx)] += np.outer(row_flows, col_ratios)
+
+    print("Done!")
+    return new_matrix
