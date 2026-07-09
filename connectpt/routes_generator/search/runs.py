@@ -12,14 +12,13 @@ benchmark config, cost, models (strict-loaded), policies, bee operators + plan.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from omegaconf import ListConfig
 
 from ..core.artifacts import ArtifactStore
 from ..core.checkpoints import CheckpointStore
-from ..core.paths import ROOT_DIR
+from ..core.paths import resolve_under_root
 from ..core.runs import ExperimentRun, RunArtifact
 from ..core.runtime import RunContext
 from ..data import BenchmarkDataSource, create_data_source
@@ -41,11 +40,6 @@ class SearchArtifact(RunArtifact):
     table: Any = None                # pd.DataFrame for a sweep (else None)
     routes: dict = field(default_factory=dict)
     instance: Any = None             # the loaded Instance for a sweep
-
-
-def _resolve(path) -> Path:
-    p = Path(path)
-    return p if p.is_absolute() else ROOT_DIR / p
 
 
 class BeeColonySearchRun(ExperimentRun):
@@ -75,7 +69,7 @@ class BeeColonySearchRun(ExperimentRun):
                 continue
             model = self._ROLE_BUILDER[role](m_cfg.config)
             CheckpointStore.load_model_weights(
-                model, _resolve(m_cfg.checkpoint_path),
+                model, resolve_under_root(m_cfg.checkpoint_path),
                 strict=bool(m_cfg.get("strict_load", True)), map_location=device,
             )
             model.to(device)

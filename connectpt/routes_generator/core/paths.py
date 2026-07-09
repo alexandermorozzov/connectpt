@@ -41,6 +41,18 @@ EDIT_MODEL_WEIGHTS_PATH = (
 )
 
 
+def resolve_under_root(path) -> Path:
+    """Resolve a config path against the repo root when it is relative.
+
+    Config checkpoint paths (e.g. ``artifacts/model_weights/...``) are written
+    relative to the repo root, so they must NOT be resolved against the process
+    CWD -- the notebook runs from ``examples/route_generator``. Absolute paths
+    pass through unchanged.
+    """
+    p = Path(path)
+    return p if p.is_absolute() else ROOT_DIR / p
+
+
 def ensure_output_dirs() -> None:
     """Create the artifact write targets (inputs under datasets/ must exist)."""
     for d in (MODEL_WEIGHTS_DIR, EDIT_MODEL_WEIGHTS_DIR, MODEL_OUTPUTS_DIR,

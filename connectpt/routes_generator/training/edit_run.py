@@ -10,10 +10,8 @@ the (generated) dataset or running the long PPO loop -- the smoke check used by
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 from ..core.checkpoints import CheckpointStore
-from ..core.paths import DATASETS_DIR
+from ..core.paths import DATASETS_DIR, resolve_under_root
 from ..core.runtime import RunContext
 from ..model_factory import RouteModelFactory
 from ..objectives import CostFactory
@@ -39,7 +37,7 @@ class EditTrainingRun(ExperimentRun):
         init_ckpt = cfg.paths.get("init_checkpoint_path")
         if init_ckpt:
             CheckpointStore.load_model_weights(
-                self.model, init_ckpt,
+                self.model, resolve_under_root(init_ckpt),
                 strict=bool(cfg.get("checkpoint", {}).get("strict_load", True)),
                 map_location=device,
             )
@@ -67,7 +65,11 @@ class EditTrainingRun(ExperimentRun):
             target_n_routes=cfg.data.get("target_n_routes"),
         )
 
-        self.best_path = Path(cfg.paths.checkpoint_path)
+        # Resolve against the repo root (CWD-independent; the notebook runs from
+        # examples/route_generator) and ensure the dir exists -- the PPO loop's
+        # intermediate best-checkpoint torch.save does not create it.
+        self.best_path = resolve_under_root(cfg.paths.checkpoint_path)
+        self.best_path.parent.mkdir(parents=True, exist_ok=True)
         self.trainer = EditPPOTrainer(
             cfg=cfg, model=self.model, cost_obj=self.cost_obj,
             data_module=self.data, run_name=cfg.run.name,
