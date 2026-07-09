@@ -4,13 +4,18 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 import osmnx as ox
+import networkx as nx
 
 from loguru import logger
 from shapely.geometry import Polygon, MultiPolygon
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
+from shapely import from_wkt
+
+
 from .types import Modality, MODALITY_STOP_TAGS
+from .utils import _is_names_similar
 
 
 def _preprocess_stop_name(name: str) -> set:
@@ -367,3 +372,162 @@ def get_agg_stops(polygon: Polygon | MultiPolygon, modalities: list[Modality] ) 
         result[modality] = agg.reset_index(drop=True)
 
     return result
+
+def preprocess_stops_names_gdf(osm_subset : gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    df = osm_subset.copy()
+    df['name'] = df.name.str.lower()
+    df['name'] = df['name'].str.replace(r'[-–—‑]', ' ', regex=True)
+    
+    for quote in ['«', '»', '“', '”', '„', '‹', '›', '"']:
+        df['name'] = df['name'].astype(str).str.replace(quote, '', regex=False)
+    
+    df['name'] = df['name'].astype(str).str.replace('ё', 'е', regex=False)
+    df['name'] = df['name'].astype(str).str.replace(' я ', ' ', regex=False)
+    df['name'] = df['name'].astype(str).str.replace(' й ', ' ', regex=False)
+    df['name'] = df['name'].astype(str).str.replace('№', '', regex=False)
+    
+    df['name'] = df['name'].str.replace(r'\s*\([^)]*\)\s*', ' ', regex=True)
+    df['name'] = df['name'].str.replace(r'\s*\[[^\]]*\]\s*', ' ', regex=True)
+    df['name'] = df['name'].str.replace(r'\s*\{[^}]*\}\s*', ' ', regex=True)
+
+    df['name'] = df['name'].str.replace(r'\b\w+\.\s*', ' ', regex=True)
+    
+    patterns_to_remove = [
+        r'^улица\s+',  
+        r'\s+улица$', 
+        r'^ул\.?\s+',  
+        r'\s+ул\.?$',   
+        r'\s+улица\s+',  
+        r'\s+ул\.?\s+',  
+
+        r'^бульвар\s+',  
+        r'\s+бульвар$',
+        r'\s+бульвар\s+',   
+
+        r'^поселок\s+',   
+        r'\s+поселок$',  
+        r'\s+поселок\s+',  
+
+        r'^трк\s+',    
+        r'\s+трк$',   
+        r'\s+трк\s+',
+
+        r'^трц\s+', 
+        r'\s+трц$',   
+        r'\s+трц\s+',
+
+        r'^тк\s+',  
+        r'\s+тк$',   
+        r'\s+тк\s+',
+
+        r'^тц\s+',
+        r'\s+тц$',   
+        r'\s+тц\s+'
+    ]
+    
+    for pattern in patterns_to_remove:
+        df['name'] = df['name'].str.replace(pattern, '', regex=True)
+    
+    df['name'] = df['name'].str.strip()
+    df['name'] = df['name'].str.replace(r'\s+', ' ', regex=True)  
+    df.loc[df['name'] == '', 'name'] = None
+    
+    return df
+
+
+def cluster_stops(stops_metric, distance_threshold=500, jaccard_threshold=0.65):
+    
+    stops = stops_metric.copy()
+    stops = stops[stops['name'].notna()].reset_index(drop=True)
+    
+    n = len(stops)
+    
+    G = nx.Graph()
+    G.add_nodes_from(range(n))
+    
+    stops_sindex = stops.sindex
+    
+    for i in range(n):
+        geom_i = stops.geometry.iloc[i]
+        name_i = stops['name'].iloc[i]
+        
+        candidates = list(stops_sindex.query(
+            geom_i.buffer(distance_threshold), 
+            predicate="intersects"
+        ))
+        
+        for j in candidates:
+            if i >= j:
+                continue
+                
+            geom_j = stops.geometry.iloc[j]
+            name_j = stops['name'].iloc[j]
+            
+            if geom_i.distance(geom_j) <= distance_threshold:
+                if _is_names_similar(name_i, name_j, jaccard_threshold):
+                    G.add_edge(i, j)
+    
+    components = list(nx.connected_components(G))
+    
+    all_clusters = []
+    all_points = []
+    cluster_counter = 1
+    
+    for component in components:
+        if not component:
+            continue
+            
+        idx_list = sorted(component)
+        cluster_points = stops.iloc[idx_list].copy().reset_index(drop=True)
+        cluster_size = len(cluster_points)
+        
+        if cluster_size == 0:
+            continue
+        
+        center = cluster_points.geometry.union_all().representative_point()
+        distances = cluster_points.geometry.distance(center)
+        closest_pos = distances.argmin()
+        representative = cluster_points.geometry.iloc[closest_pos]
+        
+        unique_names = sorted(cluster_points['name'].unique().tolist())
+        most_common_name = cluster_points['name'].mode().iloc[0]
+                
+        cluster_id = f"{most_common_name}_{cluster_counter}"
+        
+        all_clusters.append({
+            'name': most_common_name,                
+            'geometry': representative,
+            'cluster_id': cluster_id,
+            'cluster_size': cluster_size,
+            'names_in_cluster': unique_names,     
+            'names_count': len(unique_names)     
+        })
+        
+        for pos_idx, row in cluster_points.iterrows():
+            all_points.append({
+                'name': row['name'],
+                'geometry': row.geometry,
+                'cluster_id': cluster_id,
+                'cluster_size': cluster_size,
+                'original_index': idx_list[pos_idx]
+            })
+        
+        cluster_counter += 1
+    
+    clusters_gdf = gpd.GeoDataFrame(all_clusters, crs=stops.crs).to_crs('EPSG:4326')
+    all_points_gdf = gpd.GeoDataFrame(all_points, crs=stops.crs).to_crs('EPSG:4326')
+    
+    return clusters_gdf, all_points_gdf
+
+
+def create_stops_gdf_from_routes(route_path_dict_stop_names : dict) -> gpd.GeoDataFrame:
+
+    rows = [
+        {"route": route, "stop_name": stop, "geometry": from_wkt(geom)}
+        for route, stops in route_path_dict_stop_names.items()
+        for stop, geom in stops.items()
+    ]
+
+    stops_routes_gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs=4326)
+    return stops_routes_gdf
+
