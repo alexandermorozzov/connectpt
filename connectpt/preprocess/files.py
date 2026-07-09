@@ -1,12 +1,9 @@
-import logging
 import os
 import numpy as np
 import torch
 import networkx as nx
 
 from .block_graph import block_graph_to_gdfs
-
-logger = logging.getLogger(__name__)
 
 def save_files(output_folder : str,
                city_name : str,
@@ -38,7 +35,7 @@ def save_files(output_folder : str,
                 x = row['x']
                 y = row['y']
                 f.write(f"{x} {y}\n")
-        logger.info("%s saved", file_name)
+        print(f"{file_name} saved")
 
     
     if save_demand and (od_matrix is None):
@@ -50,7 +47,7 @@ def save_files(output_folder : str,
             n = od_matrix.shape[0]
             f.write(str(n) + '\n')                    
             np.savetxt(f, od_matrix, fmt='%.6f')   
-        logger.info("%s saved", file_name)
+        print(f"{file_name} saved")
     
     if (block_graph is not None) and save_travel_times:
         file_name = path_start + "TravelTimes.txt"
@@ -74,7 +71,7 @@ def save_files(output_folder : str,
         
         with open(file_name, 'w', encoding='utf-8') as f:
             np.savetxt(f, distance_matrix, fmt='%.6f')  
-        logger.info("%s saved", file_name)
+        print(f"{file_name} saved")
     
     if save_routes and (block_project_dict is None):
         raise ValueError("For Routes block_project_dict must be provided")
@@ -93,5 +90,5 @@ def save_files(output_folder : str,
         tensor_result = torch.tensor(padded_routes, dtype=torch.long)
 
         torch.save(tensor_result, file_name)
-        logger.info("%s saved", file_name)
+        print(f"{file_name} saved")
 

@@ -11,12 +11,11 @@ from shapely.geometry import Polygon, MultiPolygon
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
+from shapely import from_wkt
 
 
 from .types import Modality, MODALITY_STOP_TAGS
 from .utils import _is_names_similar
-
-logger = logging.getLogger(__name__)
 
 
 def _preprocess_stop_name(name: str) -> set:
