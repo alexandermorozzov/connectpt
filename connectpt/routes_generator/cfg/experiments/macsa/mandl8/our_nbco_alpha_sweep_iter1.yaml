@@ -1,8 +1,8 @@
 # @package _global_
 # MACSA Table-B (Mandl8 scenario): Our NBCO single-step alpha sweep -- the
-# paper's Table "macsa-alpha-sweep" (iter=1) AND the smoke variant of
-# our_nbco_alpha_sweep (they coincide: the paper's lightest experiment is one
-# BCO iteration per point). Adjustment target is pinned to the adjustment
+# paper's Table "macsa-alpha-sweep" (iter=1), a real paper artifact. It doubles
+# as the MACSA smoke path (the suite's lightest run is one BCO iteration per
+# point), selected by name in macsa_run. Adjustment target is pinned to the
 # degree MACSA itself realizes vs the original network (0.051588, rounded to
 # 0.052 in the manuscript). Targets live in
 # artifacts/paper_final/table6_macsa_alpha_sweep_iter1/.

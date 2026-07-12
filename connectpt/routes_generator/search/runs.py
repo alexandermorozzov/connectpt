@@ -162,7 +162,11 @@ class BeeColonySearchRun(ExperimentRun):
         d = self.cfg.data
         if d.get("source") is not None:
             return create_data_source(d).load()
-        return BenchmarkDataSource(city=d.city).load()
+        return BenchmarkDataSource(
+            city=d.city, n_routes=d.get("n_routes"),
+            min_route_len=d.get("min_route_len"),
+            max_route_len=d.get("max_route_len"),
+        ).load()
 
     def _sweep_grid(self):
         """Parse the ``cfg.sweep`` block into (alphas, adj_targets, n_iterations).

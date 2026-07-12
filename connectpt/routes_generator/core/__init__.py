@@ -22,7 +22,7 @@ from .runtime import RunContext, resolve_device, seed_everything
 from .artifacts import ArtifactStore
 from .runs import ExperimentRun, RunArtifact
 from .batches import ExperimentBatch, ExperimentRunFactory, BatchArtifact
-from .loaders import load_experiment, load_suite
+from .loaders import build_experiment, load_experiment, load_suite
 
 
 __all__ = [
@@ -43,6 +43,7 @@ __all__ = [
     "ExperimentBatch",
     "ExperimentRunFactory",
     "BatchArtifact",
+    "build_experiment",
     "load_experiment",
     "load_suite",
 ]

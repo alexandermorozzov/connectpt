@@ -1,0 +1,31 @@
+# @package _global_
+# E1 narrow: neural BCO alpha sweep (construction-only neural bees). City-agnostic
+# -- one leaf per method; the city is a runtime parameter
+# (build_experiment(city=...)), defaulting to the /data group (Mandl).
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_only
+  - /search/bee_sets: neural_bco
+  - _self_
+
+run:
+  name: e1/neural_bco
+  label: neural BCO
+  seed: 0
+  cpu: false
+
+paths:
+  output_dir: artifacts/runs/e1/neural_bco
+
+search:
+  n_bees: 10
+
+data:
+  source: benchmark
+
+sweep:
+  alpha: [0.0, 0.5, 1.0]
+  adj_target: 0.3
+  n_iterations: 200
+
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]

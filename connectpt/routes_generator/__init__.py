@@ -168,6 +168,7 @@ from .build_dataset import build_dataset
 from .core import (
     ExperimentRunFactory,
     ExperimentBatch,
+    build_experiment,
     load_experiment,
     load_suite,
 )

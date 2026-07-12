@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..core import (ExperimentBatch, ExperimentRunFactory, load_experiment,
+from ..core import (ExperimentBatch, ExperimentRunFactory, build_experiment,
                     load_suite)
 from ..core.paths import resolve_under_root
 from ..reports import render_report, save_paper_table, save_paper_routes
@@ -48,9 +48,9 @@ class PaperRun:
             _display(fig)
 
 
-def _variant(name: str, suite) -> str:
-    """Append the ``_smoke`` variant suffix when the suite is a smoke profile."""
-    return name + ("_smoke" if suite.smoke else "")
+def _smoke_flag(suite, smoke) -> bool:
+    """Resolve the smoke budget: explicit arg wins, else the suite profile."""
+    return bool(suite.smoke) if smoke is None else bool(smoke)
 
 
 def _persist(artifact, cfg, suite) -> None:
@@ -82,20 +82,40 @@ def save_paper(suite, stem: str, *, table=None, routes=None, coords=None,
 
 
 def run_experiment(name: str, suite, *, kind: str | None = None,
-                   title: str | None = None) -> PaperRun:
-    """Run a single declarative experiment, persist it, render its report."""
-    cfg = load_experiment(_variant(name, suite))
+                   title: str | None = None, smoke: bool | None = None,
+                   **params) -> PaperRun:
+    """Run a single declarative experiment, persist it, render its report.
+
+    ``**params`` are the procedural config knobs forwarded to
+    :func:`build_experiment` (``city``, ``alpha``, ``adj_target``,
+    ``n_iterations``, ``route_len``, ...): each defaults to the YAML value and is
+    overridden only when passed -- no string overrides in the cell. ``smoke``
+    defaults to the suite profile; pass ``smoke=False`` to run a config that
+    already carries its own budget (e.g. the MACSA iter-1 paper table).
+    """
+    cfg = build_experiment(name, smoke=_smoke_flag(suite, smoke), **params)
     artifact = ExperimentRunFactory.from_cfg(cfg).run()
     _persist(artifact, cfg, suite)
     report = render_report(artifact, kind=kind, title=title)
     return PaperRun(artifact=artifact, table=report.table, figures=report.figures)
 
 
-def run_batch(name: str, suite, *, kind: str | None = None) -> PaperRun:
-    """Run a declarative batch (multi-method), persist the combined table, render."""
-    cfg = load_suite(_variant(name, suite))
-    batch = ExperimentBatch(cfg).run()
+def run_batch(name: str, suite, *, kind: str | None = None,
+              city: str | None = None, smoke: bool | None = None,
+              **params) -> PaperRun:
+    """Run a declarative batch (multi-method), persist the combined table, render.
+
+    ``city`` / ``**params`` are forwarded to :func:`build_experiment` for every
+    run in the batch, so one batch config drives any city (the collapsed E1
+    per-method leaves) without a per-city batch file. The paper stem is suffixed
+    with the city so per-city outputs never clobber each other.
+    """
+    cfg = load_suite(name)
+    batch = ExperimentBatch(cfg).run(
+        city=city, smoke=_smoke_flag(suite, smoke), **params)
     stem = cfg.output.paper_stem
+    if city is not None:
+        stem = f"{stem}_{city.lower()}"
     prefix = str(suite.output_prefix or "")
     out_dir = paper_dir(suite)
     if batch.table is not None:

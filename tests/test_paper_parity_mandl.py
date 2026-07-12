@@ -151,7 +151,7 @@ def test_macsa_alpha_sweep_iter1_parity(tmp_path):
     """
     targets = _targets(TABLE6_CSV)
     # the smoke variant IS the paper's iter=1 experiment (Table 6).
-    table = _run_sweep("experiments/macsa/mandl8/our_nbco_alpha_sweep_smoke",
+    table = _run_sweep("experiments/macsa/mandl8/our_nbco_alpha_sweep_iter1",
                        tmp_path, [])
 
     problems = []
@@ -189,7 +189,7 @@ def test_e1_mandl_reduced_budget(tmp_path):
     target = _target_row(targets, "Our NBCO (GNN rebuild + trim/extend)")
 
     table = _run_sweep(
-        "experiments/e1/mandl/our_nbco", tmp_path,
+        "experiments/e1/our_nbco", tmp_path,
         ["sweep.alpha=[0.5]", "sweep.adj_target=0.2", "sweep.n_iterations=10",
          f"+data.init_dump={TABLE1_ROUTES.as_posix()}"])
     row = table.iloc[0]
@@ -216,16 +216,16 @@ def test_e1_mandl_reduced_budget(tmp_path):
 
 FULL_BUDGET_CASES = [
     pytest.param(
-        "experiments/e1/mandl/neural_bco",
+        "experiments/e1/neural_bco",
         ["search/models=no_neural_models", "search/bee_sets=classic_bco_paper",
          "search.n_bees=10", "sweep.n_iterations=500"],
         "BCO", id="classic_bco"),
     pytest.param(
-        "experiments/e1/mandl/neural_bco", ["sweep.n_iterations=200"],
+        "experiments/e1/neural_bco", ["sweep.n_iterations=200"],
         "neural BCO", id="neural_bco",
         marks=needs_construction),
     pytest.param(
-        "experiments/e1/mandl/our_nbco", ["sweep.n_iterations=200"],
+        "experiments/e1/our_nbco", ["sweep.n_iterations=200"],
         "Our NBCO (GNN rebuild + trim/extend)", id="our_nbco",
         marks=needs_all_weights),
 ]
@@ -252,11 +252,11 @@ def test_e1_mandl_full_budget_parity(tmp_path, config_name, overrides, method):
 
 TABLE2_CASES = [
     pytest.param(
-        "experiments/e1/mandl/neural_bco",
+        "experiments/e1/neural_bco",
         "final_main_unified_Mandl_nbco_only_target03_iter200",
         "neural BCO", id="neural_bco", marks=needs_construction),
     pytest.param(
-        "experiments/e1/mandl/our_nbco",
+        "experiments/e1/our_nbco",
         "final_main_unified_Mandl_our_only_target03_iter500",
         "Our NBCO", id="our_nbco", marks=needs_all_weights),
 ]

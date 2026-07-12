@@ -53,6 +53,9 @@ REF_METHOD = METHOD_TITLE["original"]
 ARTICLE_STEM = "final_macsa_mandl8_tableb_article_only"
 COMPARISON_STEM = "final_macsa_mandl8_tableb"
 SWEEP_EXPERIMENT = "macsa/mandl8/our_nbco_alpha_sweep"
+# The smoke path is a distinct paper config (Table 6, iter=1) -- NOT a generic
+# 2-iter dry-run -- so it is selected by name and run with its own budget.
+SWEEP_EXPERIMENT_SMOKE = "macsa/mandl8/our_nbco_alpha_sweep_iter1"
 NODE_SIZE = 70.0
 
 # Fixed-network scoring point: the paper's eval alpha + the unified objective's
@@ -163,8 +166,11 @@ def run_macsa_table_b(suite) -> MacsaResult:
     out_dir = paper_dir(suite)
 
     # 1) the alpha sweep -- the same declarative path as every other experiment
-    #    (persisted + Pareto-rendered by run_experiment, stem from the YAML).
-    sweep = run_experiment(SWEEP_EXPERIMENT, suite, kind="pareto",
+    #    (persisted + Pareto-rendered by run_experiment, stem from the YAML). The
+    #    smoke profile runs the iter-1 paper table (its own budget), so smoke is
+    #    off here -- it must not be capped to the generic dry-run budget.
+    sweep_name = SWEEP_EXPERIMENT_SMOKE if suite.smoke else SWEEP_EXPERIMENT
+    sweep = run_experiment(sweep_name, suite, kind="pareto", smoke=False,
                            title="Mandl-8 MACSA: Our NBCO alpha sweep")
     art = sweep.artifact
     sweep_df = art.table

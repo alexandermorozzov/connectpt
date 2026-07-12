@@ -43,15 +43,22 @@ class BenchmarkDataSource(DataSource):
     """
 
     def __init__(self, city: str, init_routes_path: str | None = None,
-                 init_dump: str | None = None, seed: int = 0):
+                 init_dump: str | None = None, seed: int = 0,
+                 n_routes: int | None = None, min_route_len: int | None = None,
+                 max_route_len: int | None = None):
         self.city = city
         self.init_routes_path = init_routes_path
         self.init_dump = init_dump
         self.seed = seed
+        # cfg-supplied bounds win over the literature registry (single source:
+        # the ``data:`` block / build_experiment(route_len=, n_routes=)).
+        self.bounds = {k: v for k, v in
+                       (("n_routes", n_routes), ("min_route_len", min_route_len),
+                        ("max_route_len", max_route_len)) if v is not None}
 
     def load(self) -> Instance:
         tensors = load_benchmark_tensors(self.city)
-        spec = benchmark_spec(self.city)
+        spec = {**benchmark_spec(self.city), **self.bounds}
         init = resolve_init_routes(
             spec, tensors, init_dump=self.init_dump,
             init_routes_path=self.init_routes_path, seed=self.seed)

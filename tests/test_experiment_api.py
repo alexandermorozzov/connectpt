@@ -14,21 +14,22 @@ import pytest
 from types import SimpleNamespace
 
 from connectpt.routes_generator import (
-    ExperimentRunFactory, ExperimentBatch, load_experiment, load_suite,
+    ExperimentRunFactory, ExperimentBatch, build_experiment, load_suite,
     render_report)
 from connectpt.routes_generator.core.paths import (
     CONSTRUCTION_MODEL_WEIGHTS_PATH)
 from connectpt.routes_generator.search import BeeColonySearchRun
 
 
-def test_load_experiment_and_suite_compose():
-    cfg = load_experiment("e1/mumford0/our_nbco")            # auto experiments/ prefix
+def test_build_experiment_and_suite_compose():
+    # collapsed leaf (one per method); the city is a runtime parameter.
+    cfg = build_experiment("e1/our_nbco", city="Mumford0")   # auto experiments/ prefix
     assert cfg.run.type == "bee_colony_search"
     assert cfg.data.city == "Mumford0"
     assert isinstance(ExperimentRunFactory.from_cfg(cfg), BeeColonySearchRun)
 
-    batch = load_suite("e1/mumford0/batch")
-    assert batch.batch.name == "e1_mumford0"
+    batch = load_suite("e1/batch")
+    assert batch.batch.name == "e1"
     assert len(batch.batch.runs) == 2
 
 
@@ -54,8 +55,8 @@ def test_render_report_explicit_kind_and_single_row_default():
                     reason="construction weights not present")
 def test_batch_dry_run_aggregates_no_table():
     # e1 batch dry-run: runs validate wiring but produce no sweep table -> None.
-    batch = ExperimentBatch(load_suite("e1/mumford0/batch")).run(dry_run=True)
-    assert batch.name == "e1_mumford0"
+    batch = ExperimentBatch(load_suite("e1/batch")).run(dry_run=True, city="Mumford0")
+    assert batch.name == "e1"
     assert len(batch.artifacts) == 2
     assert batch.table is None
 

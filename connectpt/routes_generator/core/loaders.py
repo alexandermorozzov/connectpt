@@ -4,12 +4,26 @@
 under ``cfg/experiments/`` (the ``experiments/`` prefix is added if absent);
 ``load_suite`` does the same for a batch config. The notebook names an
 experiment and runs it -- no hydra plumbing, no config building in cells.
+
+``build_experiment`` is the procedural layer on top: it composes the parent
+config, then injects sweep/data/run parameters (alpha, adj_target, city, route
+bounds, ...) into the composed cfg in code. Every parameter defaults to ``None``
+-> keep the YAML value; a passed value overrides it. This replaces string
+``overrides=["sweep.alpha=[0,1]"]`` with typed keyword arguments.
 """
 from __future__ import annotations
 
+from typing import Sequence
+
 from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf, open_dict
 
 from .paths import CFG_DIR
+
+# Smoke = a fast throwaway dry-run: the SAME experiment at a tiny iteration
+# budget (the only thing every ``*_smoke.yaml`` twin used to change). Driven by
+# ``build_experiment(smoke=True)`` now -- no per-experiment smoke files.
+SMOKE_ITERS = 2
 
 
 def _compose_experiment(name: str, overrides):
@@ -26,3 +40,87 @@ def load_experiment(name: str, *, overrides=None):
 def load_suite(name: str, *, overrides=None):
     """Compose a batch/suite config (``cfg/experiments/<name>.yaml``)."""
     return _compose_experiment(name, overrides)
+
+
+def _as_list(value):
+    """A scalar sweep axis is normalised to a one-element grid."""
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def _retarget_city(cfg, city: str) -> None:
+    """Point ``run.name``/``paths.output_dir`` at the chosen city.
+
+    A collapsed leaf (one per method) carries a city-less ``run.name`` template;
+    substituting a city nests the outputs under ``<name>/<city>`` so per-city
+    runs never clobber each other. Idempotent when the name already ends in the
+    city segment.
+    """
+    cfg.data.city = city
+    base = str(cfg.run.name)
+    seg = city.lower()
+    if not base.endswith(f"/{seg}") and not base.endswith(seg):
+        cfg.run.name = f"{base}/{seg}"
+    cfg.paths.output_dir = f"artifacts/runs/{cfg.run.name}"
+
+
+def build_experiment(
+    name: str,
+    *,
+    city: str | None = None,
+    alpha=None,
+    adj_target=None,
+    adj_weight=None,
+    n_iterations: int | None = None,
+    route_len: tuple[int, int] | Sequence[int] | None = None,
+    n_routes: int | None = None,
+    seed: int | None = None,
+    cpu: bool | None = None,
+    smoke: bool = False,
+    overrides=None,
+):
+    """Compose a declarative experiment and inject parameters procedurally.
+
+    Every keyword defaults to ``None`` -> the value stays as written in the YAML
+    (parent config + groups). A passed value is merged into the composed cfg so
+    the sweep/data/run block reflects it, without touching any file on disk.
+
+    ``alpha``/``adj_target`` accept a scalar or a list (the sweep grid axis);
+    ``route_len`` is ``(min_route_len, max_route_len)``. ``smoke=True`` caps the
+    iteration budget to :data:`SMOKE_ITERS` for a fast dry-run (an explicit
+    ``n_iterations`` still wins).
+    """
+    cfg = _compose_experiment(name, overrides)
+    with open_dict(cfg):
+        # -- data / instance --
+        if city is not None:
+            _retarget_city(cfg, city)
+        if n_routes is not None:
+            cfg.data.n_routes = int(n_routes)
+        if route_len is not None:
+            cfg.data.min_route_len = int(route_len[0])
+            cfg.data.max_route_len = int(route_len[1])
+
+        # -- sweep grid (create the block if the leaf has none) --
+        if cfg.get("sweep") is None:
+            cfg.sweep = OmegaConf.create({})
+        if alpha is not None:
+            cfg.sweep.alpha = _as_list(alpha)
+        if adj_target is not None:
+            cfg.sweep.adj_target = (_as_list(adj_target)
+                                    if isinstance(adj_target, (list, tuple))
+                                    else adj_target)
+        if adj_weight is not None:
+            cfg.sweep.adj_weight = adj_weight
+        if n_iterations is not None:
+            cfg.sweep.n_iterations = int(n_iterations)
+        elif smoke:
+            cfg.sweep.n_iterations = SMOKE_ITERS
+
+        # -- run --
+        if seed is not None:
+            cfg.run.seed = int(seed)
+        if cpu is not None:
+            cfg.run.cpu = bool(cpu)
+    return cfg

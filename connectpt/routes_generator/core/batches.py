@@ -13,8 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hydra import compose, initialize_config_dir
-
+from .loaders import build_experiment
 from .paths import CFG_DIR
 from .runs import RunArtifact
 
@@ -55,12 +54,13 @@ class ExperimentBatch:
         self.cfg = cfg
         self.cfg_dir = Path(cfg_dir)
 
-    def run(self, *, dry_run: bool = False, overrides=None) -> BatchArtifact:
+    def run(self, *, dry_run: bool = False, **params) -> BatchArtifact:
+        """Compose + dispatch each listed run. ``**params`` (``city``, ``alpha``,
+        ``smoke``, ...) are injected into every run via :func:`build_experiment`,
+        so one batch config serves any city."""
         artifacts: list[RunArtifact] = []
         for config_name in self.cfg.batch.runs:
-            with initialize_config_dir(config_dir=str(self.cfg_dir), version_base=None):
-                run_cfg = compose(config_name=str(config_name),
-                                  overrides=list(overrides or []))
+            run_cfg = build_experiment(str(config_name), **params)
             run = ExperimentRunFactory.from_cfg(run_cfg)
             artifacts.append(run.run(dry_run=dry_run))
         out_dir = self.cfg.batch.get("output_dir")
