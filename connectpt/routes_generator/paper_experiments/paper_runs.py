@@ -54,8 +54,15 @@ def _smoke_flag(suite, smoke) -> bool:
 
 
 def _persist(artifact, cfg, suite) -> None:
-    """Save the table (+ route dump) using cfg stem + suite prefix + suite folder."""
-    stem = cfg.output.paper_stem
+    """Save the table (+ route dump) using cfg stem + suite prefix + suite folder.
+
+    A run that declares no ``output.paper_stem`` (e.g. a single ad-hoc
+    ``run_experiment`` on a collapsed method leaf) is not a paper artifact -> no
+    persist."""
+    out = cfg.get("output")
+    if out is None or out.get("paper_stem") is None:
+        return
+    stem = out.paper_stem
     prefix = str(suite.output_prefix or "")
     out_dir = paper_dir(suite)
     if getattr(artifact, "table", None) is not None:
