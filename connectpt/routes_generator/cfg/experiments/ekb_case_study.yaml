@@ -1,7 +1,6 @@
 # @package _global_
 # EKB (Ekaterinburg) case study: Our NBCO alpha sweep on the real
-# network. Large graph -> sequential bees + CPU. Replaces flat ekb/our_nbco_ekb
-# (sweep from ekb_sweep.yaml).
+# network. Large graph -> sequential bees + CPU.
 defaults:
   - /search: bee_colony_base
   - /search/models: construction_and_edit_seeded
@@ -9,13 +8,13 @@ defaults:
   - _self_
 
 run:
-  name: ekb/case_study/our_nbco
+  name: ekb_case_study
   label: Our NBCO (GNN + trim/extend)
   seed: 0
   cpu: true
 
 paths:
-  output_dir: artifacts/runs/ekb/case_study/our_nbco
+  output_dir: artifacts/runs/ekb_case_study
 
 # n_bees must match the bee-set total.
 search:
@@ -28,10 +27,15 @@ data:
 
 sweep:
   alpha: [0.0, 0.5, 1.0]
-  adj_target: 0.3
+  adj_target: 0.2
   n_iterations: 50
 
 metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
+
+# Stream per-BCO-iteration best-cost curves to TensorBoard (one run per alpha)
+# so a long EKB sweep is watchable online.
+logging:
+  tensorboard: true
 
 output:
   paper_stem: ekb_our_nbco

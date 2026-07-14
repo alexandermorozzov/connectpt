@@ -13,13 +13,13 @@ defaults:
   - _self_
 
 run:
-  name: macsa/mandl8/our_nbco_alpha_sweep_iter1
+  name: macsa_alpha_sweep_iter1
   label: Our NBCO (GNN + trim/extend)
   seed: 0
   cpu: false
 
 paths:
-  output_dir: artifacts/runs/macsa/mandl8/our_nbco_alpha_sweep_iter1
+  output_dir: artifacts/runs/macsa_alpha_sweep_iter1
 
 # n_bees must match the bee-set total.
 search:

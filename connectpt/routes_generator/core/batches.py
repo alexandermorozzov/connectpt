@@ -48,21 +48,48 @@ class ExperimentRunFactory:
 
 
 class ExperimentBatch:
-    """Run a batch config: compose + dispatch each listed run config."""
+    """Run a batch config: compose + dispatch each run in the artifact.
 
-    def __init__(self, cfg, *, cfg_dir: str | Path = CFG_DIR):
+    A batch is ONE paper artifact (a comparison table / Pareto figure) realised
+    as several runs. Two ways to declare the runs:
+
+    * ``methods:`` -- the common case. The batch config IS a full run config
+      (shared data/sweep/metrics) plus a list of methods, each a Hydra-group
+      choice ``{label, bee_sets, models, n_bees}``. Every method re-composes THIS
+      config with its group override in code (:func:`build_experiment`) -- no
+      per-method leaf files. Needs ``base_name`` (the config's own name).
+    * ``batch.runs:`` -- a list of *separate* config names, for genuinely
+      heterogeneous runs whose stacks differ beyond a group choice (e.g. GA /
+      SA / hyper-heuristic baselines with their own ``run.type``).
+    """
+
+    def __init__(self, cfg, *, base_name: str | None = None,
+                 cfg_dir: str | Path = CFG_DIR):
         self.cfg = cfg
+        self.base_name = base_name
         self.cfg_dir = Path(cfg_dir)
 
     def run(self, *, dry_run: bool = False, **params) -> BatchArtifact:
-        """Compose + dispatch each listed run. ``**params`` (``city``, ``alpha``,
+        """Compose + dispatch each run. ``**params`` (``city``, ``alpha``,
         ``smoke``, ...) are injected into every run via :func:`build_experiment`,
         so one batch config serves any city."""
         artifacts: list[RunArtifact] = []
-        for config_name in self.cfg.batch.runs:
-            run_cfg = build_experiment(str(config_name), **params)
-            run = ExperimentRunFactory.from_cfg(run_cfg)
-            artifacts.append(run.run(dry_run=dry_run))
+        methods = self.cfg.get("methods")
+        if methods:
+            if self.base_name is None:
+                raise ValueError(
+                    "methods-based batch needs base_name (the config's own name)")
+            for m in methods:
+                run_cfg = build_experiment(
+                    self.base_name, bee_sets=m["bee_sets"], models=m["models"],
+                    n_bees=m.get("n_bees"), label=m["label"], **params)
+                run = ExperimentRunFactory.from_cfg(run_cfg)
+                artifacts.append(run.run(dry_run=dry_run))
+        else:
+            for config_name in self.cfg.batch.runs:
+                run_cfg = build_experiment(str(config_name), **params)
+                run = ExperimentRunFactory.from_cfg(run_cfg)
+                artifacts.append(run.run(dry_run=dry_run))
         out_dir = self.cfg.batch.get("output_dir")
         return BatchArtifact(
             name=self.cfg.batch.name, artifacts=artifacts,

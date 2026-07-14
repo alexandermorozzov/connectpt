@@ -118,7 +118,7 @@ def run_batch(name: str, suite, *, kind: str | None = None,
     with the city so per-city outputs never clobber each other.
     """
     cfg = load_suite(name)
-    batch = ExperimentBatch(cfg).run(
+    batch = ExperimentBatch(cfg, base_name=name).run(
         city=city, smoke=_smoke_flag(suite, smoke), **params)
     stem = cfg.output.paper_stem
     if city is not None:

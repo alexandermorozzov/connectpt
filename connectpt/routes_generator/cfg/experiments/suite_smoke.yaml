@@ -20,7 +20,6 @@ run:
   e2_our_pareto: true
   e2_5model: true
   e2_route_viz: true
-  m0_nbco_variants: true
   macsa: true
   nsgaii_baselines: true
   ekb_case_study: true

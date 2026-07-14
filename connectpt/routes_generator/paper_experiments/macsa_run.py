@@ -4,7 +4,7 @@
 
 1. the Our-NBCO alpha sweep goes through the SAME declarative path as every
    other experiment (:func:`paper_runs.run_experiment` on
-   ``macsa/mandl8/our_nbco_alpha_sweep``; the ``_smoke`` variant is one BCO
+   ``macsa_alpha_sweep``; the ``_smoke`` variant is one BCO
    iteration per point) -- the grid, budget, bee set and model checkpoints all
    live in the experiment YAML, nothing here;
 2. what stays in this module is only the case-study specificity: reading the
@@ -52,10 +52,10 @@ METHOD_TITLE = {
 REF_METHOD = METHOD_TITLE["original"]
 ARTICLE_STEM = "final_macsa_mandl8_tableb_article_only"
 COMPARISON_STEM = "final_macsa_mandl8_tableb"
-SWEEP_EXPERIMENT = "macsa/mandl8/our_nbco_alpha_sweep"
-# The smoke path is a distinct paper config (Table 6, iter=1) -- NOT a generic
-# 2-iter dry-run -- so it is selected by name and run with its own budget.
-SWEEP_EXPERIMENT_SMOKE = "macsa/mandl8/our_nbco_alpha_sweep_iter1"
+SWEEP_EXPERIMENT = "macsa_alpha_sweep"
+# The smoke path is a distinct paper config (iter=1 alpha sweep, Table 7) -- NOT
+# a generic 2-iter dry-run -- so it is selected by name and run with its own budget.
+SWEEP_EXPERIMENT_SMOKE = "macsa_alpha_sweep_iter1"
 NODE_SIZE = 70.0
 
 # Fixed-network scoring point: the paper's eval alpha + the unified objective's

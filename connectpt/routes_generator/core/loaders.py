@@ -13,12 +13,18 @@ bounds, ...) into the composed cfg in code. Every parameter defaults to ``None``
 """
 from __future__ import annotations
 
+import re
 from typing import Sequence
 
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf, open_dict
 
 from .paths import CFG_DIR
+
+
+def _slug(text: str) -> str:
+    """Filesystem-safe slug for a method label (disambiguates run outputs)."""
+    return re.sub(r"[^a-z0-9]+", "_", str(text).lower()).strip("_")
 
 # Smoke = a fast throwaway dry-run: the SAME experiment at a tiny iteration
 # budget (the only thing every ``*_smoke.yaml`` twin used to change). Driven by
@@ -69,6 +75,10 @@ def build_experiment(
     name: str,
     *,
     city: str | None = None,
+    bee_sets: str | None = None,
+    models: str | None = None,
+    n_bees: int | None = None,
+    label: str | None = None,
     alpha=None,
     adj_target=None,
     adj_weight=None,
@@ -86,16 +96,41 @@ def build_experiment(
     (parent config + groups). A passed value is merged into the composed cfg so
     the sweep/data/run block reflects it, without touching any file on disk.
 
+    A **method** is picked in code exactly like a sweep axis: ``bee_sets`` and
+    ``models`` select the Hydra groups (``search/bee_sets=<x>`` /
+    ``search/models=<x>``) that used to be a hand-written per-method leaf file;
+    ``n_bees`` sizes the colony to the chosen set and ``label`` names the method
+    (it becomes the ``method`` column of the sweep table + disambiguates the run
+    output dir). This lets one artifact YAML carry a ``methods:`` list instead of
+    N leaf files -- see :class:`ExperimentBatch`.
+
     ``alpha``/``adj_target`` accept a scalar or a list (the sweep grid axis);
     ``route_len`` is ``(min_route_len, max_route_len)``. ``smoke=True`` caps the
     iteration budget to :data:`SMOKE_ITERS` for a fast dry-run (an explicit
     ``n_iterations`` still wins).
     """
-    cfg = _compose_experiment(name, overrides)
+    # Group selections must be compose-time overrides (Hydra picks the defaults
+    # group before merge); everything else is injected into the composed cfg.
+    group_overrides = list(overrides or [])
+    if bee_sets is not None:
+        group_overrides.append(f"search/bee_sets={bee_sets}")
+    if models is not None:
+        group_overrides.append(f"search/models={models}")
+    cfg = _compose_experiment(name, group_overrides)
     with open_dict(cfg):
+        # -- method (group choice already applied at compose; size + name here) --
+        if n_bees is not None:
+            cfg.search.n_bees = int(n_bees)
+        if label is not None:
+            cfg.run.label = label
         # -- data / instance --
         if city is not None:
             _retarget_city(cfg, city)
+        if label is not None:
+            seg = _slug(label)
+            if seg and not str(cfg.run.name).endswith(seg):
+                cfg.run.name = f"{cfg.run.name}/{seg}"
+                cfg.paths.output_dir = f"artifacts/runs/{cfg.run.name}"
         if n_routes is not None:
             cfg.data.n_routes = int(n_routes)
         if route_len is not None:

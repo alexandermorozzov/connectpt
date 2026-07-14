@@ -151,7 +151,7 @@ def test_macsa_alpha_sweep_iter1_parity(tmp_path):
     """
     targets = _targets(TABLE6_CSV)
     # the smoke variant IS the paper's iter=1 experiment (Table 6).
-    table = _run_sweep("experiments/macsa/mandl8/our_nbco_alpha_sweep_iter1",
+    table = _run_sweep("experiments/macsa_alpha_sweep_iter1",
                        tmp_path, [])
 
     problems = []
@@ -189,8 +189,9 @@ def test_e1_mandl_reduced_budget(tmp_path):
     target = _target_row(targets, "Our NBCO (GNN rebuild + trim/extend)")
 
     table = _run_sweep(
-        "experiments/e1/our_nbco", tmp_path,
-        ["sweep.alpha=[0.5]", "sweep.adj_target=0.2", "sweep.n_iterations=10",
+        "experiments/table3_nbco_vs_our", tmp_path,
+        ["search/bee_sets=our_nbco", "search/models=construction_and_edit_seeded",
+         "sweep.alpha=[0.5]", "sweep.adj_target=0.2", "sweep.n_iterations=10",
          f"+data.init_dump={TABLE1_ROUTES.as_posix()}"])
     row = table.iloc[0]
 
@@ -216,16 +217,20 @@ def test_e1_mandl_reduced_budget(tmp_path):
 
 FULL_BUDGET_CASES = [
     pytest.param(
-        "experiments/e1/neural_bco",
+        "experiments/table3_nbco_vs_our",
         ["search/models=no_neural_models", "search/bee_sets=classic_bco_paper",
          "search.n_bees=10", "sweep.n_iterations=500"],
         "BCO", id="classic_bco"),
     pytest.param(
-        "experiments/e1/neural_bco", ["sweep.n_iterations=200"],
+        "experiments/table3_nbco_vs_our",
+        ["search/bee_sets=neural_bco", "search/models=construction_only",
+         "sweep.n_iterations=200"],
         "neural BCO", id="neural_bco",
         marks=needs_construction),
     pytest.param(
-        "experiments/e1/our_nbco", ["sweep.n_iterations=200"],
+        "experiments/table3_nbco_vs_our",
+        ["search/bee_sets=our_nbco", "search/models=construction_and_edit_seeded",
+         "sweep.n_iterations=200"],
         "Our NBCO (GNN rebuild + trim/extend)", id="our_nbco",
         marks=needs_all_weights),
 ]
@@ -252,19 +257,21 @@ def test_e1_mandl_full_budget_parity(tmp_path, config_name, overrides, method):
 
 TABLE2_CASES = [
     pytest.param(
-        "experiments/e1/neural_bco",
+        "experiments/table3_nbco_vs_our",
+        ["search/bee_sets=neural_bco", "search/models=construction_only"],
         "final_main_unified_Mandl_nbco_only_target03_iter200",
         "neural BCO", id="neural_bco", marks=needs_construction),
     pytest.param(
-        "experiments/e1/our_nbco",
+        "experiments/table3_nbco_vs_our",
+        ["search/bee_sets=our_nbco", "search/models=construction_and_edit_seeded"],
         "final_main_unified_Mandl_our_only_target03_iter500",
         "Our NBCO", id="our_nbco", marks=needs_all_weights),
 ]
 
 
 @pytest.mark.paper_full
-@pytest.mark.parametrize("config_name, stem, method_prefix", TABLE2_CASES)
-def test_table2_mandl_parity(tmp_path, config_name, stem, method_prefix):
+@pytest.mark.parametrize("config_name, groups, stem, method_prefix", TABLE2_CASES)
+def test_table2_mandl_parity(tmp_path, config_name, groups, stem, method_prefix):
     """Table 2 Mandl (alpha in {0, 0.5, 1}, adj target 0.3) at the paper's
     budget, seeded from the table's own pinned initial network."""
     targets = _targets(TABLE2_DIR / f"{stem}.csv")
@@ -278,7 +285,7 @@ def test_table2_mandl_parity(tmp_path, config_name, stem, method_prefix):
 
     table = _run_sweep(
         config_name, tmp_path,
-        [f"sweep.n_iterations={n_iterations}",
+        [*groups, f"sweep.n_iterations={n_iterations}",
          f"+data.init_dump={routes_pt.as_posix()}"])
 
     problems = []

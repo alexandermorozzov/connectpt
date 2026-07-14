@@ -22,15 +22,19 @@ from connectpt.routes_generator.search import BeeColonySearchRun
 
 
 def test_build_experiment_and_suite_compose():
-    # collapsed leaf (one per method); the city is a runtime parameter.
-    cfg = build_experiment("e1/our_nbco", city="Mumford0")   # auto experiments/ prefix
+    # method picked in code (bee_sets + models groups); city is a runtime param.
+    cfg = build_experiment("table3_nbco_vs_our", bee_sets="our_nbco",
+                           models="construction_and_edit_seeded",
+                           city="Mumford0", label="Our NBCO")
     assert cfg.run.type == "bee_colony_search"
     assert cfg.data.city == "Mumford0"
+    assert cfg.run.label == "Our NBCO"
     assert isinstance(ExperimentRunFactory.from_cfg(cfg), BeeColonySearchRun)
 
-    batch = load_suite("e1/batch")
-    assert batch.batch.name == "e1"
-    assert len(batch.batch.runs) == 2
+    # methods-based artifact: one file, N methods (no per-method leaf files).
+    batch = load_suite("table3_nbco_vs_our")
+    assert batch.batch.name == "table3_nbco_vs_our"
+    assert len(batch.methods) == 2
 
 
 def test_render_report_infers_pareto_from_table():
@@ -54,9 +58,13 @@ def test_render_report_explicit_kind_and_single_row_default():
 @pytest.mark.skipif(not CONSTRUCTION_MODEL_WEIGHTS_PATH.exists(),
                     reason="construction weights not present")
 def test_batch_dry_run_aggregates_no_table():
-    # e1 batch dry-run: runs validate wiring but produce no sweep table -> None.
-    batch = ExperimentBatch(load_suite("e1/batch")).run(dry_run=True, city="Mumford0")
-    assert batch.name == "e1"
+    # methods-based batch dry-run: one run per method (both group choices compose
+    # + load), no sweep table produced -> None. base_name lets each method
+    # re-compose the artifact config with its bee_sets/models override.
+    batch = ExperimentBatch(load_suite("table3_nbco_vs_our"),
+                            base_name="table3_nbco_vs_our").run(
+                                dry_run=True, city="Mumford0")
+    assert batch.name == "table3_nbco_vs_our"
     assert len(batch.artifacts) == 2
     assert batch.table is None
 

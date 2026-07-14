@@ -14,21 +14,31 @@ from pathlib import Path
 import pytest
 from hydra import compose, initialize_config_dir
 
-from connectpt.routes_generator.core import ExperimentRunFactory
+from connectpt.routes_generator.core import ExperimentRunFactory, build_experiment
 from connectpt.routes_generator.search import BeeColonySearchRun
 
 REPO = Path(__file__).resolve().parents[1]
 LIB_CFG = REPO / "connectpt" / "routes_generator" / "cfg"
 EXP_DIR = LIB_CFG / "experiments"
 
-# Sections converted to the declarative bee_colony_search shape (stage 3). Each
-# entry is a dir under experiments/ that holds ONLY declarative run/batch configs
-# (the legacy flat n_type configs live elsewhere and are deleted at stage 4/7).
-SECTIONS = ["e1", "m0", "macsa/mandl8", "ekb/case_study", "e2"]
+# Paper artifacts as flat, self-contained files (M018): one YAML per table/figure.
+# A multi-method artifact carries a ``methods:`` list (each method = a group
+# choice picked in code) instead of per-method leaf files.
+FLAT_ARTIFACTS = [
+    "experiments/table3_nbco_vs_our",
+    "experiments/table4_fig4_our_pareto",
+    "experiments/table5_fig5_5model",
+    "experiments/ekb_case_study",
+    "experiments/macsa_alpha_sweep",
+    "experiments/macsa_alpha_sweep_iter1",
+]
+# No nested declarative dirs left (paper artifacts are all flat; bee_type_comparison
+# is an internal ablation, seeded/ + construction_only are test fixtures).
+SECTIONS: list[str] = []
 
 
 def _config_names():
-    names = []
+    names = list(FLAT_ARTIFACTS)
     for section in SECTIONS:
         for p in sorted((EXP_DIR / section).rglob("*.yaml")):
             names.append(p.relative_to(LIB_CFG).with_suffix("").as_posix())
@@ -44,11 +54,21 @@ def _compose(name):
 def test_declarative_config_composes_and_dispatches(name):
     cfg = _compose(name)
 
-    if cfg.get("batch") is not None:
-        assert cfg.batch.runs, f"{name}: empty batch"
+    # methods-based artifact: each method re-composes THIS config with its group
+    # choice (bee_sets + models) picked in code -- exactly what ExperimentBatch does.
+    methods = cfg.get("methods")
+    if methods:
+        for m in methods:
+            run_cfg = build_experiment(
+                name, bee_sets=m["bee_sets"], models=m["models"],
+                n_bees=m.get("n_bees"), label=m["label"])
+            _check_run(f"{name}[{m['label']}]", run_cfg)
+        return
+
+    # heterogeneous batch: a list of separate run configs (e.g. GA/SA baselines).
+    if cfg.get("batch") is not None and cfg.batch.get("runs"):
         for run_name in cfg.batch.runs:
-            run_cfg = _compose(str(run_name))
-            _check_run(str(run_name), run_cfg)
+            _check_run(str(run_name), _compose(str(run_name)))
         return
 
     _check_run(name, cfg)

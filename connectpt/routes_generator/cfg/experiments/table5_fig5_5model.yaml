@@ -1,0 +1,53 @@
+# @package _global_
+# Table 5 + Figure 5 (paper \label{tab:e2-5model-mumford1} /
+# \label{fig:e2-mumford1-pareto}): five operator combinations on Mumford1,
+# adjustment penalty off, each swept over the RTT-WMC weight alpha.
+#
+# ONE artifact = ONE file. Each "method" differs ONLY by its Hydra groups
+# (bee_sets + models) + n_bees + label, so it is a `methods:` entry picked in
+# code (build_experiment(bee_sets=..., models=...)), not a separate leaf file.
+# The batch composes THIS config once per method with its group override.
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_and_edit_seeded   # default method groups
+  - /search/bee_sets: our_nbco                      # (methods list overrides)
+  - _self_
+
+run:
+  name: table5_fig5_5model
+  seed: 0
+  cpu: false
+
+search:
+  n_bees: 10
+
+data:
+  source: benchmark
+  city: Mumford1
+
+sweep:
+  alpha: [0.0, 0.25, 0.5, 0.75, 1.0]
+  adj_target: 0.2
+  adj_weight: 0.0    # 0 = adjustment penalty OFF
+  n_iterations: 200
+
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
+
+# Stream per-BCO-iteration best-cost curves to TensorBoard (one run per method x
+# alpha) so the 5-method sweep is watchable online.
+logging:
+  tensorboard: true
+
+methods:
+  - {label: "GNN + trim/extend",   bee_sets: our_nbco,        models: construction_and_edit_seeded, n_bees: 10}
+  - {label: "RPC + trim/extend",   bee_sets: rpc_trim_extend, models: edit_only_seeded,             n_bees: 10}
+  - {label: "GNN + type2",         bee_sets: neural_bco,      models: construction_only,            n_bees: 10}
+  - {label: "RPC + type2",         bee_sets: rpc_type2,       models: no_neural_models,             n_bees: 10}
+  - {label: "trim 12 + extend 12", bee_sets: trim12_extend12, models: construction_and_edit_seeded, n_bees: 24}
+
+batch:
+  name: table5_fig5_5model_mumford1
+  output_dir: artifacts/runs/table5_fig5_5model_mumford1
+
+output:
+  paper_stem: table5_fig5_5model_mumford1
