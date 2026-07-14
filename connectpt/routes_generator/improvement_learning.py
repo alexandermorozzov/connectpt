@@ -17,13 +17,14 @@ from .citygraph_dataset import (
     SpaceScaleTransform,
 )
 from .transit_time_estimator import (
+    COST_WEIGHT_KEY_ORDER,
     ROUTE_ACTION_EXTEND,
     ROUTE_ACTION_HALT,
     ROUTE_ACTION_TRIM_END,
     ROUTE_ACTION_TRIM_START,
     RouteGenBatchState,
 )
-from .models import FeatureNorm, get_mlp
+from .models import FeatureNorm, get_mlp, WEIGHT_FEATURE_KEYS
 from .torch_utils import get_batch_tensor_from_routes
 
 ROUTE_ACTION_NAMES = {
@@ -705,6 +706,12 @@ class D3POValueModule:
     21-feature input (kept for backwards compatibility).
     """
 
+    # Feature specs (checkpoint-locked, declared like on the actor models):
+    # order of the cost-weight slots inside the shared global state features,
+    # and inside this critic's own legacy input tail (slot -1-ii = key ii).
+    weight_feature_keys = WEIGHT_FEATURE_KEYS
+    weight_input_keys = COST_WEIGHT_KEY_ORDER
+
     def __init__(self, learning_rate=0.0005, n_objectives=3, decay=0.01,
                  device=None, actor_model=None):
         self.learning_rate = learning_rate
@@ -766,7 +773,13 @@ class D3POValueModule:
             x_dim = dl[STOP_KEY].x.shape[1]
             input_data[bi, 6:6 + x_dim] = dl[STOP_KEY].x.mean(dim=0)
 
-        for ii, cw in enumerate(cost_weights.values()):
+        # Named dict -> fixed slots by the explicit key spec (never dict
+        # iteration order). A key absent from the dict leaves its slot at
+        # zero.
+        for ii, key in enumerate(self.weight_input_keys):
+            if key not in cost_weights:
+                continue
+            cw = cost_weights[key]
             data_idx = -(1 + ii)
             if torch.is_tensor(cw):
                 input_data[:, data_idx] = cw.to(dev)
@@ -780,7 +793,8 @@ class D3POValueModule:
             return self.actor_model.get_critic_features(state)
         input_data = self.inputs_from_data(
             state.graph_data, state.cost_weights)
-        glob_feats = state.get_global_state_features()
+        glob_feats = state.get_global_state_features(
+            weight_feature_keys=self.weight_feature_keys)
         input_data[..., -glob_feats.shape[-1]:] = glob_feats
         return input_data
 
@@ -1419,7 +1433,10 @@ def _preference_dict_from_tensor(weights):
 def _get_state_preferences(cost_obj, state):
     if hasattr(cost_obj, "get_preference_weights"):
         return cost_obj.get_preference_weights(state, normalize=True)
-    return _normalize_preference_weights(state.get_cost_weights_tensor())
+    # Cost/reward math order: explicit canonical keys (matches
+    # _preference_dict_from_tensor's unpacking).
+    return _normalize_preference_weights(
+        state.get_cost_weights_tensor(COST_WEIGHT_KEY_ORDER))
 
 
 def _collect_lc_improvement_cfg_d3po_rollout(

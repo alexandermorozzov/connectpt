@@ -38,6 +38,14 @@ COST_WEIGHT_KEY_ORDER = (
     'median_connectivity_weight',
 )
 
+# NOTE on ordering: the state exposes cost weights as a NAMED dict
+# (state.cost_weights) — exactly how the cost math consumes them (lookup by
+# key at each use site). A positional vector exists only where a neural net
+# needs one, and is assembled in a single place (get_cost_weights_tensor)
+# from an EXPLICIT key tuple supplied by the caller: the cost/reward math
+# passes COST_WEIGHT_KEY_ORDER; models pass the checkpoint-locked spec they
+# declare themselves (models.WEIGHT_FEATURE_KEYS / weight_feature_keys).
+
 # Short, human-readable names for the three cost components, index-aligned
 # with COST_WEIGHT_KEY_ORDER. Used to enable / disable individual components.
 COST_COMPONENT_NAMES = ('demand', 'route', 'connectivity')
@@ -1071,8 +1079,13 @@ class RouteGenBatchState:
 
         return route_time
     
-    def get_global_state_features(self, include_redundancy=None):
-        cost_weights = self.cost_weights_tensor
+    def get_global_state_features(self, include_redundancy=None, *,
+                                  weight_feature_keys):
+        """Global feature vector for neural nets. ``weight_feature_keys`` is
+        required: the calling model declares the order of the cost-weight
+        slots (its checkpoint-locked spec, e.g. models.WEIGHT_FEATURE_KEYS) —
+        the state never chooses a weight order itself."""
+        cost_weights = self.get_cost_weights_tensor(weight_feature_keys)
         diameter = _finite_time_diameter(self.drive_times)
         mean_route_time = self.total_route_time / (
             self.n_routes_to_plan * diameter)
@@ -1306,28 +1319,13 @@ class RouteGenBatchState:
             n_demand_edges = (n_demand_edges / 2).ceil()
         return n_demand_edges
 
-    @property
-    def cost_weights_tensor(self):
-        cost_weights_list = []
-        for key in sorted(self.cost_weights.keys()):
-            if type(self.cost_weights[key]) is Tensor:
-                cw = self.cost_weights[key].to(self.device)
-                if cw.ndim == 0:
-                    cw = cw[None]
-            else:
-                cw = torch.tensor(self.cost_weights[key], 
-                                  device=self.device)[None]
-
-            cost_weights_list.append(cw)
-        cost_weights = torch.stack(cost_weights_list, dim=1)
-        if cost_weights.shape[0] == 1:
-            cost_weights = cost_weights.expand(self.batch_size, -1)
-        if cost_weights.shape[0] > self.batch_size:
-            cost_weights = cost_weights[:self.batch_size]
-        return cost_weights
-
-    def get_cost_weights_tensor(self, key_order=COST_WEIGHT_KEY_ORDER,
-                                normalize=False):
+    def get_cost_weights_tensor(self, key_order, normalize=False):
+        """THE single point where the named cost-weight dict becomes a
+        positional vector. ``key_order`` is required: every caller states
+        which keys it wants and in which order — the cost/reward math passes
+        COST_WEIGHT_KEY_ORDER, models pass their own checkpoint-locked
+        ``weight_feature_keys`` spec. There is deliberately no default and no
+        implicit ordering (dict iteration / sorting never decides slots)."""
         cost_weights_list = []
         for key in key_order:
             if key not in self.cost_weights:

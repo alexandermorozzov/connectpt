@@ -33,6 +33,22 @@ Q_FUNC_MODE = "q function"
 PLCY_MODE = "policy"
 GFLOW_MODE = "gflownet"
 
+# Cost-weight keys, in the order the CURRENT model checkpoints were trained
+# with. This is the models' feature spec: every place that turns the state's
+# NAMED cost-weight dict into a positional feature vector does so through an
+# explicit key tuple declared on the model (``weight_feature_keys`` class
+# attribute, defaulting to this). CHECKPOINT-LOCKED: the order equals the
+# historical implicit ``sorted(keys)`` the frozen checkpoints learned —
+# reordering it (or training a new model with a different tuple without
+# giving that model its own spec) silently permutes the meaning of the
+# feature slots. A model trained with a different order must override
+# ``weight_feature_keys`` next to its checkpoint.
+WEIGHT_FEATURE_KEYS = (
+    'demand_time_weight',
+    'median_connectivity_weight',
+    'route_time_weight',
+)
+
 # FEAT_NORM_MOMENTUM = 0.001
 FEAT_NORM_MOMENTUM = 0.0
 
@@ -757,6 +773,10 @@ class NodepairDotScorer(nn.Module):
 
 
 class RouteScorer(nn.Module):
+    # Feature spec: order of the cost-weight slots inside global state
+    # features, locked to the trained checkpoints (see WEIGHT_FEATURE_KEYS).
+    weight_feature_keys = WEIGHT_FEATURE_KEYS
+
     def __init__(self, embed_dim, nonlin_type, dropout, n_mlp_layers=2,
                  mlp_width=None, n_extra_feats=14):
         super().__init__()
@@ -785,7 +805,8 @@ class RouteScorer(nn.Module):
 
         route_len = (route_idxs > -1).sum(dim=1, dtype=torch.float)
         route_feats = torch.stack((route_time, route_len), dim=1)
-        global_feats = state.get_global_state_features()
+        global_feats = state.get_global_state_features(
+            weight_feature_keys=self.weight_feature_keys)
         extra_feats = torch.cat((route_feats, global_feats), dim=1)
 
         # pass sequences through encoder
@@ -925,6 +946,13 @@ class DummyMLP(nn.Module):
 
 
 class RouteGeneratorBase(nn.Module):
+    # Feature spec: order of the cost-weight slots in every positional
+    # feature vector this model consumes (global state features, edge
+    # planes, decoder context). Locked to the trained checkpoints (see
+    # WEIGHT_FEATURE_KEYS); a model trained with a different order overrides
+    # this next to its checkpoint.
+    weight_feature_keys = WEIGHT_FEATURE_KEYS
+
     def __init__(self, backbone_net, mean_stop_time_s, 
                  embed_dim, n_nodepair_layers, nonlin_type=DEFAULT_NONLIN, 
                  dropout=MLP_DEFAULT_DROPOUT, symmetric_routes=True, 
@@ -1097,8 +1125,10 @@ class RouteGeneratorBase(nn.Module):
             ))
         edge_features = torch.stack(edge_feature_parts, dim=-1)
 
-        # add planes with cost weights
-        cost_weight_planes = state.cost_weights_tensor[:, None, None, :]
+        # add planes with cost weights (named dict -> vector via the model's
+        # declared key spec)
+        cost_weight_planes = state.get_cost_weights_tensor(
+            self.weight_feature_keys)[:, None, None, :]
         cost_weight_planes = cost_weight_planes.expand(-1, state.max_n_nodes, 
                                                         state.max_n_nodes, -1)
         edge_features = torch.cat((edge_features, cost_weight_planes), dim=-1)
@@ -1724,7 +1754,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         route_embed = (route_node_descs * route_valid).sum(dim=1) / \
             route_valid.sum(dim=1).clamp_min(1.0)
 
-        global_feats = state.get_global_state_features().to(node_descs.dtype)
+        global_feats = state.get_global_state_features(
+            weight_feature_keys=self.weight_feature_keys).to(node_descs.dtype)
         return torch.cat([graph_embed, route_embed, global_feats], dim=-1)
 
     def _get_extension_scores(self, state: RouteGenBatchState, route_lens, 
@@ -1909,7 +1940,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             update_in = torch.cat((update_in, redundancy_feats), dim=-1)
 
         global_feat = state.get_global_state_features(
-            include_redundancy=self.use_redundancy_features)
+            include_redundancy=self.use_redundancy_features,
+            weight_feature_keys=self.weight_feature_keys)
         update_in = nn.functional.pad(update_in, (0, global_feat.shape[-1]))
         for _ in range(update_in.ndim - global_feat.ndim):
             global_feat = global_feat.unsqueeze(1)
@@ -2484,7 +2516,8 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         batch_size = state.batch_size
         route_capacity = state.current_routes.shape[1]
         global_features = state.get_global_state_features(
-            include_redundancy=self.use_redundancy_features)
+            include_redundancy=self.use_redundancy_features,
+            weight_feature_keys=self.weight_feature_keys)
         global_features = global_features.to(
             device=state.device,
             dtype=nodepair_embeds.dtype,
@@ -2975,8 +3008,9 @@ class UnbiasedPathCombiner(RouteGeneratorBase):
         
         # set the initial context
         global_feats = torch.cat(
-            ((state.total_route_time / state.n_routes_to_plan)[..., None], 
-             state.get_n_routes_features(), state.cost_weights_tensor), dim=-1)
+            ((state.total_route_time / state.n_routes_to_plan)[..., None],
+             state.get_n_routes_features(),
+             state.get_cost_weights_tensor(self.weight_feature_keys)), dim=-1)
         global_feats = self.global_extras_norm(global_feats)
         # get average node descriptor
         avg_node = mean_pool_sequence(node_descs, node_pad_mask)

@@ -32,6 +32,7 @@ from connectpt.routes_generator.models import (
     FeatureNorm,
     PathCombiningRouteGenerator,
     TrimPathCombiningRouteGenerator,
+    WEIGHT_FEATURE_KEYS,
 )
 from connectpt.routes_generator.transit_time_estimator import (
     MyCostModule,
@@ -634,7 +635,7 @@ def test_trim_below_min_opt_in_and_halt_masking():
         s.set_current_routes([0, 1, 2, 3, 4, 5])           # len 6
         m = _make_trim_model(allow_trim_below_min=flag)
         m.setup_planning(s)
-        gf = s.get_global_state_features()
+        gf = s.get_global_state_features(weight_feature_keys=WEIGHT_FEATURE_KEYS)
         _, valid, _, _ = m._get_trim_candidate_features(
             s, gf, torch.float32, trim_start=True)
         return int(valid[0].sum().item())
@@ -772,7 +773,7 @@ def test_route_state_leg_use_counts_preserve_multiplicity():
     assert state.current_leg_use_count[0, 0, 1].item() == 2
     assert state.total_leg_use_count[0, 0, 1].item() == 4
     assert state.excess_leg_use_count[0, 0, 1].item() == 3
-    assert state.get_global_state_features().shape[-1] == 12
+    assert state.get_global_state_features(weight_feature_keys=WEIGHT_FEATURE_KEYS).shape[-1] == 12
 
     redundancy_features = state.get_redundancy_global_features()
     assert torch.allclose(
@@ -781,7 +782,7 @@ def test_route_state_leg_use_counts_preserve_multiplicity():
     )
 
     state.set_redundancy_feature_mode(True)
-    assert state.get_global_state_features().shape[-1] == 17
+    assert state.get_global_state_features(weight_feature_keys=WEIGHT_FEATURE_KEYS).shape[-1] == 17
 
 
 def test_redundancy_features_are_opt_in_for_trim_model():
@@ -823,7 +824,7 @@ def test_redundancy_features_are_opt_in_for_trim_model():
     assert rich_model.trim_action_feat_dim == 36
     assert rich_model.path_scorer[0].running_mean.numel() == 27
 
-    global_features = state.get_global_state_features()
+    global_features = state.get_global_state_features(weight_feature_keys=WEIGHT_FEATURE_KEYS)
     features, valid, _, _ = rich_model._get_trim_candidate_features(
         state, global_features, torch.float32, trim_start=True)
     assert valid[0, 2]
@@ -833,7 +834,7 @@ def test_redundancy_features_are_opt_in_for_trim_model():
     )
 
     legacy_model.setup_planning(state)
-    assert state.get_global_state_features().shape[-1] == 12
+    assert state.get_global_state_features(weight_feature_keys=WEIGHT_FEATURE_KEYS).shape[-1] == 12
     assert legacy_model._get_edge_features(state).shape[-1] == 14
     assert legacy_model.trim_action_feat_dim == 26
 
@@ -865,7 +866,7 @@ def test_live_adjustment_feature_preserves_active_route_slot_order():
     assert state.active_route_idx.tolist() == [1]
     assert torch.equal(state.route_slot_context, seed_routes)
     assert torch.allclose(
-        state.get_global_state_features()[0, -2:],
+        state.get_global_state_features(weight_feature_keys=WEIGHT_FEATURE_KEYS)[0, -2:],
         torch.tensor([0.15, 0.0]),
     )
 
@@ -1075,7 +1076,7 @@ def test_vectorized_trim_features_match_removed_and_kept_context_overlap():
         symmetric_routes=True,
         serial_halting=True,
     )
-    global_features = state.get_global_state_features().to(dtype=torch.float32)
+    global_features = state.get_global_state_features(weight_feature_keys=WEIGHT_FEATURE_KEYS).to(dtype=torch.float32)
 
     features, valid, from_nodes, to_nodes = model._get_trim_candidate_features(
         state, global_features, torch.float32, trim_start=True)
@@ -1259,7 +1260,7 @@ def test_my_cost_module_handles_disconnected_drive_times():
 
     result = cost_obj(state)
     components = cost_obj.get_cost_components(state, result=result)
-    features = state.get_global_state_features()
+    features = state.get_global_state_features(weight_feature_keys=WEIGHT_FEATURE_KEYS)
     model = PathCombiningRouteGenerator(
         backbone_net=IdentityGraphNet(),
         mean_stop_time_s=0,
