@@ -1,18 +1,18 @@
-"""EKB (Ekaterinburg) case study runner -- CLI, no Jupyter.
+"""Table 4 / Figure 4 rerun -- CLI, no Jupyter.
 
-Runs Improved NBCO on the real EKB network across the alpha grid {0, 0.5, 1.0}
-at adjustment target 0.2 (config ``experiments/ekb_case_study``), on the SAME
-library path the notebook uses (``paper_runs.run_experiment``): the sweep table
-(all metrics) + the route dumps are persisted by the library, and each grid
-point is streamed to TensorBoard per BCO iteration and saved incrementally
-(partial CSV + route dump) so a crash never loses completed alphas. This script
-only adds logging + writes the geo (routes-on-basemap) figure to disk.
+Re-runs the Improved NeuralBCO adjustment-target sweep on Mumford0 (config
+``experiments/table4_fig4_our_pareto``, paper \\label{tab:e2c_rtt_median_wmc_mumford0}
+/ \\label{fig:e2-mumford0-ourpareto-topdown}): the 2D alpha x adjustment-target
+grid, 200 BCO iterations, on the SAME library path the notebook uses
+(``paper_runs.run_experiment``). The metrics table + route / history dumps are
+persisted by the library; each grid point streams to TensorBoard per BCO
+iteration and saves incrementally so a crash never loses completed points. This
+script only adds logging + writes the Pareto figure to disk.
 
-    python scripts/run_ekb_case_study.py --profile full
-    python scripts/run_ekb_case_study.py --profile smoke        # fast dry check
-    python scripts/run_ekb_case_study.py --profile full --n-iterations 100
+    python scripts/run_table4.py --profile full --suite suite_rerun
+    python scripts/run_table4.py --profile smoke                 # fast dry check
 
-Watch it online:  tensorboard --logdir artifacts/runs/ekb_case_study/tb
+Watch it online:  tensorboard --logdir artifacts/runs/table4_fig4_our_pareto
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from connectpt.routes_generator.core import load_experiment, load_suite   # noqa
 from connectpt.routes_generator.paper_experiments.paper_runs import (       # noqa: E402
     paper_dir, run_experiment)
 
-CONFIG = "ekb_case_study"
+CONFIG = "table4_fig4_our_pareto"
 
 
 def main() -> None:
@@ -42,7 +42,7 @@ def main() -> None:
     parser.add_argument("--suite-smoke", default="suite_smoke",
                         help="smoke-profile suite name")
     parser.add_argument("--n-iterations", type=int, default=None,
-                        help="override sweep.n_iterations (else the YAML value)")
+                        help="override sweep.n_iterations (else the YAML value, 200)")
     args = parser.parse_args()
 
     suite = load_suite(args.suite_smoke if args.profile == "smoke" else args.suite)
@@ -51,20 +51,20 @@ def main() -> None:
     out_dir = paper_dir(suite) or Path("artifacts/paper_results")
 
     log = setup_logging(out_dir / f"{prefix}{stem}_run.log")
-    log.info("EKB case study | profile=%s | config=%s | stem=%s", args.profile,
-             CONFIG, stem)
+    log.info("Table 4 / Figure 4 | profile=%s | config=%s | stem=%s | out=%s",
+             args.profile, CONFIG, stem, out_dir)
 
     params = {} if args.n_iterations is None else {"n_iterations": args.n_iterations}
-    run = run_experiment(CONFIG, suite, kind="gis",
-                         title="EKB case study (Improved NBCO)", **params)
+    run = run_experiment(CONFIG, suite,
+                         title="Adjustment-target sweep on Mumford0 (Improved NBCO)",
+                         **params)
 
     figs = save_figures(run.figures, out_dir, stem, prefix=prefix)
-    art = run.artifact
-    log.info("metrics table + route dumps -> %s (stem %r, prefix %r)",
+    log.info("Table 4 (metrics) + route/history dumps -> %s (stem %r, prefix %r)",
              out_dir, stem, prefix)
-    log.info("figures saved: %s", [str(p) for p in figs])
-    log.info("TensorBoard: tensorboard --logdir %s", Path(art.output_dir) / "tb")
-    log.info("sweep rows:\n%s", run.table.to_string() if run.table is not None else "(none)")
+    log.info("Figure 4 (Pareto) saved: %s", [str(p) for p in figs])
+    log.info("TensorBoard: tensorboard --logdir %s", Path("artifacts/runs") / CONFIG)
+    log.info("Table 4 rows:\n%s", run.table.to_string() if run.table is not None else "(none)")
 
 
 if __name__ == "__main__":

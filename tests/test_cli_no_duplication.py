@@ -25,12 +25,15 @@ ALLOWED = {
         {"run_experiment", "run_batch", "paper_dir"},
 }
 
-CLI_SCRIPTS = ["run_ekb_case_study.py", "run_figure5_pareto.py"]
+CLI_SCRIPTS = ["run_ekb_case_study.py", "run_figure5_pareto.py",
+               "run_table3.py", "run_table4.py"]
 
 # script -> (the entrypoint it MUST call, the notebook that runs the same config)
 EXPECT = {
     "run_ekb_case_study.py": ("run_experiment", "04_case_study.ipynb"),
     "run_figure5_pareto.py": ("run_batch", "03_nbco_experiments.ipynb"),
+    "run_table3.py": ("run_batch", "03_nbco_experiments.ipynb"),
+    "run_table4.py": ("run_experiment", "03_nbco_experiments.ipynb"),
 }
 
 # identifiers that only appear if a script re-implements experiment internals.

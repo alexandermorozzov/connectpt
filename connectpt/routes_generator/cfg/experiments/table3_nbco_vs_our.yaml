@@ -30,6 +30,11 @@ sweep:
 
 metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
 
+# Stream per-BCO-iteration best-cost curves to TensorBoard (one run per method x
+# alpha) so the convergence history is watchable online / saved for figures.
+logging:
+  tensorboard: true
+
 methods:
   - {label: "neural BCO", bee_sets: neural_bco, models: construction_only,            n_bees: 10}
   - {label: "Our NBCO (GNN rebuild + trim/extend)", bee_sets: our_nbco, models: construction_and_edit_seeded, n_bees: 10}

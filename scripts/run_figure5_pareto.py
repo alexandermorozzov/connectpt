@@ -37,9 +37,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=["smoke", "full"], default="smoke",
                         help="smoke = 1-2 BCO iters (fast check); full = paper budget")
+    parser.add_argument("--suite", default="suite",
+                        help="full-profile suite name (use suite_rerun to write artifacts/reruns)")
+    parser.add_argument("--suite-smoke", default="suite_smoke",
+                        help="smoke-profile suite name")
     args = parser.parse_args()
 
-    suite = load_suite("suite_smoke" if args.profile == "smoke" else "suite")
+    suite = load_suite(args.suite_smoke if args.profile == "smoke" else args.suite)
     stem = load_suite(CONFIG).output.paper_stem
     prefix = str(suite.output_prefix or "")
     out_dir = paper_dir(suite) or Path("artifacts/paper_results")

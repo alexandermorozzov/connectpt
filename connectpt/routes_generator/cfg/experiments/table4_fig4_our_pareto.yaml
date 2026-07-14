@@ -32,5 +32,10 @@ sweep:
 
 metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
 
+# Stream per-BCO-iteration best-cost curves to TensorBoard (one run per alpha x
+# adj_target) so the convergence history is watchable online / saved for figures.
+logging:
+  tensorboard: true
+
 output:
   paper_stem: table4_fig4_our_pareto_mumford0
