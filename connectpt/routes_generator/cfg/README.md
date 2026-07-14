@@ -111,11 +111,16 @@ cfg/
 Проверки: `pytest -q` 225 passed; dry-compose 12/12 перемещённых конфигов;
 `train_edit.py --dry-run` OK.
 
-## Осталось (M019 задача B — гигиена групп, НЕ сделано)
+## Сознательное исключение: `experiment/` и `cost_function/` НЕ переименованы
 
-- `experiment/cost_function/` → `cost_base/` рядом с `objective/`.
-- Легаси-группа `experiment/` (только `standard.yaml`) → `run_base/`
-  (де-коллизия имени с `experiments/`). Тяжелее — группа зашита в `defaults:`
-  многих конфигов; допустимо оставить как исключение.
+M019 задача B (`experiment/cost_function/` → `cost_base/`, `experiment/` →
+`run_base/`) **отклонена по решению пользователя.** Причина: это не пути файлов,
+а **package-имена, читаемые кодом в 46 местах** — `cfg.experiment.cost_function.*`
+(cost-ядро: `objectives/factory.py`, `unified.py`; `baselines`, `lc_eval`,
+`data/init`, `training_lc`) и `cfg.experiment.{seed,symmetric_routes,logdir}`.
+Переезд группы без смены package невозможен, а со сменой правит cost-читающий
+код, что нарушает границу «внутреннюю логику cost/BCO/models не трогаем». Выигрыш
+— только косметический (де-коллизия имени `experiment/` ↔ `experiments/`), поэтому
+фундамент B остаётся `experiment/standard`, cost-группа — `experiment/cost_function/`.
 
-Детали и критерии — `board/milestone-019-cfg-build-hierarchy.md`.
+Детали — `board/milestone-019-cfg-build-hierarchy.md`.
