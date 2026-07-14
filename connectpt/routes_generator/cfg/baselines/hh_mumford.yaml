@@ -1,3 +1,4 @@
+# @package _global_
 # Selection hyper-heuristic (Ahmed et al. 2019) -- ported from
 # AHolliday/transit_learning (cfg/hyperheuristic_mumford.yaml). The notebook
 # helper `build_hh_cfg` adds `+eval=mumford0` and overrides these values for
@@ -14,5 +15,6 @@ n_iterations: 2000
 
 defaults:
   - _self_
-  - experiment: standard
-  - init: john
+  - /experiment: standard
+  - /init: john
+  - /eval: mumford0

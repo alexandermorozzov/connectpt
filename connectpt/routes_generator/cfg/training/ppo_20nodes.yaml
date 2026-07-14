@@ -1,3 +1,4 @@
+# @package _global_
 ppo:
   n_iterations: 200
   val_period: 10
@@ -41,5 +42,5 @@ dataset:
 
 defaults:
   - _self_
-  - experiment: standard
-  - model: bestsofar_feb2023
+  - /experiment: standard
+  - /model: bestsofar_feb2023

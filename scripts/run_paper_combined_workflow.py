@@ -37,7 +37,7 @@ def run_workflow(*, train=False, search=False, evaluate=False, report=False,
 
     out: dict = {}
     if train:
-        out["train"] = EditTrainingRun(_compose("train/edit")).run(dry_run=dry_run)
+        out["train"] = EditTrainingRun(_compose("training/edit")).run(dry_run=dry_run)
     if search:
         out["search"] = BeeColonySearchRun(
             _compose("search/bco_flexible_bees")).run(dry_run=dry_run)

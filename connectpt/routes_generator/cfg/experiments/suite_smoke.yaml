@@ -2,7 +2,7 @@
 # Smoke / dry-run profile: EVERY experiment ON, single city, 1-iteration specs,
 # all outputs under the TEMP_ prefix so nothing real is overwritten. Just verifies
 # the whole notebook runs end to end. (The per-experiment smoke specs -- e1_*_smoke,
-# e2_*_smoke, macsa_sweep_smoke, ekb_sweep_smoke, train/edit_scratch_smoke -- carry
+# e2_*_smoke, macsa_sweep_smoke, ekb_sweep_smoke, training/edit_scratch_smoke -- carry
 # the 1-iteration budgets; this profile only flips the switches + the prefix.)
 defaults:
   - /experiments/suite

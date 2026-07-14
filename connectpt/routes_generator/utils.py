@@ -86,13 +86,13 @@ def get_graphnet_from_cfg(net_cfg, common_cfg):
 def get_random_path_combiner():
     overrides = ["model=random_path_combiner"]
     if GlobalHydra.instance().is_initialized():
-        cfg = compose(config_name='neural_bco_mumford.yaml',
+        cfg = compose(config_name='baselines/neural_bco_mumford.yaml',
                       overrides=overrides)
     else:
         cfg_dir = Path(__file__).resolve().parent / "cfg"
         with initialize_config_dir(config_dir=str(cfg_dir),
                                    version_base=None):
-            cfg = compose(config_name='neural_bco_mumford.yaml',
+            cfg = compose(config_name='baselines/neural_bco_mumford.yaml',
                           overrides=overrides)
     model = build_model_from_cfg(cfg.model, cfg.experiment)
     return model
@@ -462,7 +462,7 @@ def _format_hydra_override_value(value):
         return "null"
     return str(value)
 
-def get_eval_cfg(cfg_dir: str, base_cfg_name: str = "eval_model_mumford", params: dict | None = None):
+def get_eval_cfg(cfg_dir: str, base_cfg_name: str = "evaluation/eval_model_mumford", params: dict | None = None):
     """
     Creates a Hydra config for model evaluation.
 

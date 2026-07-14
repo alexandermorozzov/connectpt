@@ -4,7 +4,7 @@
 # -> data module -> PPO -> checkpoint) runs end to end WITHOUT touching the real
 # dataset or the real checkpoint.
 defaults:
-  - /train/edit_scratch
+  - /training/edit_scratch
   - _self_
 
 run:

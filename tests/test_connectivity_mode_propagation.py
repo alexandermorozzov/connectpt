@@ -201,7 +201,7 @@ def test_paper_combined_sets_connectivity_mode_everywhere():
     # Config-driven training (refactor CF33): the notebook loads the named train
     # config via load_train_config and runs EditTrainingRun(cfg). The inline
     # compose + build_edit_run + ~25-entry override list are gone; the
-    # connectivity_mode override lives in cfg/train/edit.yaml -> objective YAML.
+    # connectivity_mode override lives in cfg/training/edit.yaml -> objective YAML.
     assert "load_train_config(" in text
     assert "EditTrainingRun(train_cfg)" in text
     assert "ppo_50nodes.yaml" not in text
@@ -255,9 +255,9 @@ def test_paper_combined_uses_two_sided_adj_objective():
     assert 'adjustment_degree_objective="cap"' not in text
     assert 'adjustment_degree_objective="target"' not in text
     # PART 1 training shapes with the one-sided cap objective, now sourced from
-    # cfg/train/edit.yaml (was the notebook's ADJ_TRAIN_OBJECTIVE constant before
+    # cfg/training/edit.yaml (was the notebook's ADJ_TRAIN_OBJECTIVE constant before
     # the config-driven training refactor).
-    edit_yaml = (REPO_ROOT / "connectpt" / "routes_generator" / "cfg" / "train"
+    edit_yaml = (REPO_ROOT / "connectpt" / "routes_generator" / "cfg" / "training"
                  / "edit.yaml").read_text(encoding="utf-8")
     assert "adjustment_degree_objective: cap" in edit_yaml
     # PART 2 search spreads the unified adj kwargs. The threading lives in the

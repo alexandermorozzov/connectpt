@@ -74,7 +74,7 @@ def _build_model_and_cost(label: str, n_adj_feats: int, device_cpu: bool = True)
         "++experiment.cost_function.kwargs.use_weighted_connectivity=true",
     ]
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        cfg = compose(config_name="ppo_50nodes.yaml", overrides=overrides)
+        cfg = compose(config_name="training/ppo_50nodes.yaml", overrides=overrides)
     device, run_name, _, cost_obj, model = lrnu.process_standard_experiment_cfg(
         cfg, run_name_prefix="validation_")
     cost_obj.ignore_stops_oob = True

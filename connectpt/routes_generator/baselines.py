@@ -74,7 +74,6 @@ def make_tensor_dataloader(dataset_cfg, tensors):
 def _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len,
                             connectivity_mode="median_weighted"):
     return [
-        "+eval=mumford0",
         "++eval.dataset.type=tensor",
         "++experiment.logdir=null",  # no empty TensorBoard run dir for eval runs
         f"++eval.n_routes={n_routes}",
@@ -110,7 +109,7 @@ def build_sa_cfg(run_name, n_routes, min_route_len, max_route_len,
         run_name, n_routes, min_route_len, max_route_len, connectivity_mode)
     overrides.append(f"++alg_args.n_iterations={n_iterations}")
     overrides += _early_stop_overrides(early_stop_patience, early_stop_min_delta)
-    return _compose_baseline_cfg("sa_mumford", overrides)
+    return _compose_baseline_cfg("baselines/sa_mumford", overrides)
 
 
 def build_ga_cfg(run_name, n_routes, min_route_len, max_route_len,
@@ -122,7 +121,7 @@ def build_ga_cfg(run_name, n_routes, min_route_len, max_route_len,
     overrides.append(f"++n_iterations={n_iterations}")
     overrides.append(f"++population_size={population_size}")
     overrides += _early_stop_overrides(early_stop_patience, early_stop_min_delta)
-    return _compose_baseline_cfg("ga_mumford", overrides)
+    return _compose_baseline_cfg("baselines/ga_mumford", overrides)
 
 
 def build_hh_cfg(run_name, n_routes, min_route_len, max_route_len,
@@ -135,7 +134,7 @@ def build_hh_cfg(run_name, n_routes, min_route_len, max_route_len,
     if max_repair_iters is not None:
         overrides.append(f"++max_repair_iters={int(max_repair_iters)}")
     overrides += _early_stop_overrides(early_stop_patience, early_stop_min_delta)
-    return _compose_baseline_cfg("hh_mumford", overrides)
+    return _compose_baseline_cfg("baselines/hh_mumford", overrides)
 
 
 def _run_baseline(method_fn, cfg, init_routes, prefix, method_kwargs, *,
@@ -243,7 +242,6 @@ def build_nsgaii_cfg(run_name, n_routes, min_route_len, max_route_len,
                      n_iterations=NSGAII_N_ITERATIONS, pop_size=NSGAII_POP_SIZE,
                      connectivity_mode="median_weighted"):
     overrides = [
-        "+eval=mumford0",
         "++eval.dataset.type=tensor",
         "++experiment.logdir=null",
         f"++eval.n_routes={n_routes}",
@@ -255,7 +253,7 @@ def build_nsgaii_cfg(run_name, n_routes, min_route_len, max_route_len,
         f"++pop_size={pop_size}",
     ]
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        cfg = compose(config_name="nsgaii_mumford", overrides=overrides)
+        cfg = compose(config_name="baselines/nsgaii_mumford", overrides=overrides)
     cfg.batch_size = 1
     return cfg
 

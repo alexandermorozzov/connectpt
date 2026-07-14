@@ -27,7 +27,7 @@ CONSTRUCTION_CHECKPOINT = WEIGHTS_DIR / "inductive_random_graphs_weighted_connec
 
 def _build(model_config):
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        cfg = compose(config_name="ppo_50nodes.yaml", overrides=[f"model={model_config}"])
+        cfg = compose(config_name="training/ppo_50nodes.yaml", overrides=[f"model={model_config}"])
     return build_model_from_cfg(cfg.model, cfg.experiment)
 
 

@@ -44,7 +44,7 @@ def build_edit_bee_model(device, weights_path=None, *, load_weights=True,
     if load_weights:
         overrides.append(f"+model.weights='{weights_path}'")
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        edit_cfg = compose(config_name="ppo_50nodes.yaml", overrides=overrides)
+        edit_cfg = compose(config_name="training/ppo_50nodes.yaml", overrides=overrides)
     edit_model = build_model_from_cfg(edit_cfg.model, edit_cfg.experiment)
     if load_weights:
         edit_model.load_state_dict(torch.load(weights_path, map_location=device))

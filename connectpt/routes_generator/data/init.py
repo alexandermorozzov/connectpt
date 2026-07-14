@@ -66,7 +66,7 @@ def _init_from_scratch(spec, tensors, *, seed: int, device) -> torch.Tensor:
 def _lc_construct(spec, tensors, *, device) -> torch.Tensor:
     """Build a clean learned-construction network for ``spec`` on ``tensors``.
 
-    Config-first: composes the ``eval_model_mumford`` eval cfg with the unified
+    Config-first: composes the ``evaluation/eval_model_mumford`` eval cfg with the unified
     objective's weights + the construction checkpoint, then builds model/cost
     through the factories and rolls out one sample via ``eval_model``.
     """
@@ -93,7 +93,7 @@ def _lc_construct(spec, tensors, *, device) -> torch.Tensor:
         "model_weights": str(CONSTRUCTION_MODEL_WEIGHTS_PATH),
         **obj.weights,
     }
-    cfg = get_eval_cfg(str(CFG_DIR), "eval_model_mumford", params)
+    cfg = get_eval_cfg(str(CFG_DIR), "evaluation/eval_model_mumford", params)
     cfg.batch_size = 1
     disabled = list(obj.disabled_components)
     if disabled:

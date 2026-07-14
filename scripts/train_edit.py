@@ -2,7 +2,7 @@
 
     python scripts/train_edit.py                       # full training
     python scripts/train_edit.py --dry-run             # build data/model/cost/trainer only
-    python scripts/train_edit.py --config-name train/edit_adj_conditioned
+    python scripts/train_edit.py --config-name training/edit_adj_conditioned
     python scripts/train_edit.py run.seed=3            # CLI override (quick tweak)
 
 ``--dry-run`` builds the model/cost/trainer and validates the wiring WITHOUT
@@ -23,7 +23,7 @@ CFG_DIR = REPO_ROOT / "connectpt" / "routes_generator" / "cfg"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config-name", default="train/edit")
+    parser.add_argument("--config-name", default="training/edit")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("overrides", nargs="*", help="Hydra-style cfg overrides")
     args = parser.parse_args()

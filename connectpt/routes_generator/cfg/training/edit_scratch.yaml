@@ -2,7 +2,7 @@
 # The paper's from-scratch edit-model run (was the notebook's RUN_NAME /
 # TRAIN_FROM_SCRATCH / N_ITERATIONS magic constants). Overlays train/edit.yaml.
 defaults:
-  - /train/edit
+  - /training/edit
   - _self_
 
 run:

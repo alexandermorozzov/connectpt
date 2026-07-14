@@ -1,3 +1,4 @@
+# @package _global_
 # Genetic algorithm -- ported from AHolliday/transit_learning
 # (learning/genetic_algorithm.py). The ancestor repo had no ga_*.yaml in its
 # cfg/ directory, so this file is written from scratch from the parameters the
@@ -18,5 +19,6 @@ init_from_model: false
 
 defaults:
   - _self_
-  - experiment: standard
-  - init: john
+  - /experiment: standard
+  - /init: john
+  - /eval: mumford0

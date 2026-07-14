@@ -4,7 +4,7 @@ baseline, history plotting, balanced evaluation and post-training convergence.
 This is the one-off pipeline that produced the paper's edit checkpoint (now just
 loaded by the experiments). The *reusable* training mechanics already live in
 the library (``connectpt.routes_generator.training``: ``TrainingDataModule`` +
-``EditTrainingRun`` driven by ``cfg/train/edit*.yaml``); this module only holds
+``EditTrainingRun`` driven by ``cfg/training/edit*.yaml``); this module only holds
 the paper-specific scaffolding that used to sit inline in ``paper_combined.ipynb``
 so the notebook stays a thin presentation layer.
 
@@ -49,7 +49,7 @@ def load_visual_examples(cfg):
 
 
 def load_train_config(name="edit_scratch", *, overrides=None, cfg_dir=None):
-    """Compose a training config from ``cfg/train/<name>.yaml`` (the single
+    """Compose a training config from ``cfg/training/<name>.yaml`` (the single
     source of truth for every training/report knob). Mirrors the reference
     ``load_experiment_config`` -- the notebook loads this once and passes the
     composed cfg to the factory helpers below; no constants in the notebook."""
@@ -59,7 +59,7 @@ def load_train_config(name="edit_scratch", *, overrides=None, cfg_dir=None):
 
     cfg_dir = cfg_dir or CFG_DIR
     with initialize_config_dir(config_dir=str(cfg_dir), version_base=None):
-        return compose(config_name=f"train/{name}", overrides=list(overrides or []))
+        return compose(config_name=f"training/{name}", overrides=list(overrides or []))
 
 
 def copytier_config(cfg) -> "CopyTierConfig":
@@ -712,7 +712,7 @@ def build_edit_model_and_cost(run_name, *, device, vary_weights=True,
 
     Replaces the notebook's old ``build_edit_run``: there is no bespoke builder
     anymore -- the model comes from ``RouteModelFactory.build_edit_model`` and
-    the cost from ``CostFactory.build_unified`` over ``train/edit`` +
+    the cost from ``CostFactory.build_unified`` over ``training/edit`` +
     ``rtt_wmc_no_demand.yaml``. Used by the standalone balanced-eval cell when
     the training cell wasn't run, to rebuild the model from its checkpoint.
     """
@@ -725,7 +725,7 @@ def build_edit_model_and_cost(run_name, *, device, vary_weights=True,
     cfg_dir = cfg_dir or CFG_DIR
     weights_dir = weights_dir or EDIT_MODEL_WEIGHTS_DIR
     with initialize_config_dir(config_dir=str(cfg_dir), version_base=None):
-        cfg = compose(config_name="train/edit", overrides=[f"++run.name={run_name}"])
+        cfg = compose(config_name="training/edit", overrides=[f"++run.name={run_name}"])
     model = RouteModelFactory.build_edit_model(cfg.model, cfg.experiment).to(device)
     cost_obj = CostFactory.build_unified("rtt_wmc_no_demand", for_training=True)
     cost_obj.variable_weights = bool(vary_weights)

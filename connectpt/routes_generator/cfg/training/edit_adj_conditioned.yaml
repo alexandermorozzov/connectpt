@@ -9,7 +9,7 @@
 #     cfg = compose(config_name="train/edit_adj_conditioned")
 
 defaults:
-  - /train/edit
+  - /training/edit
   - _self_
 
 # Turn the training-reward adjustment penalty on (cap objective, from edit.yaml).

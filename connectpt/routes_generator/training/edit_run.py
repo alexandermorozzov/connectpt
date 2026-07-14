@@ -2,7 +2,7 @@
 
 Builds the data module, model (via the factory, so checkpoints still load with
 strict=True), cost (via CostFactory + the unified objective) and the PPO trainer
-from a composed ``train/edit`` cfg, then trains and saves a v2 checkpoint.
+from a composed ``training/edit`` cfg, then trains and saves a v2 checkpoint.
 
 ``run(dry_run=True)`` builds everything and validates the wiring WITHOUT loading
 the (generated) dataset or running the long PPO loop -- the smoke check used by

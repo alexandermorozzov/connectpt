@@ -1,3 +1,4 @@
+# @package _global_
 # Simulated annealing with reheating -- ported from AHolliday/transit_learning
 # (cfg/sa_linear.yaml). The `alg_args` block is passed verbatim as keyword
 # arguments to `simulated_annealing_with_reheating` via `test_method`.
@@ -19,5 +20,6 @@ alg_args:
 
 defaults:
   - _self_
-  - experiment: standard
-  - init: john
+  - /experiment: standard
+  - /init: john
+  - /eval: mumford0

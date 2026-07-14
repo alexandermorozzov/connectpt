@@ -70,7 +70,7 @@ def build_lc_cfg(run_name, n_routes, min_route_len, max_route_len,
         "run_name": run_name,
         "model_weights": str(MODEL_WEIGHTS_PATH),
     }
-    cfg = get_eval_cfg(str(CFG_DIR), "eval_model_mumford", params)
+    cfg = get_eval_cfg(str(CFG_DIR), "evaluation/eval_model_mumford", params)
     cfg.batch_size = 1
     return _apply_disabled_components(cfg)
 
@@ -97,7 +97,7 @@ def build_rpc_cfg(run_name, n_routes, min_route_len, max_route_len,
         "model=random_path_combiner",
     ]
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        cfg = compose(config_name="eval_model_mumford", overrides=overrides)
+        cfg = compose(config_name="evaluation/eval_model_mumford", overrides=overrides)
     cfg.batch_size = 1
     return _apply_disabled_components(cfg)
 

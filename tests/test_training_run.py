@@ -16,7 +16,7 @@ EDIT_CKPT = (
 
 def _cfg(overrides=None):
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        return compose(config_name="train/edit", overrides=overrides or [])
+        return compose(config_name="training/edit", overrides=overrides or [])
 
 
 def test_dry_run_builds_pipeline(tmp_path):
