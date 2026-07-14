@@ -29,7 +29,7 @@ _SEEDED_INIT_CFG = {"method": "tensor"}
 def run_seeded_bee_colony(dataloader, eval_cfg, cost_obj, init_routes, *,
                           search_cfg, plan, mutation_counts_out=None,
                           device=None, silent=False, return_histories=False,
-                          iteration_callback=None):
+                          iteration_callback=None, sum_writer=None):
     """Run a seeded bee-colony search and return the raw ``test_method`` output.
 
     ``search_cfg`` is the composed BCO run schedule (schedule + adjustment
@@ -47,6 +47,7 @@ def run_seeded_bee_colony(dataloader, eval_cfg, cost_obj, init_routes, *,
         eval_cfg,
         OmegaConf.create(_SEEDED_INIT_CFG),
         cost_obj,
+        sum_writer=sum_writer,
         silent=silent,
         device=device,
         return_routes=True,

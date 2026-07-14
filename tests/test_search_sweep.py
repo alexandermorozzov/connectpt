@@ -33,7 +33,7 @@ def _fake_instance():
                     spec={"n_routes": 2, "min_route_len": 2, "max_route_len": 4})
 
 
-def test_beecolonysearchrun_sweep_drives_grid_and_builds_table(monkeypatch):
+def test_beecolonysearchrun_sweep_drives_grid_and_builds_table(monkeypatch, tmp_path):
     with initialize_config_dir(config_dir=str(LIB_CFG), version_base=None):
         cfg = compose(config_name="experiments/seeded/our_nbco_mumford0")
     # attach the sweep + metric selection to the run cfg (stage 3 will ship
@@ -50,7 +50,8 @@ def test_beecolonysearchrun_sweep_drives_grid_and_builds_table(monkeypatch):
             return {"counts": {}, "n_bees": 10}
 
         def run_seeded(self, init, tensors, *, eval_dims, n_iterations, alpha,
-                       adj_target, adj_weight=None, sequential=None):
+                       adj_target, adj_weight=None, sequential=None,
+                       sum_writer=None):
             seen.append((alpha, adj_target, n_iterations, adj_weight))
             metrics = {"RTT": torch.tensor([1.0 + alpha]), "ATT": 2.0,
                        "median_connectivity_weighted": torch.tensor([0.5]),
@@ -62,7 +63,7 @@ def test_beecolonysearchrun_sweep_drives_grid_and_builds_table(monkeypatch):
     monkeypatch.setattr(BeeColonySearchRun, "_load_instance",
                         lambda self: _fake_instance())
     run.runner = FakeRunner()
-    run.context = types.SimpleNamespace(output_dir=Path("."))
+    run.context = types.SimpleNamespace(output_dir=tmp_path)
 
     art = run.run()
 
@@ -84,7 +85,7 @@ def test_beecolonysearchrun_sweep_drives_grid_and_builds_table(monkeypatch):
     assert art.metadata["sweep"] is True and art.metadata["n_points"] == 2
 
 
-def test_sweep_threads_adj_weight_override(monkeypatch):
+def test_sweep_threads_adj_weight_override(monkeypatch, tmp_path):
     """cfg.sweep.adj_weight (0 = adjustment OFF, the E2 5-model ablation) is
     passed through to each seeded search."""
     with initialize_config_dir(config_dir=str(LIB_CFG), version_base=None):
@@ -100,7 +101,8 @@ def test_sweep_threads_adj_weight_override(monkeypatch):
             return {"counts": {}}
 
         def run_seeded(self, init, tensors, *, eval_dims, n_iterations, alpha,
-                       adj_target, adj_weight=None, sequential=None):
+                       adj_target, adj_weight=None, sequential=None,
+                       sum_writer=None):
             seen.append(adj_weight)
             return _routes(), None, {"RTT": torch.tensor([1.0]), "cost": 2.0}
 
@@ -109,7 +111,7 @@ def test_sweep_threads_adj_weight_override(monkeypatch):
     monkeypatch.setattr(BeeColonySearchRun, "_load_instance",
                         lambda self: _fake_instance())
     run.runner = FakeRunner()
-    run.context = types.SimpleNamespace(output_dir=Path("."))
+    run.context = types.SimpleNamespace(output_dir=tmp_path)
 
     run.run()
     assert seen == [0.0]

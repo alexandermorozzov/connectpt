@@ -55,7 +55,7 @@ class BeeColonyRunner:
 
     def run_seeded(self, init_routes, tensors, *, eval_dims, n_iterations=None,
                    alpha=None, adj_target=None, adj_weight=None, sequential=None,
-                   return_histories=False):
+                   return_histories=False, sum_writer=None):
         """Seeded improvement of an EXISTING network (init from ``init_routes``).
 
         Builds the tensor dataloader from ``tensors``, assembles the run
@@ -106,7 +106,7 @@ class BeeColonyRunner:
             dataloader, eval_cfg, self.cost_obj, init_routes, search_cfg=search_cfg,
             plan=self.plan, device=self.device,
             silent=bool(self.cfg.run.get("silent", True)),
-            return_histories=return_histories)
+            return_histories=return_histories, sum_writer=sum_writer)
         if return_histories:
             _mean, _std, unserved, metrics, routes, histories = out
             return routes, unserved, metrics, histories

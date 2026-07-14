@@ -11,10 +11,19 @@ benchmark config, cost, models (strict-loaded), policies, bee operators + plan.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from omegaconf import ListConfig
+
+_log = logging.getLogger("connectpt.sweep")
+
+
+def _fs_key(text: Any) -> str:
+    """Filesystem-safe token from a sweep point key (spaces / '=' -> '_')."""
+    return "".join(c if c.isalnum() else "_" for c in str(text))
 
 from ..core.artifacts import ArtifactStore
 from ..core.checkpoints import CheckpointStore
@@ -185,6 +194,9 @@ class BeeColonySearchRun(ExperimentRun):
         return alphas, adj_targets, n_iterations
 
     def _run_sweep(self, summary) -> SearchArtifact:
+        import pandas as pd
+        import torch
+
         inst = self._load_instance()
         alphas, adj_targets, n_iterations = self._sweep_grid()
         keep = list(self.cfg.get("metrics", []))
@@ -192,21 +204,70 @@ class BeeColonySearchRun(ExperimentRun):
         # adj_weight override (0 = adjustment penalty off, e.g. E2 5-model).
         adj_weight = self.cfg.sweep.get("adj_weight")
 
+        # Crash-safety + online visibility: each grid point is persisted the
+        # moment it finishes (partial CSV row + route dump) and, when enabled,
+        # streamed to TensorBoard per BCO iteration -- a crash never loses the
+        # points already done. Owned here (not the script) so notebooks share it.
+        out_dir = Path(self.context.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = self.cfg.run.name.replace("/", "_")
+        partial_csv = out_dir / f"{stem}_partial.csv"
+        if partial_csv.exists():
+            partial_csv.unlink()          # fresh run (resume is opt-in future work)
+        routes_dir = out_dir / "partial_routes"
+        routes_dir.mkdir(exist_ok=True)
+        logging_cfg = self.cfg.get("logging") or {}
+        tb_enabled = bool(logging_cfg.get("tensorboard", False))
+        tb_root = out_dir / "tb"
+
+        def _writer(alpha, adj_target):
+            if not tb_enabled:
+                return None
+            from torch.utils.tensorboard import SummaryWriter
+            tag = _fs_key(f"a{alpha}_t{adj_target}")
+            return SummaryWriter(str(tb_root / tag))
+
         def run_point(_label, _method, alpha, adj_target):
-            routes, _unserved, metrics = self.runner.run_seeded(
-                inst.init_routes, inst.tensors, eval_dims=inst.spec,
-                n_iterations=n_iterations, alpha=alpha, adj_target=adj_target,
-                adj_weight=adj_weight)
+            _log.info("sweep point | %s | alpha=%s adj_target=%s", _label, alpha,
+                      adj_target)
+            writer = _writer(alpha, adj_target)
+            try:
+                routes, _unserved, metrics = self.runner.run_seeded(
+                    inst.init_routes, inst.tensors, eval_dims=inst.spec,
+                    n_iterations=n_iterations, alpha=alpha, adj_target=adj_target,
+                    adj_weight=adj_weight, sum_writer=writer)
+            finally:
+                if writer is not None:
+                    writer.close()
             return routes, metrics
 
         def score(m, routes):
             row = full_metric_row(m, routes, inst.init_routes)
             return select_metrics(row, keep) if keep else row
 
-        table, routes = run_sweep_table(
-            methods=[(label, None)], alpha_grid=alphas, adj_targets=adj_targets,
-            init_routes=inst.init_routes, run_point=run_point, score=score,
-            extra=({} if n_iterations is None else {"n_iterations": n_iterations}))
+        def on_point(row, key, out_routes):
+            pd.DataFrame([row]).to_csv(
+                partial_csv, mode="a", header=not partial_csv.exists(), index=False)
+            try:
+                torch.save(out_routes, routes_dir / f"{_fs_key(key)}.pt")
+            except Exception:                       # a dump failure must not kill the run
+                _log.warning("could not dump partial routes for %s", key)
+
+        total = len(alphas) * len(adj_targets)
+        try:
+            from tqdm.auto import tqdm
+            pbar = tqdm(total=total, desc=stem, unit="pt")
+        except Exception:
+            pbar = None
+        try:
+            table, routes = run_sweep_table(
+                methods=[(label, None)], alpha_grid=alphas, adj_targets=adj_targets,
+                init_routes=inst.init_routes, run_point=run_point, score=score,
+                extra=({} if n_iterations is None else {"n_iterations": n_iterations}),
+                on_point=on_point, progress=pbar)
+        finally:
+            if pbar is not None:
+                pbar.close()
 
         return SearchArtifact(
             run_name=self.cfg.run.name, output_dir=self.context.output_dir,

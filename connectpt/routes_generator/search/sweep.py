@@ -28,12 +28,19 @@ def run_sweep_table(
     run_point: Callable[[str, Any, Any, Any], tuple[Any, Any]],
     score: Callable[[Any, Any], dict],
     extra: dict | None = None,
+    on_point: Callable[[dict, str, Any], None] | None = None,
+    progress: Any | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """Run the (method x alpha x adj_target) grid into a table + routes map.
 
     Returns ``(DataFrame, routes)`` where ``routes`` maps ``"Initial"`` and one
     ``"<label> a=<alpha> t=<adj_target>"`` key per point to its route set, and
     each table row is ``score(...) + {method, alpha, adj_target, **extra}``.
+
+    ``on_point(row, key, out_routes)`` is called as SOON as each grid point
+    finishes -- the seam a long run uses to persist that point incrementally
+    (partial CSV + route dump) so a later crash never loses completed work.
+    ``progress`` (a tqdm-like handle) is ``.update(1)``'d per point.
     """
     extra = dict(extra or {})
     rows, routes = [], {"Initial": init_routes}
@@ -44,5 +51,10 @@ def run_sweep_table(
                 row = dict(score(m, out_routes))
                 row.update(method=label, alpha=alpha, adj_target=adj_target, **extra)
                 rows.append(row)
-                routes[f"{label} a={alpha} t={adj_target}"] = out_routes
+                key = f"{label} a={alpha} t={adj_target}"
+                routes[key] = out_routes
+                if on_point is not None:
+                    on_point(row, key, out_routes)
+                if progress is not None:
+                    progress.update(1)
     return pd.DataFrame(rows), routes
