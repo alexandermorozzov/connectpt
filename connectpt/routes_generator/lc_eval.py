@@ -164,7 +164,7 @@ def run_lc_batch(cfg, tensors_list, *, run_name_prefix="lc_", n_samples=None,
 
 
 def build_rpc_routes(spec, tensors, run_name=None, n_samples=1):
-    """Generate benchmark initial routes with RPC/pi_random (one BENCHMARK_SPECS row)."""
+    """Generate benchmark initial routes with RPC/pi_random (one benchmark_spec)."""
     run_name = run_name or f"rpc_init_{spec['city']}"
     cfg = build_rpc_cfg(run_name=run_name, n_routes=spec["n_routes"],
                         min_route_len=spec["min_route_len"],

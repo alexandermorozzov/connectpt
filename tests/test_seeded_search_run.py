@@ -24,7 +24,7 @@ if str(ROUTE_EX) not in sys.path:
 from connectpt.routes_generator.core.paths import (
     CONSTRUCTION_MODEL_WEIGHTS_PATH, EDIT_MODEL_WEIGHTS_DIR)
 from connectpt.routes_generator.data.loaders import (
-    BENCHMARK_SPECS, load_benchmark_tensors)
+    benchmark_spec, load_benchmark_tensors)
 from connectpt.routes_generator.search.runs import BeeColonySearchRun
 from connectpt.routes_generator.torch_utils import get_batch_tensor_from_routes
 
@@ -59,7 +59,7 @@ def _init_routes(spec, tensors):
 
 
 def _run_seeded(config_name):
-    spec = next(s for s in BENCHMARK_SPECS if s["city"] == "Mumford0")
+    spec = benchmark_spec("Mumford0")
     tensors = load_benchmark_tensors("Mumford0")
     R = _init_routes(spec, tensors)
     eval_dims = {"n_routes": spec["n_routes"], "min_route_len": spec["min_route_len"],

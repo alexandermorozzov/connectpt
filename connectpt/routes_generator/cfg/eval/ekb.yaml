@@ -1,0 +1,14 @@
+# EKB (Ekaterinburg) case-study dataset -- authoritative spec.
+#
+# EKBDataSource.load() reads its route-count / length spec from HERE (via
+# eval_spec("ekb")). The values must equal what the seed routes actually produce
+# (datasets/EKB/EkbRoutes.pkl -- n_routes = # seed routes, min = shortest seed
+# route, max = seed route tensor width); tests/test_eval_registry.py guards this
+# against drift (compares to data/loaders.py::ekb_spec).
+n_routes: 67
+min_route_len: 11
+max_route_len: 54
+source:
+  type: ekb
+  data_dir: datasets/EKB          # EkbCoords / EkbDemand / EkbRoutes / EkbTravelTimes
+  city: EKB

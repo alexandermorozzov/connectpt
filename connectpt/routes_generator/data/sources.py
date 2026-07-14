@@ -12,8 +12,8 @@ from typing import Any
 import torch
 
 from .init import resolve_init_routes
-from .loaders import (benchmark_spec, ekb_spec, load_benchmark_tensors,
-                      load_ekb_routes, load_ekb_tensors, macsa_eval_bounds)
+from .loaders import (benchmark_spec, eval_spec, load_benchmark_tensors,
+                      load_ekb_routes, load_ekb_tensors)
 from .routes import as_route_tensor
 
 
@@ -78,13 +78,11 @@ class MACSADataSource(DataSource):
         from ..core.paths import MACSA_DATA_DIR
 
         sc = load_macsa_scenario(MACSA_DATA_DIR / self.scenario)
-        n_routes, min_len, max_len = macsa_eval_bounds(sc)
         tensors = sc["tensors"]
         return Instance(
             label=f"MACSA/{self.scenario}", tensors=tensors,
             init_routes=as_route_tensor(sc["routes"]),
-            spec={"n_routes": n_routes, "min_route_len": min_len,
-                  "max_route_len": max_len},
+            spec=eval_spec(f"macsa_{self.scenario}"),
             coords=tensors["node_locs"], street_adj=tensors["street_adj"])
 
 
@@ -96,7 +94,7 @@ class EKBDataSource(DataSource):
         routes = load_ekb_routes()
         return Instance(
             label="EKB", tensors=tensors, init_routes=as_route_tensor(routes),
-            spec=ekb_spec(routes), coords=tensors["node_locs"],
+            spec={"city": "EKB", **eval_spec("ekb")}, coords=tensors["node_locs"],
             street_adj=tensors["street_adj"], meta={"crs": "gis"})
 
 

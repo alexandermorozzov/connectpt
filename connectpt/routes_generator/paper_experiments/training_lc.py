@@ -647,8 +647,7 @@ def plot_balanced_examples(visual_examples, graphs, tiers):
     plt.show(); plt.close(fig)
 
 
-def post_training_convergence(cfg, *, best_model_path, benchmark_specs,
-                              load_benchmark_graph):
+def post_training_convergence(cfg, *, best_model_path, load_benchmark_graph):
     """Two 5-model BCO variants (RPC+trim/extend, RPC+type2) on one benchmark
     city, driven by the just-trained edit checkpoint. Config-driven: city/iters/
     alpha from cfg.report.post_train. Returns ``(rows_df, convergence)``."""
@@ -659,6 +658,7 @@ def post_training_convergence(cfg, *, best_model_path, benchmark_specs,
     from omegaconf import OmegaConf
 
     from connectpt.routes_generator import load_experiment
+    from connectpt.routes_generator.data.loaders import benchmark_spec
     from connectpt.routes_generator.search import BeeColonySearchRun
 
     city = str(cfg.report.post_train.city)
@@ -666,17 +666,20 @@ def post_training_convergence(cfg, *, best_model_path, benchmark_specs,
     alpha = float(cfg.report.post_train.alpha)
     print(f"[post-train] edit bee model <- {best_model_path.name}")
 
-    spec = next(s for s in benchmark_specs if s["city"] == city)
+    spec = benchmark_spec(city)
     tensors, init = load_benchmark_graph(spec)
 
-    # Config-first, C-native: the two ablation bee sets live in declarative configs;
-    # the RPC + trim/extend edit bees use the just-trained checkpoint (set after
-    # compose to avoid hydra-override parsing of a Windows path).
-    variants = [("RPC + trim/extend", "e2/5model/mumford1/rpc_trim_extend", True),
-                ("RPC + type2", "e2/5model/mumford1/rpc_type2", False)]
+    # Config-first, C-native: the two ablation methods are group choices on the
+    # Table 5 artifact config (bee_sets + models), picked in code -- no per-method
+    # leaf files. The RPC + trim/extend edit bees use the just-trained checkpoint
+    # (set after compose to avoid hydra-override parsing of a Windows path).
+    variants = [("RPC + trim/extend", "rpc_trim_extend", "edit_only_seeded", True),
+                ("RPC + type2", "rpc_type2", "no_neural_models", False)]
     conv, rows = {}, []
-    for label, cfg_name, needs_edit in variants:
-        run_cfg = load_experiment(cfg_name, overrides=[f"search.n_iterations={int(iters)}"])
+    for label, bee_sets, models, needs_edit in variants:
+        run_cfg = load_experiment("table5_fig5_5model", overrides=[
+            f"search/bee_sets={bee_sets}", f"search/models={models}",
+            f"search.n_iterations={int(iters)}"])
         if needs_edit:
             OmegaConf.set_struct(run_cfg, False)
             run_cfg.models.edit.checkpoint_path = str(best_model_path)

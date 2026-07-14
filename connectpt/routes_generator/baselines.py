@@ -25,7 +25,7 @@ from . import heuristics as _hs
 from . import utils as lrnu
 from .citygraph_dataset import get_dataset_from_config
 from .core.paths import CFG_DIR
-from .data.loaders import BENCHMARK_SPECS, load_benchmark_tensors  # noqa: F401
+from .data.loaders import load_benchmark_tensors  # noqa: F401
 from .data.routes import as_route_tensor
 from .evaluation.cost_breakdown import add_cost_breakdown_to_metrics
 from .genetic_algorithm import run as genetic_algorithm

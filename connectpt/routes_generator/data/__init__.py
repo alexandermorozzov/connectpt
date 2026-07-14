@@ -6,7 +6,7 @@ experiment init-networks. Migrated out of the notebook-side ``eval_lib`` so the
 library owns data loading -- the notebook only names a source in its config.
 """
 from .routes import as_route_tensor
-from .loaders import (BENCHMARK_SPECS, benchmark_spec, ekb_spec,
+from .loaders import (benchmark_spec, eval_spec, ekb_spec,
                       load_benchmark_tensors, load_ekb_routes, load_ekb_tensors,
                       macsa_eval_bounds)
 from .init import resolve_init_routes
@@ -15,8 +15,8 @@ from .sources import (DataSource, Instance, BenchmarkDataSource, EKBDataSource,
 
 __all__ = [
     "as_route_tensor",
-    "BENCHMARK_SPECS",
     "benchmark_spec",
+    "eval_spec",
     "ekb_spec",
     "load_benchmark_tensors",
     "load_ekb_routes",

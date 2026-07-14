@@ -11,9 +11,15 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from omegaconf import OmegaConf
 
 from ..core.paths import BENCHMARK_DIR, DATASETS_DIR
 from .routes import as_route_tensor
+
+# Benchmark instance specs (route counts / length bounds) live ONLY in the YAML
+# group cfg/eval/<city>.yaml -- the single source of truth. No duplicated Python
+# table: benchmark_spec() reads the YAML.
+EVAL_DIR = Path(__file__).resolve().parents[1] / "cfg" / "eval"
 
 # Default route-length bounds for the geometric case studies (EKB / MACSA),
 # where the seed network -- not a benchmark spec -- sets the counts.
@@ -24,19 +30,20 @@ EKB_DATA_DIR = DATASETS_DIR / "EKB"
 EKB_COORD_CRS = "EPSG:32641"  # UTM zone 41N: Ekaterinburg -> WGS84
 EKB_CITY_NAME = "EKB"
 
-# Standard benchmark instances (route counts / length bounds from the litterature).
-BENCHMARK_SPECS = [
-    {"city": "Mandl",    "n_routes": 6,  "min_route_len": 2,  "max_route_len": 8},
-    {"city": "Mumford0", "n_routes": 12, "min_route_len": 2,  "max_route_len": 15},
-    {"city": "Mumford1", "n_routes": 15, "min_route_len": 10, "max_route_len": 30},
-    {"city": "Mumford2", "n_routes": 56, "min_route_len": 10, "max_route_len": 22},
-    {"city": "Mumford3", "n_routes": 60, "min_route_len": 12, "max_route_len": 25},
-]
+def eval_spec(name: str) -> dict:
+    """Route-count / length bounds for a dataset, from its single YAML source
+    ``cfg/eval/<name>.yaml`` -- the registry every data source reads its spec
+    from (benchmarks by city, EKB / MACSA by dataset name)."""
+    cfg = OmegaConf.load(EVAL_DIR / f"{name}.yaml")
+    return {"n_routes": int(cfg.n_routes),
+            "min_route_len": int(cfg.min_route_len),
+            "max_route_len": int(cfg.max_route_len)}
 
 
 def benchmark_spec(city: str) -> dict:
-    """Route-count / length bounds for a benchmark city."""
-    return next(s for s in BENCHMARK_SPECS if s["city"] == city)
+    """Route-count / length bounds for a benchmark city (``cfg/eval/<city>.yaml``,
+    route counts / length bounds from the literature)."""
+    return {"city": city, **eval_spec(city.lower())}
 
 
 def load_benchmark_tensors(city: str) -> dict:
