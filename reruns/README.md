@@ -53,12 +53,12 @@ SSH; печатают PID, путь к логу, TB-подсказку и `kill`
 ### `artifacts/reruns/` — делверблы (для таблиц и рисунков)
 | Файл | Что |
 |---|---|
-| `<stem>.csv` | таблица метрик: RTT, WMC, ATT, adj_vs_seed, redun%, cost по α (Table 3 — отдельный CSV на город) |
-| `<stem>_pareto.png` | Парето-фигура (Fig 4 / Fig 5); EKB — маршруты на гео-подложке |
-| `<stem>_routes.pt` | дамп маршрутов лучшего решения (одиночные прогоны: Table 4, EKB) |
-| `<stem>_run.log` | INFO-лог прогона |
+| `<exp_name>.csv` | таблица метрик: RTT, WMC, ATT, adj_vs_seed, redun%, cost по α (Table 3 — отдельный CSV на город) |
+| `<exp_name>_pareto.png` | Парето-фигура (Fig 4 / Fig 5); EKB — маршруты на гео-подложке |
+| `<exp_name>_routes.pt` | дамп маршрутов лучшего решения (одиночные прогоны: Table 4, EKB) |
+| `<exp_name>_run.log` | INFO-лог прогона |
 
-Стемы: Table 3 — `table3_nbco_vs_our_<city>`; Table 4 —
+Имена (`exp_name`): Table 3 — `table3_nbco_vs_our_<city>`; Table 4 —
 `table4_fig4_our_pareto_mumford0`; Table 5 — `table5_fig5_5model_mumford1`;
 EKB — `ekb_our_nbco`.
 
@@ -75,7 +75,7 @@ EKB — `ekb_our_nbco`.
 ### `artifacts/cli_logs/rerun_<exp>.log`
 Лог запуска команды. Linux — полный (stdout+stderr, из `nohup`); Windows —
 stderr/tqdm (stdout идёт в консоль). Полный INFO-лог всегда есть и в
-`artifacts/reruns/<stem>_run.log`.
+`artifacts/reruns/<exp_name>_run.log`.
 
 ## 4. Мониторинг онлайн
 
