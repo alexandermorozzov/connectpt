@@ -213,7 +213,7 @@ def rewards_to_returns(rewards, discount_rate=1):
 def test_method(method_fn, dataloader, eval_cfg, init_cfg, cost_obj,
                 sum_writer=None, silent=False, return_routes=False,
                 device=None, iter_num=0, routes_tensor=None,
-                return_histories=False,
+                return_histories=False, log_eval_summary=True,
                 *method_args, **method_kwargs):
     if method_fn is not None:
         log.debug(f"evaluating {method_fn.__name__} on dataset")
@@ -293,8 +293,12 @@ def test_method(method_fn, dataloader, eval_cfg, init_cfg, cost_obj,
     # compute some aggregate statistics
     final_costs = torch.cat(final_costs)
     mean_metrics = {key: val.mean() for key, val in all_metrics.items()}
-    if sum_writer is not None:
-        # log the aggregate statistics to tensorboard
+    if sum_writer is not None and log_eval_summary:
+        # One-shot end-of-run aggregate (single TB point at ``iter_num``). Wanted
+        # for periodic training/validation (repeated iter_num -> a val curve),
+        # but redundant with the sweep CSV for a one-off BCO run -- the sweep
+        # callers pass ``log_eval_summary=False`` so TB keeps only the per-BCO-
+        # iteration ``best *`` curves (bee_colony.py) and skips these bare points.
         sum_writer.add_scalar("val cost", final_costs.mean(), iter_num)
         for name, stat_value in mean_metrics.items():
             sum_writer.add_scalar(name, stat_value, iter_num)

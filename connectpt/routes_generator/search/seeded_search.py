@@ -54,5 +54,8 @@ def run_seeded_bee_colony(dataloader, eval_cfg, cost_obj, init_routes, *,
         return_histories=return_histories,
         routes_tensor=init_routes,
         iteration_callback=iteration_callback,
+        # keep only the per-iteration ``best *`` curves in TB; the one-shot
+        # aggregate is redundant with the sweep CSV (single point clutter).
+        log_eval_summary=False,
         **bco_kwargs,
     )
