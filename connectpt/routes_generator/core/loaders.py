@@ -62,8 +62,18 @@ def _retarget_city(cfg, city: str) -> None:
     substituting a city nests the outputs under ``<name>/<city>`` so per-city
     runs never clobber each other. Idempotent when the name already ends in the
     city segment.
+
+    Benchmark configs inherit the Mandl data group from ``bee_colony_base``.
+    When retargeting to another benchmark, refresh the route-count / route-len
+    bounds from the eval registry so the inherited Mandl bounds do not leak.
     """
     cfg.data.city = city
+    if cfg.data.get("source") == "benchmark":
+        from ..data.loaders import benchmark_spec
+        spec = benchmark_spec(city)
+        cfg.data.n_routes = int(spec["n_routes"])
+        cfg.data.min_route_len = int(spec["min_route_len"])
+        cfg.data.max_route_len = int(spec["max_route_len"])
     base = str(cfg.run.name)
     seg = city.lower()
     if not base.endswith(f"/{seg}") and not base.endswith(seg):
