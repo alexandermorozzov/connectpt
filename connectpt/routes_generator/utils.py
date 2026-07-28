@@ -48,6 +48,8 @@ def build_model_from_cfg(model_cfg, exp_cfg):
         gen_class = models.TrimPathCombiningRouteGenerator
     elif gen_type == "RandomPathCombiningRouteGenerator":
         gen_class = models.RandomPathCombiningRouteGenerator
+    elif gen_type == "RandomTrimExtendRouteGenerator":
+        gen_class = models.RandomTrimExtendRouteGenerator
     elif gen_type == "UnbiasedPathCombiner":
         gen_class = models.UnbiasedPathCombiner
     elif gen_type == "NodeWalker":
@@ -162,8 +164,10 @@ def process_standard_experiment_cfg(cfg, run_name_prefix='',
         if 'weights' in cfg.model:
             model.load_state_dict(torch.load(cfg.model.weights,
                                              map_location=device))
-        elif weights_required and cfg.model.route_generator.type != \
-                'RandomPathCombiningRouteGenerator':
+        elif weights_required and cfg.model.route_generator.type not in {
+                'RandomPathCombiningRouteGenerator',
+                'RandomTrimExtendRouteGenerator',
+        }:
             raise ValueError("model weights are required but not provided")
     else:
         model = None

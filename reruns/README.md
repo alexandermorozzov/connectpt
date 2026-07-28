@@ -1,4 +1,4 @@
-# Перезапуск экспериментов статьи (Table 3/4/5 + EKB)
+# Перезапуск экспериментов статьи (Table 3/4/5 + абляция + EKB)
 
 Тонкие команды поверх CLI-скриптов (`scripts/run_*.py`). Гоняют **те же
 декларативные конфиги, что и ноутбуки 03/04**, но пишут все результаты в
@@ -12,6 +12,8 @@
 | **Table 3** — NBCO vs Improved NBCO | `reruns/run_table3.sh` | `.\reruns\run_table3.ps1` |
 | **Table 4 / Fig 4** — adj-target × α, Mumford0 | `reruns/run_table4.sh` | `.\reruns\run_table4.ps1` |
 | **Table 5 / Fig 5** — 5 комбинаций пчёл, Mumford1 | `reruns/run_table5.sh` | `.\reruns\run_table5.ps1` |
+| **Table 5 baselines** — SA/GA/HH с LC-init | `reruns/run_table5_baselines.sh` | `.\reruns\run_table5_baselines.ps1` |
+| **Абляция edit-эвристики** — EA / RSL-EA / NEA-Edit | `reruns/run_edit_operator_ablation.sh` | `.\reruns\run_edit_operator_ablation.ps1` |
 | **EKB** — кейс Екатеринбурга | `reruns/run_ekb.sh` | `.\reruns\run_ekb.ps1` |
 
 По умолчанию — **полный бюджет** статьи. Результаты → `artifacts/reruns/`.
@@ -23,6 +25,7 @@
 | Table 3 | `tab:nbco-vs-our-only-with-init` | Mandl, Mumford0-3 | 0, 0.5, 1 | 0.3 | 200 |
 | Table 4 / Fig 4 | `tab:e2c_rtt_median_wmc_mumford0` | Mumford0 | 0…1 (шаг .25) | 0.2…1.0 (шаг .2) | 200 |
 | Table 5 / Fig 5 | `tab:e2-5model-mumford1` | Mumford1 | 0…1 (шаг .25) | — (adj off) | 200 |
+| Edit-оператор | — | Mandl, Mumford0-3 | 0…1 (шаг .1) | — (adj off) | 400 |
 | EKB | `tab:ekb-alpha-sweep` | EKB (703 узла) | 0, 0.5, 1 | 0.2 | 50 |
 
 Table 3 — единственный по нескольким городам (скрипт гоняет `suite.cities`
@@ -38,15 +41,32 @@ Table 3 — единственный по нескольким городам (�
 ```bash
 reruns/run_table3.sh              # full
 reruns/run_table3.sh smoke        # smoke
+reruns/run_table5.sh full --cities Mandl Mumford0 Mumford1 Mumford2 Mumford3
+reruns/run_table5_baselines.sh full                                  # eval20k budget
+reruns/run_table5_baselines.sh full --budget-mode paper40k           # Holliday EA budget
+reruns/run_table5_baselines.sh full --budget-mode scaled             # old per-city budgets
+reruns/run_edit_operator_ablation.sh                                 # все benchmark-графы
+reruns/run_edit_operator_ablation.sh full --cities Mumford1          # один граф
 ```
 ```powershell
 .\reruns\run_table3.ps1                 # full
 .\reruns\run_table3.ps1 -Profile smoke  # smoke
+.\reruns\run_table5.ps1 -Profile full -Cities Mandl,Mumford0,Mumford1,Mumford2,Mumford3
+.\reruns\run_table5_baselines.ps1 -Profile full                                  # eval20k budget
+.\reruns\run_table5_baselines.ps1 -Profile full -BudgetMode paper40k             # Holliday EA budget
+.\reruns\run_table5_baselines.ps1 -Profile full -BudgetMode scaled               # old per-city budgets
+.\reruns\run_edit_operator_ablation.ps1                                           # все benchmark-графы
+.\reruns\run_edit_operator_ablation.ps1 -Profile full -Cities Mumford1            # один граф
 ```
 
 Linux-скрипты запускают прогон **detached** (`setsid nohup`) — переживает обрыв
 SSH; печатают PID, путь к логу, TB-подсказку и `kill`-команду. Windows-скрипты
 стримят вывод в консоль и пишут лог в файл.
+
+Для Table 5 baselines дефолтный full-бюджет — `eval20k`: SA/HH получают
+`n_iterations=20000`, GA получает `population_size=10`, `n_iterations=1000`.
+Это примерно соответствует Table 5 BCO: `200 * 10 * 5 * 2 = 20000`
+candidate evaluations.
 
 ## 3. Куда что пишется
 

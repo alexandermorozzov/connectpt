@@ -2921,6 +2921,24 @@ class RandomPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             self.halt_scorer = RouteUniformScorer()
 
 
+class RandomTrimExtendRouteGenerator(TrimPathCombiningRouteGenerator):
+    """Trim/extend edit generator with uniform scores for all valid actions."""
+
+    def __init__(self, halt_prob_is_route_time_weight=False,
+                 *args, **kwargs):
+        super().__init__(n_nodepair_layers=0, *args, **kwargs)
+        # Keep the same valid-action masks as the trim/extend model, but remove
+        # learned scoring. BCO's outer greedy acceptance still decides whether
+        # the sampled edit survives.
+        self.nodepair_scorer = DummyMLP(1, 0.0)
+        self.path_scorer = DummyMLP(1, 1.0)
+        self.trim_scorer = DummyMLP(1, 1.0)
+        if halt_prob_is_route_time_weight:
+            self.halt_scorer = RouteAlphaScorer()
+        else:
+            self.halt_scorer = RouteUniformScorer()
+
+
 class UnbiasedPathCombiner(RouteGeneratorBase):
     def __init__(self, *args, n_heads=1, n_encoder_layers=1, 
                  n_selection_attn_layers=1, **kwargs):

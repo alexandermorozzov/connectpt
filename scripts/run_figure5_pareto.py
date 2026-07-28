@@ -1,7 +1,8 @@
 """Figure 5 / Table 5 runner -- CLI, no Jupyter.
 
-Re-runs the five operator combinations on Mumford1 (adjustment penalty off) and
-produces Table 5 + the Figure 5 Pareto front, on the SAME library path the
+Re-runs the five operator combinations on the requested benchmark city/cities
+(Mumford1 by default, adjustment penalty off) and produces Table 5 + the Figure
+5 Pareto front, on the SAME library path the
 notebook uses (``paper_runs.run_batch`` over the ``methods:`` list in
 ``experiments/table5_fig5_5model``). The combined metrics table + route dumps are
 persisted by the library; each method x alpha point is streamed to TensorBoard
@@ -10,6 +11,7 @@ points. This script only adds logging + writes the Pareto figure to disk.
 
 Windows (PowerShell):
     .venv\\Scripts\\python.exe scripts\\run_figure5_pareto.py --profile full
+    .venv\\Scripts\\python.exe scripts\\run_figure5_pareto.py --profile full --cities Mandl Mumford0 Mumford1 Mumford2 Mumford3
     .venv\\Scripts\\python.exe scripts\\run_figure5_pareto.py --profile smoke
 
 Watch it online:  tensorboard --logdir artifacts/runs/table5_fig5_5model
@@ -41,26 +43,39 @@ def main() -> None:
                         help="full-profile suite name (use suite_rerun to write artifacts/reruns)")
     parser.add_argument("--suite-smoke", default="suite_smoke",
                         help="smoke-profile suite name")
+    parser.add_argument("--cities", nargs="*", default=None,
+                        help="benchmark cities to run (default: config city)")
+    parser.add_argument("--n-iterations", type=int, default=None,
+                        help="override sweep.n_iterations (else the YAML value, 200)")
     args = parser.parse_args()
 
     suite = load_suite(args.suite_smoke if args.profile == "smoke" else args.suite)
-    stem = load_suite(CONFIG).output.paper_stem
+    cfg = load_suite(CONFIG)
+    base_stem = cfg.output.paper_stem
+    cities = args.cities or [str(cfg.data.city)]
     prefix = str(suite.output_prefix or "")
     out_dir = paper_dir(suite) or Path("artifacts/paper_results")
+    log_stem = (f"{base_stem}_{cities[0].lower()}" if len(cities) == 1
+                else f"{base_stem}_all_benchmarks")
 
-    log = setup_logging(out_dir / f"{prefix}{stem}_run.log")
-    log.info("Figure 5 / Table 5 | profile=%s | config=%s | stem=%s", args.profile,
-             CONFIG, stem)
+    log = setup_logging(out_dir / f"{prefix}{log_stem}_run.log")
+    log.info("Figure 5 / Table 5 | profile=%s | config=%s | cities=%s",
+             args.profile, CONFIG, cities)
 
-    run = run_batch(CONFIG, suite)
+    params = {} if args.n_iterations is None else {"n_iterations": args.n_iterations}
+    for city in cities:
+        stem = f"{base_stem}_{city.lower()}"
+        log.info("--- Table 5 city=%s ---", city)
+        run = run_batch(CONFIG, suite, city=city, **params)
 
-    figs = save_figures(run.figures, out_dir, stem, prefix=prefix)
-    log.info("Table 5 (combined metrics) -> %s (stem %r, prefix %r)",
-             out_dir, stem, prefix)
-    log.info("Figure 5 saved: %s", [str(p) for p in figs])
+        figs = save_figures(run.figures, out_dir, stem, prefix=prefix)
+        log.info("Table 5 (combined metrics) -> %s (stem %r, prefix %r)",
+                 out_dir, stem, prefix)
+        log.info("Figure 5 saved: %s", [str(p) for p in figs])
+        log.info("Table 5 rows:\n%s",
+                 run.table.to_string() if run.table is not None else "(none)")
     log.info("TensorBoard: tensorboard --logdir %s",
              Path("artifacts/runs") / CONFIG)
-    log.info("Table 5 rows:\n%s", run.table.to_string() if run.table is not None else "(none)")
 
 
 if __name__ == "__main__":

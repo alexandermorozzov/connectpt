@@ -24,6 +24,7 @@ MODEL_CLASS_ROLE: dict[str, str] = {
     "PathCombiningRouteGenerator": "construction",
     "RandomPathCombiningRouteGenerator": "construction",
     "TrimPathCombiningRouteGenerator": "edit",
+    "RandomTrimExtendRouteGenerator": "edit",
 }
 
 ALL_ACTIONS: set[str] = set().union(*ROLE_CAPABILITIES.values())

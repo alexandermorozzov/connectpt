@@ -118,6 +118,7 @@ from .models import (
     PathCombiningRouteGenerator,
     TrimPathCombiningRouteGenerator,
     RandomPathCombiningRouteGenerator,
+    RandomTrimExtendRouteGenerator,
     UnbiasedPathCombiner,
     NodeWalker,
     GraphEncoder,

@@ -97,7 +97,8 @@ def select_metrics(row: dict, keep) -> dict:
 
 
 def score_fixed_routes(routes, tensors, spec, *, alpha=None, adj_target=None,
-                       adj_objective=None, seed_routes=None, device=None):
+                       adj_weight=None, adj_objective=None, seed_routes=None,
+                       device=None):
     """Score a FIXED route set under the unified objective -- no search at all.
 
     The atomic evaluation every "compare against an external network" experiment
@@ -108,10 +109,10 @@ def score_fixed_routes(routes, tensors, spec, *, alpha=None, adj_target=None,
 
     ``alpha`` sets the RTT/WMC trade-off (``route_time_weight=alpha``,
     ``median_connectivity_weight=1-alpha``). The adjustment penalty is applied
-    only when both ``adj_target`` and ``seed_routes`` are given (weight/gap/mode
-    come from the objective YAML; ``adj_objective`` optionally overrides the
-    two-sided default) -- otherwise it is off, matching how the paper scores
-    Initial rows. Runs on CPU unless ``device`` says otherwise.
+    only when both ``adj_target`` and ``seed_routes`` are given. ``adj_weight``
+    optionally overrides the objective's configured weight (including zero);
+    ``adj_objective`` optionally overrides the two-sided default. Otherwise the
+    adjustment term is off. Runs on CPU unless ``device`` says otherwise.
     """
     from omegaconf import OmegaConf
     from torch_geometric.loader import DataLoader
@@ -128,6 +129,8 @@ def score_fixed_routes(routes, tensors, spec, *, alpha=None, adj_target=None,
         cost_obj.median_connectivity_weight = float(1.0 - float(alpha))
     if adj_target is not None and seed_routes is not None:
         cost_obj.adjustment_degree_target = float(adj_target)
+        if adj_weight is not None:
+            cost_obj.adjustment_degree_weight = float(adj_weight)
         if adj_objective is not None:
             cost_obj.adjustment_degree_objective = str(adj_objective)
         seed = as_route_tensor(seed_routes)

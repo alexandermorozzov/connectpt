@@ -77,10 +77,13 @@ class BeeColonySearchRun(ExperimentRun):
             if m_cfg is None or not m_cfg.get("enabled", False):
                 continue
             model = self._ROLE_BUILDER[role](m_cfg.config)
-            CheckpointStore.load_model_weights(
-                model, resolve_under_root(m_cfg.checkpoint_path),
-                strict=bool(m_cfg.get("strict_load", True)), map_location=device,
-            )
+            checkpoint_path = m_cfg.get("checkpoint_path")
+            if checkpoint_path is not None:
+                CheckpointStore.load_model_weights(
+                    model, resolve_under_root(checkpoint_path),
+                    strict=bool(m_cfg.get("strict_load", True)),
+                    map_location=device,
+                )
             model.to(device)
             self.models[role] = model
 

@@ -1,0 +1,18 @@
+# @package _global_
+# Random trim/extend edit generator only; rebuild bees are heuristic.
+models:
+  construction:
+    enabled: false
+    config: construction
+    checkpoint_path: null
+    strict_load: true
+  edit:
+    enabled: true
+    config: random_trim_extend
+    checkpoint_path: null
+    strict_load: false
+
+policies:
+  edit:
+    model_ref: edit
+    adapter: edit_search_policy

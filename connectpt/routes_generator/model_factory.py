@@ -20,9 +20,14 @@ from .utils import build_model_from_cfg
 
 CFG_DIR = Path(__file__).resolve().parent / "cfg"
 
-_ROLE_CLASS = {
-    "construction": "PathCombiningRouteGenerator",
-    "edit": "TrimPathCombiningRouteGenerator",
+_ROLE_CLASSES = {
+    "construction": {
+        "PathCombiningRouteGenerator",
+    },
+    "edit": {
+        "TrimPathCombiningRouteGenerator",
+        "RandomTrimExtendRouteGenerator",
+    },
 }
 
 
@@ -41,11 +46,11 @@ class RouteModelFactory:
 
     @staticmethod
     def _require_role(model, role: str):
-        expected = _ROLE_CLASS[role]
+        expected = _ROLE_CLASSES[role]
         actual = type(model).__name__
-        if actual != expected:
+        if actual not in expected:
             raise TypeError(
-                f"expected a {role} model ({expected}), got {actual}; check the model config"
+                f"expected a {role} model ({sorted(expected)}), got {actual}; check the model config"
             )
         return model
 

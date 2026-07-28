@@ -1,7 +1,8 @@
 # @package _global_
-# Paper "classic BCO" (heuristic, no neural model): random path-combiner rebuild
-# (type-1 heuristic) + local-endpoint edit (type-2, shorten/lengthen). Declarative
-# equivalent of flat nbco_variants/classic_bco_* (n_type1=5, n_type2=5).
+# Paper "classic BCO" (heuristic, no neural model): demand-guided shortest-path
+# rebuild (type-1 heuristic) + local-endpoint edit (type-2, shorten/lengthen).
+# Declarative equivalent of flat nbco_variants/classic_bco_* (n_type1=5,
+# n_type2=5).
 # (Distinct from bee_sets/classic_bco.yaml, which is the 20-bee bee_type_comparison
 # variant.)
 bees:

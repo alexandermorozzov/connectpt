@@ -120,6 +120,10 @@ def run_batch(name: str, suite, *, kind: str | None = None,
     cfg = load_suite(name)
     batch = ExperimentBatch(cfg, base_name=name).run(
         city=city, smoke=_smoke_flag(suite, smoke), **params)
+    if batch.table is not None and bool(
+            cfg.batch.get("include_initial_metrics", False)):
+        batch.table = _prepend_initial_metrics(
+            batch.table, batch.artifacts, cfg, runtime_params=params)
     stem = cfg.output.paper_stem
     if city is not None:
         stem = f"{stem}_{city.lower()}"
@@ -130,3 +134,64 @@ def run_batch(name: str, suite, *, kind: str | None = None,
                          prefix=prefix, out_dir=out_dir)
     report = render_report(batch, kind=kind)
     return PaperRun(artifact=batch, table=report.table, figures=report.figures)
+
+
+def _prepend_initial_metrics(table, artifacts, cfg, *, runtime_params=None):
+    """Prepend one Initial row per unique sweep point.
+
+    Method artifacts all share the same seeded benchmark network, so scoring
+    Initial inside every method run would duplicate it. The paper batch owns
+    this comparison row and evaluates it once for each alpha/adjustment point
+    using the same objective settings as the searches.
+    """
+    import pandas as pd
+
+    from ..evaluation import full_metric_row, score_fixed_routes, select_metrics
+
+    artifact = next(
+        (art for art in artifacts if getattr(art, "instance", None) is not None),
+        None,
+    )
+    if artifact is None:
+        raise ValueError(
+            "batch.include_initial_metrics requires a sweep artifact instance")
+    instance = artifact.instance
+    point_columns = [
+        name for name in ("alpha", "adj_target") if name in table.columns
+    ]
+    points = (
+        table[point_columns].drop_duplicates().to_dict("records")
+        if point_columns else [{}]
+    )
+
+    runtime_params = dict(runtime_params or {})
+    sweep = cfg.get("sweep") or {}
+    adj_weight = runtime_params.get("adj_weight", sweep.get("adj_weight"))
+    keep = list(cfg.get("metrics", []))
+    rows = []
+    for point in points:
+        alpha = point.get("alpha")
+        adj_target = point.get("adj_target")
+        alpha = None if pd.isna(alpha) else alpha
+        adj_target = None if pd.isna(adj_target) else adj_target
+        metrics, scored = score_fixed_routes(
+            instance.init_routes,
+            instance.tensors,
+            instance.spec,
+            alpha=alpha,
+            adj_target=adj_target,
+            adj_weight=adj_weight,
+            seed_routes=instance.init_routes,
+        )
+        row = full_metric_row(metrics, scored, instance.init_routes)
+        if keep:
+            row = select_metrics(row, keep)
+        row.update(method="Initial", **point)
+        if "run" in table.columns:
+            row["run"] = "Initial"
+        if "n_iterations" in table.columns:
+            row["n_iterations"] = 0
+        rows.append(row)
+
+    initial = pd.DataFrame(rows).reindex(columns=table.columns)
+    return pd.concat([initial, table], ignore_index=True)
