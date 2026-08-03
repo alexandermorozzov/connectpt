@@ -1,0 +1,65 @@
+# @package _global_
+# Full benchmark sweep for the five requested EA/NEA operator combinations.
+# The Python runner supplies the graph-specific budget and loops over seeds;
+# this file is the source of truth for methods and the alpha grid.
+defaults:
+  - /search: bee_colony_base
+  - /search/models: no_neural_models
+  - /search/bee_sets: classic_bco_paper
+  - _self_
+
+run:
+  name: all_methods_alpha_seed_sweep
+  label: EA
+  seed: 0
+  cpu: false
+
+search:
+  n_bees: 10
+
+data:
+  source: benchmark
+  city: Mandl
+
+sweep:
+  alpha: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  adj_weight: 0.0
+  # Placeholder for direct composition; the runner replaces it per graph.
+  n_iterations: 200
+
+iteration_budgets:
+  Mandl: 200
+  Mumford0: 250
+  Mumford1: 300
+  Mumford2: 350
+  Mumford3: 400
+
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", d0, d1, d2, d_un, cost]
+
+logging:
+  tensorboard: true
+
+methods:
+  - label: "EA"
+    bee_sets: classic_bco_paper
+    models: no_neural_models
+    n_bees: 10
+  - label: "NEA"
+    bee_sets: neural_bco
+    models: construction_only
+    n_bees: 10
+  - label: "NEA-Edit"
+    bee_sets: classic_trim_extend
+    models: edit_only_seeded
+    n_bees: 10
+  - label: "NEA-Combined"
+    bee_sets: our_nbco
+    models: construction_and_edit_seeded
+    n_bees: 10
+  - label: "RSL-EA"
+    bee_sets: classic_random_trim_extend
+    models: random_edit_only
+    n_bees: 10
+
+output:
+  paper_stem: all_methods_alpha_seed_sweep
