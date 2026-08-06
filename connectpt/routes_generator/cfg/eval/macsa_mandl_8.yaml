@@ -1,10 +1,9 @@
 # MACSA Mandl-8 case-study scenario -- authoritative spec.
 #
 # MACSADataSource(scenario="mandl_8").load() reads its route-count / length spec
-# from HERE (via eval_spec("macsa_mandl_8")). The values must equal what the
-# scenario data produces (data/loaders.py::macsa_eval_bounds -- n_routes from the
-# scenario, min = 2, max = min(n_nodes, max(12, longest_seed_route)));
-# tests/test_eval_registry.py guards this against drift.
+# from HERE (via eval_spec("macsa_mandl_8")). The seed route count must match and
+# every seed route must lie inside these configured bounds;
+# tests/test_eval_registry.py guards those invariants against drift.
 n_routes: 8
 min_route_len: 2
 max_route_len: 12

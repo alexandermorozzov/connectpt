@@ -56,7 +56,7 @@ from connectpt.routes_generator.paper_experiments.paper_runs import paper_dir  #
 DEFAULT_CITIES = ["Mandl", "Mumford0", "Mumford1", "Mumford2", "Mumford3"]
 DEFAULT_ALPHAS = [0.0, 0.5, 1.0]
 DEFAULT_METHODS = ["sa", "ga", "hh"]
-METRICS = ["WMC", "RTT", "cost", "d0", "d1", "d2", "d_un"]
+METRICS = ["WMC", "RTT", "cost", "adj_vs_seed", "d0", "d1", "d2", "d_un"]
 STEM = "table5_baselines_lcinit"
 ADJ_TARGET = 0.2
 BCO_MATCHED_EVAL_BUDGET = 20_000
