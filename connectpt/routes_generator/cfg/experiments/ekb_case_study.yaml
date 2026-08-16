@@ -1,6 +1,7 @@
 # @package _global_
-# EKB (Ekaterinburg) case study: Our NBCO alpha sweep on the real
-# network. Large graph -> sequential bees + CPU.
+# EKB (Ekaterinburg) case study: NEA method alpha sweep on the real network.
+# The runner selects one entry from `methods` at runtime. Large graph ->
+# sequential bees + CPU.
 defaults:
   - /search: bee_colony_base
   - /search/models: construction_and_edit_seeded
@@ -9,7 +10,9 @@ defaults:
 
 run:
   name: ekb_case_study
-  label: Our NBCO (GNN + trim/extend)
+  # Default group composition remains NEA-Combined; the CLI runner overrides it
+  # from the `methods` list below.
+  label: NEA-Combined
   seed: 0
   cpu: true
 
@@ -21,6 +24,17 @@ search:
   n_bees: 10
   # large graph (EKB) -- run neural/edit bees one at a time.
   process_neural_bees_sequentially: true
+
+# Methods available through scripts/run_ekb_case_study.py --method <name>.
+methods:
+  - label: NEA-Edit
+    bee_sets: classic_trim_extend
+    models: edit_only_seeded
+    n_bees: 10
+  - label: NEA-Combined
+    bee_sets: our_nbco
+    models: construction_and_edit_seeded
+    n_bees: 10
 
 data:
   source: ekb
