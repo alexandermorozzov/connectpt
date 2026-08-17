@@ -1,0 +1,21 @@
+# @package _global_
+# Paper "Trim 12 + extend 12": 12 neural construction-extend bees (type-4) + 12
+# edit trim-only bees (type-6), both allowed to halt. Declarative equivalent of
+# flat nbco_variants/trim12_extend12_* (n_bees=24, n_type4=12, n_type6=12,
+# type4/type6_allow_halt=true).
+bees:
+  - name: construction_extend
+    count: 12
+    operator: neural_route_action
+    policy: construction
+    allowed_actions: [extend, halt]
+    route_selection: uniform
+    acceptance: greedy
+
+  - name: trim_only
+    count: 12
+    operator: neural_route_action
+    policy: edit
+    allowed_actions: [trim_start, trim_end, halt]
+    route_selection: uniform
+    acceptance: greedy

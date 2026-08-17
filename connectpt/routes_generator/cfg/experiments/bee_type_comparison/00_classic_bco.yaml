@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - /search: bee_colony_base
+  - /search/models: no_neural_models
+  - /search/bee_sets: classic_bco
+  - _self_
+
+run:
+  name: bee_type_comparison/00_classic_bco
+  seed: 0
+
+paths:
+  output_dir: artifacts/runs/bee_type_comparison/00_classic_bco

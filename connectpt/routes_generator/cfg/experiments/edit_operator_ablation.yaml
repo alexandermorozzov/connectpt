@@ -1,0 +1,58 @@
+# @package _global_
+# Learned edit-heuristic ablation for the paper.  The three methods share the
+# classical full-route replacement operator and differ only in the local edit:
+# the original type-2 heuristic, uniform random trim/extend, or the learned
+# trim/extend policy.  The adjustment penalty is disabled; adj_vs_seed is still
+# reported as a descriptive metric.
+defaults:
+  - /search: bee_colony_base
+  - /search/models: no_neural_models
+  - /search/bee_sets: classic_bco_paper
+  - _self_
+
+run:
+  name: edit_operator_ablation
+  seed: 0
+  cpu: false
+
+search:
+  n_bees: 10
+
+# The CLI retargets this config to every city in suite.cities by default, or to
+# the city/cities passed through --cities.  Mumford1 is the standalone default
+# when the config is composed directly.
+data:
+  source: benchmark
+  city: Mumford1
+
+sweep:
+  alpha: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  adj_weight: 0.0
+  n_iterations: 400
+
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", d0, d1, d2, d_un, cost]
+
+logging:
+  tensorboard: true
+
+methods:
+  - label: "EA"
+    bee_sets: classic_bco_paper
+    models: no_neural_models
+    n_bees: 10
+  - label: "RSL-EA"
+    bee_sets: classic_random_trim_extend
+    models: random_edit_only
+    n_bees: 10
+  - label: "NEA-Edit"
+    bee_sets: classic_trim_extend
+    models: edit_only_seeded
+    n_bees: 10
+
+batch:
+  name: edit_operator_ablation
+  output_dir: artifacts/runs/edit_operator_ablation
+  include_initial_metrics: true
+
+output:
+  paper_stem: edit_operator_ablation

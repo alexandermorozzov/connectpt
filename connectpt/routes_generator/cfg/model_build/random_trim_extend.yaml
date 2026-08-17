@@ -1,0 +1,6 @@
+# @package _global_
+# Standalone build config for the random trim/extend edit generator.
+defaults:
+  - /experiment: standard
+  - /model: random_trim_extend
+  - _self_

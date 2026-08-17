@@ -1,0 +1,40 @@
+# @package _global_
+# MACSA Table-B (Mandl8 scenario): Our NBCO single-step alpha sweep -- the
+# paper's Table "macsa-alpha-sweep" (iter=1), a real paper artifact. It doubles
+# as the MACSA smoke path (the suite's lightest run is one BCO iteration per
+# point), selected by name in macsa_run. Adjustment target is pinned to the
+# degree MACSA itself realizes vs the original network (0.051588, rounded to
+# 0.052 in the manuscript). Targets live in
+# artifacts/paper_final/table6_macsa_alpha_sweep_iter1/.
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_and_edit_seeded
+  - /search/bee_sets: our_nbco
+  - _self_
+
+run:
+  name: macsa_alpha_sweep_iter1
+  label: Our NBCO (GNN + trim/extend)
+  seed: 0
+  cpu: false
+
+paths:
+  output_dir: artifacts/runs/macsa_alpha_sweep_iter1
+
+# n_bees must match the bee-set total.
+search:
+  n_bees: 10
+
+data:
+  source: macsa
+  scenario: mandl_8
+
+sweep:
+  alpha: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  adj_target: 0.051588
+  n_iterations: 1
+
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
+
+output:
+  paper_stem: final_macsa_mandl8_alpha_sweep_iter1

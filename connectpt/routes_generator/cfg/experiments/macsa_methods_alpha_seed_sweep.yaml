@@ -1,0 +1,96 @@
+# @package _global_
+# Seven-method sweep on the four published MACSA/Mandl seed networks.
+# Route counts and length bounds are read from cfg/eval/macsa_<scenario>.yaml.
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_only
+  - /search/bee_sets: neural_bco
+  - _self_
+
+run:
+  name: macsa_methods_alpha_seed_sweep
+  label: NEA
+  seed: 0
+  cpu: false
+
+search:
+  n_bees: 10
+
+data:
+  source: macsa
+  scenario: mandl_8
+
+sweep:
+  alpha: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  adj_weight: 0.0
+  n_iterations: 200
+
+scenarios: [mandl_8, mandl_10, mandl1_12, mandl2_12]
+
+methods:
+  - label: "NEA"
+    kind: bco
+    bee_sets: neural_bco
+    models: construction_only
+    n_bees: 10
+  - label: "NEA-Edit"
+    kind: bco
+    bee_sets: classic_trim_extend
+    models: edit_only_seeded
+    n_bees: 10
+  - label: "NEA-Combined"
+    kind: bco
+    bee_sets: our_nbco
+    models: construction_and_edit_seeded
+    n_bees: 10
+  - label: "RSL-EA"
+    kind: bco
+    bee_sets: classic_random_trim_extend
+    models: random_edit_only
+    n_bees: 10
+  - label: "GA"
+    kind: baseline
+  - label: "HH"
+    kind: baseline
+  - label: "SA"
+    kind: baseline
+
+# Full baseline budgets match the existing eval20k Table-5 comparison.
+# GA nominal evaluations = 2 * population_size * n_iterations.
+budgets:
+  smoke:
+    bco_iterations: 2
+    sa_iterations: 120
+    hh_iterations: 120
+    hh_max_repair_iters: 120
+    ga_iterations: 5
+    ga_population_size: 6
+  full:
+    bco_iterations: 200
+    sa_iterations: 20000
+    hh_iterations: 20000
+    hh_max_repair_iters: 20000
+    ga_iterations: 1000
+    ga_population_size: 10
+
+metrics:
+  - RTT
+  - WMC
+  - WMC_mean
+  - WMC_median
+  - ATT
+  - adj_vs_seed
+  - rtt_cost
+  - wmc_cost
+  - redun%
+  - d0
+  - d1
+  - d2
+  - d_un
+  - cost
+
+logging:
+  tensorboard: true
+
+output:
+  paper_stem: macsa_methods_alpha_seed_sweep

@@ -1,0 +1,47 @@
+# @package _global_
+# Table 3 (paper \label{tab:nbco-vs-our-only-with-init}): neural BCO vs Improved
+# NBCO alpha sweep at adjustment target tau=0.3, 200 BCO iterations.
+#
+# ONE artifact = ONE file. The two methods differ only by their Hydra groups
+# (bee_sets + models), so they are `methods:` entries picked in code, not leaf
+# files. City-agnostic: run_batch("table3_nbco_vs_our", suite, city=<City>)
+# drives any benchmark city (paper stem suffixed with the city).
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_and_edit_seeded   # default method groups
+  - /search/bee_sets: our_nbco                      # (methods list overrides)
+  - _self_
+
+run:
+  name: table3_nbco_vs_our
+  seed: 0
+  cpu: false
+
+search:
+  n_bees: 10
+
+data:
+  source: benchmark
+
+sweep:
+  alpha: [0.0, 0.5, 1.0]
+  adj_target: 0.3
+  n_iterations: 200
+
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
+
+# Stream per-BCO-iteration best-cost curves to TensorBoard (one run per method x
+# alpha) so the convergence history is watchable online / saved for figures.
+logging:
+  tensorboard: true
+
+methods:
+  - {label: "neural BCO", bee_sets: neural_bco, models: construction_only,            n_bees: 10}
+  - {label: "Our NBCO (GNN rebuild + trim/extend)", bee_sets: our_nbco, models: construction_and_edit_seeded, n_bees: 10}
+
+batch:
+  name: table3_nbco_vs_our
+  output_dir: artifacts/runs/table3_nbco_vs_our
+
+output:
+  paper_stem: table3_nbco_vs_our

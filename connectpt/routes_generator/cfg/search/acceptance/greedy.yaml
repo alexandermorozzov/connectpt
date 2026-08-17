@@ -1,0 +1,14 @@
+# @package _global_
+# Greedy acceptance -- worse solutions never accepted (worse-accept schedule off).
+# Matches the BCO algorithm-config defaults (cfg/bco_mumford.yaml); used by every
+# Mumford instance. The reusable default for bee-colony search.
+search:
+  acceptance:
+    worse_accept_temperature: 0.0
+    worse_accept_decay: 0.995
+    worse_accept_min_temperature: 0.001
+    worse_selection_temperature: 0.0
+    worse_selection_decay: 0.995
+    worse_selection_min_temperature: 0.001
+    worse_selection_uniform_mix: 0.05
+    worse_selection_elite_count: 1

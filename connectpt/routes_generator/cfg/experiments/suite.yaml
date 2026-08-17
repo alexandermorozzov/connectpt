@@ -1,0 +1,80 @@
+# @package _global_
+# Experiment-suite configuration: which experiments run, on which cities, with
+# which shared parameters. The notebook loads ONE of these (suite / suite_smoke)
+# via eval_lib.suite.load_suite_config and reads everything from it -- no
+# experiment selection / parameter constants live in the notebook anymore.
+profile: full
+smoke: false
+quick: false
+output_prefix: ""          # set to "TEMP_" (smoke profile) for throwaway runs
+# Fresh output folder for the refactored notebook -- kept SEPARATE from the
+# curated artifacts/paper_results + artifacts/paper_final so a re-run never
+# clobbers existing paper artifacts. Resolved against the repo root inside the
+# library (paper_runs); the notebook never sees a path.
+paper_output_dir: artifacts/paper_results_v2
+seeds: [0]
+cities: [Mandl, Mumford0, Mumford1, Mumford2, Mumford3]
+
+benchmark_init_mode: nx
+include_edit_rebuild: false
+early_stop_patience: null
+
+# Which experiment blocks run. (PART 1 training + clean-LC baseline live here too
+# so the whole notebook is driven by one profile.)
+run:
+  training: false
+  clean_lc_baseline: false
+  e2_our_pareto: true
+  e2_5model: true
+  e2_route_viz: false
+  macsa: true
+  nsgaii_baselines: false
+  ekb_case_study: false
+  ekb_nbco: false
+  ekb_alpha_sweep: false
+
+# E1 narrow (neural BCO vs Our NBCO alpha sweep) parameters.
+e1:
+  full_cities: [Mandl, Mumford0, Mumford1, Mumford2, Mumford3]
+  cities: [Mandl]
+  trim12_only_cities: []
+  table_suffix: "_nbco_only_target03_iter200"
+  run_neural_bco: false
+  run_our_model: false
+  alpha_grid: [0.0, 0.5, 1.0]
+  adj_target: 0.3
+  bco_iterations: 200
+  # Init network selection is config-first: pin a saved dump per experiment via
+  # the e1_<city>.yaml data block (`init_dump: <paper_results routes.pt>`);
+  # default is LC + realistic tier (eval_lib.data_sources.BenchmarkDataSource).
+  reuse_baseline_cache: true
+  rerun_baselines: false
+  rerun_our_model: true
+
+e2:
+  table_suffix: "_mumford1_5model"
+
+# EKB (Ekaterinburg) case study + NBCO run + alpha sweep. Was the inline
+# EKB_* constants in the notebook's EKB cells.
+ekb:
+  force_cpu: true
+  score_seed: false
+  use_crop: false
+  crop_target_nodes: 300
+  crop_min_route_len: 11
+  crop_keep_largest_component: true
+  route_fig_node_size: 8
+  nbco:
+    process_neural_bees_sequentially: true
+    force_rerun: false
+    iterations: 25
+    adj_target: null      # null -> the unified ADJ_TARGET (eval_lib.params)
+    final_label: "Our NBCO (GNN + trim/extend)"
+    overlap_curves: true
+    node_size: 8
+  sweep:
+    process_neural_bees_sequentially: false
+    force_rerun: false
+    iterations: 50
+    adj_target: 0.3
+    alpha_grid: [0.0, 0.5, 1.0]

@@ -1,0 +1,199 @@
+# @package _global_
+# Edit / trim model training -- the static configuration that was previously
+# built as a ~25-entry Hydra override list inside paper_combined.ipynb
+# (build_edit_run). Compose this instead:
+#
+#     cfg = compose(config_name="train/edit")
+#
+# Only the per-run sweep variables stay as overrides / function args:
+#   run_name, adjustment_degree_weight, adjustment_degree_target,
+#   adjustment_degree_objective, keep_rollout_on_device (device-dependent).
+# Sweep experiments overlay this file via their own defaults (see edit_*.yaml).
+#
+# Schema mirrors ppo_50nodes.yaml (the schema train_lc_improvement_cfg reads);
+# `_self_` is listed LAST so these values win over the model/experiment groups.
+
+ppo:
+  n_iterations: 200
+  val_period: 10
+  n_epochs: 1
+  minibatch_size: 256
+  horizon: 200
+  epsilon: 0.2
+  use_gae: true
+  gae_lambda: 0.95
+
+trainer: ppo
+discount_rate: 1.0
+diff_reward: true
+incumbent_reward: false
+return_best_routes: false
+# Notebook overrode ppo_50nodes' `true` -> false (ZERO_TRIM_REWARD).
+zero_trim_reward: false
+positive_only_trim_reward: false
+# Device-dependent at runtime (True on GPU); keep the static default off.
+keep_rollout_on_device: false
+max_trim_actions_per_route: 1
+shared_critic: false
+baseline_lr: 0.0005
+# Notebook raised 0.01 -> 0.05 (ENTROPY_WEIGHT): keep exploring past the
+# forced-nonhalt window so the policy does not collapse to halt.
+entropy_weight: 0.05
+batch_size: 512
+reward_scale: 1.0
+edit_step_penalty: 0
+forced_halt_penalty: 0
+lr: 0.0003
+decay: 0.00001
+optimizer: Adam
+normalize_advantages: true
+
+# --- anti-halt-collapse / trim shaping (notebook root overrides) ---
+force_nonhalt_first_step_until_iter: 150
+
+# --- adjustment-degree shaping (training defaults; sweeps override these) ---
+# Training reward shaping uses the one-sided "cap" objective; weight defaults to
+# 0 (adj OFF in training -- eval/BCO still apply the full ADJ penalty).
+adjustment_degree_weight: 0.0
+adjustment_degree_target: 0.2
+adjustment_degree_objective: cap
+adjustment_degree_gap: 0.1
+adjustment_degree_mode: paper
+adjustment_conditioning: false
+adjustment_condition_current: false
+adjustment_condition_weight: false
+adjustment_target_min: 0.2
+adjustment_target_max: 1.0
+
+# --- critic: normalize returns + Huber + value clip ---
+critic_normalize_returns: true
+critic_huber: true
+critic_huber_delta: 1.0
+critic_value_clip: 0.2
+
+# --- run / paths / data (consumed by EditTrainingRun, ignored by the trainer) ---
+run:
+  name: edit_training_v1
+  seed: 0
+  cpu: false
+
+paths:
+  output_dir: artifacts/runs/edit_training_v1
+  checkpoint_path: artifacts/model_weights/improvement/edit_training_v1.pt
+  init_checkpoint_path: null
+
+data:
+  dataset_dirname: lc_copytiers_n1000_n50_r12_len8_15_v1
+  train_fraction: 0.9
+  split_seed: 0
+  min_route_len: 8
+  max_route_len: 15
+  target_n_routes: 12
+  n_val_per_tier: 4
+
+checkpoint:
+  strict_load: true
+
+# Train-loop knobs (was the notebook's N_ITERATIONS / BATCH_SIZE magic
+# constants). batch_size is gpu-aware (16 on CUDA, 4 on CPU); n_iterations also
+# drives the curriculum schedule fractions below. (Named train_loop, not
+# trainer, because root `trainer: ppo` is the dispatcher selector.)
+train_loop:
+  n_iterations: 700
+  batch_size_cpu: 4
+  batch_size_cuda: 16
+
+# Cost tuning applied after the objective (was build_edit_run's magic constants:
+# VARY_WEIGHTS / OP_FRACTION / MCW_FRACTION / ignore_stops_oob). Per-batch
+# sampled cost weights (30% route-only, 30% conn-only, 40% random mix) fed to
+# the agent as conditioning so one policy serves the whole alpha range.
+cost:
+  variable_weights: true
+  pp_fraction: 0.0
+  op_fraction: 0.3
+  mcw_fraction: 0.3
+  ignore_stops_oob: true
+
+# Cumulative tier curriculum (was the notebook's inline CURRICULUM list). Each
+# row is [fraction_of_iterations, active_tiers, label]; EditTrainingRun builds
+# the per-iteration train/val index functions from the dataset's meta.csv via
+# TrainingDataModule. Remove this block to train on all tiers uniformly.
+curriculum:
+  tiers: [copy_full, copy_boundary, copy_mixed, covered_dup, lc_clean]
+  n_val_per_tier: 4
+  schedule:
+    - [0.15, [copy_full], full]
+    - [0.30, [copy_full, copy_boundary], "+boundary"]
+    - [0.55, [copy_full, copy_boundary, copy_mixed], "+mixed"]
+    - [0.75, [copy_full, copy_boundary, copy_mixed, covered_dup], "+covered"]
+    - [1.00, [copy_full, copy_boundary, copy_mixed, covered_dup, lc_clean], "+clean"]
+
+# Dataset generation (was the notebook's N_GRAPHS / RAW_* / LC_COMBOS /
+# FORCE_REGEN / CORRUPT_* constants). Only needed to (re)build the copy-tier
+# training dataset via experiments.training_lc.build_copytier_dataset; the
+# trainer itself just loads dataset_dirname above.
+dataset_gen:
+  n_graphs: 1000
+  raw_n_nodes: 50
+  raw_graph_type: mixed
+  raw_graph_seed: 0
+  lc_n_samples: 1
+  lc_combos:
+    - [1.0, 0.0, 0.0, demand]
+    - [0.0, 1.0, 0.0, route]
+    - [0.0, 0.0, 1.0, conn]
+  corrupt_all_routes: false
+  n_routes_to_corrupt: null
+  force_regen: false
+
+# Training-history / evaluation reporting (was BALANCED_EVAL_WEIGHTS /
+# EVAL_N_PER_TIER / TENSORBOARD_SCALARS / CLEAN_LC_BASELINE_* / POST_TRAIN_*
+# constants). Consumed only by the dormant report cells (training_lc helpers).
+report:
+  balanced_eval_weights: [0.5, 0.5]
+  eval_n_per_tier: 10
+  tensorboard_scalars:
+    - train_reward_mean
+    - val_delta
+    - val_win_rate
+    - train_action_avg_actions_per_route
+    - val_component_delta_route
+    - val_component_delta_connectivity
+  baseline:
+    batch: 16
+    adj_weight: 0.0   # 0 -> pure route/connectivity clean-LC baseline
+  post_train:
+    city: Mumford1
+    iters: 100
+    alpha: 0.5
+
+eval:
+  min_route_len: 2
+  max_route_len: 12
+  n_routes: 10
+
+dataset:
+  type: pickle
+  kwargs:
+    path: datasets/mixed_50
+    space_scale: 0.6
+    demand_scale: 0.2
+
+# Deep-merged over the loaded groups (experiment: standard, model: trim).
+experiment:
+  logdir: null
+  cost_function:
+    kwargs:
+      connectivity_mode: median_weighted
+
+model:
+  route_generator:
+    kwargs:
+      serial_halting: true
+      allow_trim_below_min: true
+      n_adjustment_cond_feats: 0
+
+defaults:
+  - /experiment: standard
+  - /model: bestsofar_feb2023_trim
+  - _self_

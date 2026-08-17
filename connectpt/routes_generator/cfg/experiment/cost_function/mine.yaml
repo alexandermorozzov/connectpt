@@ -7,6 +7,9 @@ kwargs:
   median_connectivity_weight: 0.33
   constraint_violation_weight: 5.0
   use_weighted_connectivity: True
+  # WMC = weighted_median_connectivity (modified-Cp, paper eq.6): demand-weighted
+  # travel time, unreachable pairs penalised by 2*maxT, aggregated by the median.
+  connectivity_mode: median_weighted
   # demand and route weights will vary only during training
   variable_weights: true
   pp_fraction: 0.15

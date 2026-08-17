@@ -1,0 +1,21 @@
+# @package _global_
+# Seeded neural BCO on Mumford0 -- config-first: base + unified objective +
+# construction-only models + neural_bco bee set (type-1 neural rebuild + type-2
+# random local-endpoint edit). Init network + tensors supplied at run() time.
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_only
+  - /search/bee_sets: neural_bco
+  - _self_
+
+run:
+  name: seeded/neural_bco_mumford0
+  seed: 0
+  cpu: true
+
+paths:
+  output_dir: artifacts/runs/seeded/neural_bco_mumford0
+
+search:
+  n_iterations: 200
+  n_bees: 10

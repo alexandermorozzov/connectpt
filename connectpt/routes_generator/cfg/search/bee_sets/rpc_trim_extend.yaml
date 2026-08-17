@@ -1,0 +1,20 @@
+# @package _global_
+# Ablation: random path-combiner rebuild (heuristic, bee_colony type-3) + learned
+# trim/extend edit bees (type-5). Declarative equivalent of the flat "RPC +
+# trim/extend" variant (use_neural_bees=False, n_type1=0 -> the remainder is the
+# type-3 path-mix rebuild). No construction model is needed (type-3 is heuristic).
+bees:
+  - name: rpc_rebuild
+    count: 5
+    operator: heuristic_mutation
+    mutation_kind: path_mix
+    route_selection: uniform
+    acceptance: greedy
+
+  - name: neural_edit_trimext
+    count: 5
+    operator: neural_route_action
+    policy: edit
+    allowed_actions: [extend, trim_start, trim_end]
+    route_selection: uniform
+    acceptance: greedy

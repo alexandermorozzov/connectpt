@@ -1,0 +1,17 @@
+# @package _global_
+# Classical type-1 rebuild plus random trim/extend edit operator.
+bees:
+  - name: heuristic_rebuild
+    count: 5
+    operator: heuristic_mutation
+    mutation_kind: classic_bco
+    route_selection: uniform
+    acceptance: greedy
+
+  - name: random_trim_extend
+    count: 5
+    operator: neural_route_action
+    policy: edit
+    allowed_actions: [extend, trim_start, trim_end]
+    route_selection: uniform
+    acceptance: greedy

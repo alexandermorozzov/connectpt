@@ -1,0 +1,13 @@
+# @package _global_
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_only
+  - /search/bee_sets: nbco_construction
+  - _self_
+
+run:
+  name: bee_type_comparison/01_nbco_construction
+  seed: 0
+
+paths:
+  output_dir: artifacts/runs/bee_type_comparison/01_nbco_construction

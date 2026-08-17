@@ -1,0 +1,49 @@
+# @package _global_
+# Table 6-style ablation: learned/random trim/extend factor isolated by replacing
+# the edit policy with a uniform random trim/extend generator.
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_and_random_edit_seeded
+  - /search/bee_sets: gnn_random_trim_extend
+  - _self_
+
+run:
+  name: table6_random_trim_extend
+  seed: 0
+  cpu: false
+
+search:
+  n_bees: 10
+
+data:
+  source: benchmark
+  city: Mumford1
+
+sweep:
+  alpha: [0.0, 0.5, 1.0]
+  adj_target: 0.2
+  adj_weight: 0.0
+  n_iterations: 400
+
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", d0, d1, d2, d_un, cost]
+
+logging:
+  tensorboard: true
+
+methods:
+  - label: "GNN + random trim/extend"
+    bee_sets: gnn_random_trim_extend
+    models: construction_and_random_edit_seeded
+    n_bees: 10
+  - label: "Classic BCO + random trim/extend"
+    bee_sets: classic_random_trim_extend
+    models: random_edit_only
+    n_bees: 10
+
+batch:
+  name: table6_random_trim_extend
+  output_dir: artifacts/runs/table6_random_trim_extend
+  include_initial_metrics: true
+
+output:
+  paper_stem: table6_random_trim_extend

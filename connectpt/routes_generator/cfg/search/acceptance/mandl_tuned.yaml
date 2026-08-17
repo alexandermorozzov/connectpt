@@ -1,0 +1,14 @@
+# @package _global_
+# Mandl-tuned worse-accept schedule (was budgets.yaml `mandl_bco_args`): a small
+# simulated-annealing-style acceptance temperature that helps the tiny Mandl
+# instance escape local optima. Compose this instead of `greedy` for Mandl / MACSA.
+search:
+  acceptance:
+    worse_accept_temperature: 0.02
+    worse_accept_decay: 0.985
+    worse_accept_min_temperature: 0.001
+    worse_selection_temperature: 0.02
+    worse_selection_decay: 0.985
+    worse_selection_min_temperature: 0.001
+    worse_selection_uniform_mix: 0.10
+    worse_selection_elite_count: 2

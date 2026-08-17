@@ -1,0 +1,9 @@
+# MACSA Mandl1-12 case-study scenario.
+# Bounds match datasets/MACSA_data/mandl1_12 and are checked against its seed routes.
+n_routes: 12
+min_route_len: 3
+max_route_len: 7
+source:
+  type: macsa
+  scenario: mandl1_12
+  data_dir: datasets/MACSA_data/mandl1_12

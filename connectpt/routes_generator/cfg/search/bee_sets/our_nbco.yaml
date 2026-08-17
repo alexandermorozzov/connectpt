@@ -1,0 +1,21 @@
+# @package _global_
+# Our NBCO: neural full-route rebuild bees (type-1, construction model) + learned
+# trim/extend edit bees (type-5, edit model). The edit bees omit `halt` from
+# allowed_actions -- they must propose a real mutation (type5_allow_halt=False),
+# only the rebuild bee may effectively leave a route unchanged. Declarative
+# equivalent of the flat nbco_variants/our_nbco_* config (n_type1=5, n_type5=5).
+bees:
+  - name: neural_rebuild
+    count: 5
+    operator: neural_rebuild
+    policy: construction
+    route_selection: uniform
+    acceptance: greedy
+
+  - name: neural_edit_trimext
+    count: 5
+    operator: neural_route_action
+    policy: edit
+    allowed_actions: [extend, trim_start, trim_end]
+    route_selection: uniform
+    acceptance: greedy

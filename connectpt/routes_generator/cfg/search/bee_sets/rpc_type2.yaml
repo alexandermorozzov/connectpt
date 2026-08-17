@@ -1,0 +1,19 @@
+# @package _global_
+# Ablation "RPC + type2": random path-combiner rebuild (heuristic, path_mix) +
+# random local-endpoint edit (type-2, shorten/lengthen). No neural model is
+# needed (both operators are heuristic). Declarative equivalent of the flat
+# e2_ablation/rpc_type2_* config (n_type2=5, remainder = type-3 path-mix rebuild).
+bees:
+  - name: rpc_rebuild
+    count: 5
+    operator: heuristic_mutation
+    mutation_kind: path_mix
+    route_selection: uniform
+    acceptance: greedy
+
+  - name: local_endpoint_edit
+    count: 5
+    operator: heuristic_mutation
+    mutation_kind: shorten
+    route_selection: uniform
+    acceptance: greedy

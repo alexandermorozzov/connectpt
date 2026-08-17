@@ -1,0 +1,6 @@
+# @package _global_
+# Standalone build config for the edit/trim model (see model_build/construction).
+defaults:
+  - /experiment: standard
+  - /model: edit_trim_paper
+  - _self_

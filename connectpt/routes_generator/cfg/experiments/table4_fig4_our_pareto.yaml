@@ -1,0 +1,41 @@
+# @package _global_
+# Table 4 + Figure 4 (paper \label{tab:e2c_rtt_median_wmc_mumford0} /
+# \label{fig:e2-mumford0-ourpareto-topdown}): Improved NBCO adjustment-target
+# sweep on Mumford0 (2D alpha x adj_target sweep), RTT--median-WMC objective.
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_and_edit_seeded
+  - /search/bee_sets: our_nbco
+  - _self_
+
+run:
+  name: table4_fig4_our_pareto
+  label: Our NBCO
+  seed: 0
+  cpu: false
+
+paths:
+  output_dir: artifacts/runs/table4_fig4_our_pareto
+
+# n_bees must match the bee-set total.
+search:
+  n_bees: 10
+
+data:
+  source: benchmark
+  city: Mumford0
+
+sweep:
+  alpha: [0.0, 0.25, 0.5, 0.75, 1.0]
+  adj_target: [0.2, 0.4, 0.6, 0.8, 1.0]
+  n_iterations: 200
+
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
+
+# Stream per-BCO-iteration best-cost curves to TensorBoard (one run per alpha x
+# adj_target) so the convergence history is watchable online / saved for figures.
+logging:
+  tensorboard: true
+
+output:
+  paper_stem: table4_fig4_our_pareto_mumford0

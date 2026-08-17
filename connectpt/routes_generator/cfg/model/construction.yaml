@@ -1,0 +1,28 @@
+# Construction route model (PathCombiningRouteGenerator).
+# NOTE: in_edge_dim is 14 here (NOT 18). The construction checkpoint
+# (inductive_random_graphs_weighted_connectivity.pt) was trained with 14 input
+# edge features; 18 is the edit/trim model's value. Using 18 would break
+# strict-load of the construction checkpoint.
+defaults:
+  - route_generator: biased
+  - _self_
+
+common:
+  dropout: 0.0
+  nonlin_type: ReLU
+  embed_dim: 64
+
+route_generator:
+  kwargs:
+    force_linking_unlinked: false
+    logit_clip: null
+
+backbone_gn:
+  net_type: graph attn
+  kwargs:
+    n_layers: 5
+    in_node_dim: 4
+    in_edge_dim: 14
+    use_norm: false
+    n_heads: 4
+    dense: false

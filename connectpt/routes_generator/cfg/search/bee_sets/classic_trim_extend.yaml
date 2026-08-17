@@ -1,0 +1,19 @@
+# @package _global_
+# Hybrid NeuralBCO: the classical BCO type-1 heuristic rebuild plus the learned
+# trim/extend edit operator (type-5). Each mutation step assigns five bees to
+# each operator; the edit bees must make a real mutation (halt is disabled).
+bees:
+  - name: heuristic_rebuild
+    count: 5
+    operator: heuristic_mutation
+    mutation_kind: classic_bco
+    route_selection: uniform
+    acceptance: greedy
+
+  - name: neural_edit_trimext
+    count: 5
+    operator: neural_route_action
+    policy: edit
+    allowed_actions: [extend, trim_start, trim_end]
+    route_selection: uniform
+    acceptance: greedy

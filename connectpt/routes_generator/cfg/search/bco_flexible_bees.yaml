@@ -1,0 +1,93 @@
+# @package _global_
+# Flexible bee-colony search: one neural operator, many policies/action sets.
+#
+#     cfg = compose(config_name="search/bco_flexible_bees")
+#
+# The same NeuralRouteActionBee operator is paired with different policies and
+# allowed_actions; the bee specs below are compiled into an ExecutablePlan
+# (ExecutablePlan.from_specs) that the engine runs natively. Checkpoint paths
+# and model configs use the real shipped names.
+
+run:
+  name: bco_flexible_bees_v1
+  seed: 0
+  cpu: false
+
+paths:
+  output_dir: artifacts/runs/bco_flexible_bees_v1
+
+data:
+  city: Mandl
+  n_routes: 6
+  min_route_len: 2
+  max_route_len: 8
+
+n_iterations: 200
+n_bees: 14
+
+models:
+  construction:
+    enabled: true
+    config: construction
+    checkpoint_path: artifacts/model_weights/inductive_random_graphs_weighted_connectivity.pt
+    strict_load: true
+  edit:
+    enabled: true
+    config: edit_trim_paper
+    checkpoint_path: artifacts/model_weights/improvement/improvement_lc_redundancy_rttwmc_v1_PRESERVED.pt
+    strict_load: true
+
+policies:
+  construction:
+    model_ref: construction
+    adapter: construction_search_policy
+  edit:
+    model_ref: edit
+    adapter: edit_search_policy
+
+bees:
+  - name: neural_on_construction
+    count: 4
+    operator: neural_route_action
+    policy: construction
+    allowed_actions: [extend, halt]
+    route_selection: uniform
+    acceptance: greedy
+
+  - name: neural_on_edit_extend_only
+    count: 4
+    operator: neural_route_action
+    policy: edit
+    allowed_actions: [extend, halt]
+    route_selection: uniform
+    acceptance: greedy
+
+  - name: neural_on_edit_trim_only
+    count: 2
+    operator: neural_route_action
+    policy: edit
+    allowed_actions: [trim_start, trim_end]
+    route_selection: low_demand
+    acceptance: trim_grace
+
+  - name: neural_on_edit_full
+    count: 2
+    operator: neural_route_action
+    policy: edit
+    allowed_actions: [extend, trim_start, trim_end, halt]
+    route_selection: uniform
+    acceptance: greedy
+
+  - name: compound_trim_then_extend
+    count: 2
+    operator: compound
+    acceptance: greedy
+    steps:
+      - operator: neural_route_action
+        policy: edit
+        allowed_actions: [trim_start, trim_end]
+        route_selection: low_demand
+      - operator: neural_route_action
+        policy: construction
+        allowed_actions: [extend, halt]
+        route_selection: same_route

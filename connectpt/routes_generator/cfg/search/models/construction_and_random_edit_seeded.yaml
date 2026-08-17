@@ -1,0 +1,21 @@
+# @package _global_
+# Learned construction rebuild model plus random trim/extend edit generator.
+models:
+  construction:
+    enabled: true
+    config: construction
+    checkpoint_path: artifacts/model_weights/inductive_random_graphs_weighted_connectivity.pt
+    strict_load: true
+  edit:
+    enabled: true
+    config: random_trim_extend
+    checkpoint_path: null
+    strict_load: false
+
+policies:
+  construction:
+    model_ref: construction
+    adapter: construction_search_policy
+  edit:
+    model_ref: edit
+    adapter: edit_search_policy

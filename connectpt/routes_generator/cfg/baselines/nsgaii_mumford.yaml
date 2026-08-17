@@ -1,0 +1,21 @@
+# @package _global_
+# NSGA-II multi-objective optimizer -- ported from AHolliday/transit_learning
+# (cfg/nsgaii_husselmann.yaml: the pure-heuristic Husselmann variant, with no
+# neural models). The notebook helper `build_nsgaii_cfg` adds `+eval=mumford0`
+# and overrides `n_iterations` / `pop_size` for the comparison runs.
+batch_size: 1
+n_iterations: 2000
+pop_size: 400
+p_crossover: 0.9
+p_mutation: 0.9
+mutator_p_t: 0.03
+init_mode: husselmann
+gen_batch_size: 500
+use_cost_based_heuristics: true
+use_model_heuristics: false
+
+defaults:
+  - /experiment: standard
+  - /eval: mumford0
+  - override /experiment/cost_function: multi
+  - _self_

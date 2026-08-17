@@ -1,0 +1,18 @@
+# @package _global_
+# Paper "neural BCO" (Holliday NeuralBCO): neural full-route rebuild bees (type-1,
+# construction model) + the random local-endpoint edit (type-2, shorten/lengthen).
+# Declarative equivalent of flat nbco_variants/neural_bco_* (n_type1=5, n_type2=5).
+bees:
+  - name: neural_rebuild
+    count: 5
+    operator: neural_rebuild
+    policy: construction
+    route_selection: uniform
+    acceptance: greedy
+
+  - name: local_endpoint_edit
+    count: 5
+    operator: heuristic_mutation
+    mutation_kind: shorten
+    route_selection: uniform
+    acceptance: greedy

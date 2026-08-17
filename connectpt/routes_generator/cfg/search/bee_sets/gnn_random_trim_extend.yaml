@@ -1,0 +1,17 @@
+# @package _global_
+# Learned GNN full-route rebuild plus random trim/extend edit operator.
+bees:
+  - name: neural_rebuild
+    count: 5
+    operator: neural_rebuild
+    policy: construction
+    route_selection: uniform
+    acceptance: greedy
+
+  - name: random_trim_extend
+    count: 5
+    operator: neural_route_action
+    policy: edit
+    allowed_actions: [extend, trim_start, trim_end]
+    route_selection: uniform
+    acceptance: greedy

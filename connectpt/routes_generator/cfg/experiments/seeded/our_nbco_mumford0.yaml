@@ -1,0 +1,23 @@
+# @package _global_
+# Seeded Our-NBCO on Mumford0, composed config-first from reusable groups:
+# base + unified objective + golden models + our_nbco bee set. The initial
+# network + graph tensors are supplied to BeeColonySearchRun.run(init_routes=,
+# tensors=) at call time (you improve an EXISTING network), so this file carries
+# only the search configuration.
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_and_edit_seeded
+  - /search/bee_sets: our_nbco
+  - _self_
+
+run:
+  name: seeded/our_nbco_mumford0
+  seed: 0
+  cpu: true
+
+paths:
+  output_dir: artifacts/runs/seeded/our_nbco_mumford0
+
+search:
+  n_iterations: 200
+  n_bees: 10

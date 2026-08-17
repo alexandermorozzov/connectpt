@@ -1,0 +1,32 @@
+# @package _global_
+# Construction-only, NON-SEEDED experiment on the new declarative logic: build a
+# network from scratch with learned-construction bees only (no edit model, no
+# seeded init network). This is the new-logic analog of the old frozen
+# evaluation.ipynb "learned construction" runs -- no ``sweep`` block, so
+# BeeColonySearchRun.run() takes the from-scratch benchmark path (run_suite).
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_only
+  - /search/bee_sets: nbco_construction
+  - _self_
+
+run:
+  name: construction_only/mandl
+  label: Construction-only BCO (from scratch)
+  seed: 0
+  cpu: false
+
+paths:
+  output_dir: artifacts/runs/construction_only/mandl
+
+# n_bees matches the bee-set total (20 construction bees).
+search:
+  n_bees: 20
+  n_iterations: 200
+
+# benchmark-city data shape (no ``source``) -> from-scratch BenchmarkDataModule.
+data:
+  city: Mandl
+  n_routes: 6
+  min_route_len: 2
+  max_route_len: 8

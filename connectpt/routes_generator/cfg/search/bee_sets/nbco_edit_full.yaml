@@ -1,0 +1,9 @@
+# @package _global_
+bees:
+  - name: neural_edit_full
+    count: 20
+    operator: neural_route_action
+    policy: edit
+    allowed_actions: [extend, trim_start, trim_end, halt]
+    route_selection: uniform
+    acceptance: greedy

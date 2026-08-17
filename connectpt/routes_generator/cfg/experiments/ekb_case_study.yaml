@@ -1,0 +1,55 @@
+# @package _global_
+# EKB (Ekaterinburg) case study: NEA method alpha sweep on the real network.
+# The runner selects one entry from `methods` at runtime. Large graph ->
+# sequential bees + CPU.
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_and_edit_seeded
+  - /search/bee_sets: our_nbco
+  - _self_
+
+run:
+  name: ekb_case_study
+  # Default group composition remains NEA-Combined; the CLI runner overrides it
+  # from the `methods` list below.
+  label: NEA-Combined
+  seed: 0
+  cpu: true
+
+paths:
+  output_dir: artifacts/runs/ekb_case_study
+
+# n_bees must match the bee-set total.
+search:
+  n_bees: 10
+  # large graph (EKB) -- run neural/edit bees one at a time.
+  process_neural_bees_sequentially: true
+
+# Methods available through scripts/run_ekb_case_study.py --method <name>.
+methods:
+  - label: NEA-Edit
+    bee_sets: classic_trim_extend
+    models: edit_only_seeded
+    n_bees: 10
+  - label: NEA-Combined
+    bee_sets: our_nbco
+    models: construction_and_edit_seeded
+    n_bees: 10
+
+data:
+  source: ekb
+
+sweep:
+  alpha: [0.0, 0.5, 1.0]
+  adj_target: 0.2
+  n_iterations: 50
+
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
+
+# Stream per-BCO-iteration best-cost curves to TensorBoard (one run per alpha)
+# so a long EKB sweep is watchable online.
+logging:
+  tensorboard: true
+
+output:
+  paper_stem: ekb_our_nbco

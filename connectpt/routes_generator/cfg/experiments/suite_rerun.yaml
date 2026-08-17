@@ -1,0 +1,11 @@
+# @package _global_
+# Rerun profile: identical to `suite` (full paper budget) EXCEPT every paper
+# deliverable (tables, route/history dumps, figures, logs) is written into a
+# SEPARATE artifacts/reruns/ tree, so a re-run never clobbers the curated
+# artifacts/paper_results* / artifacts/paper_results_v2. Used by the reruns/
+# command scripts (Table 3/4/5 + EKB).
+defaults:
+  - /experiments/suite
+  - _self_
+
+paper_output_dir: artifacts/reruns

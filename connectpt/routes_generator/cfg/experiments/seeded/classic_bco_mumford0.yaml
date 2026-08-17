@@ -1,0 +1,21 @@
+# @package _global_
+# Seeded classic (heuristic) BCO on Mumford0 -- config-first from reusable groups:
+# base + unified objective + no neural models + classic_bco_paper bee set. The
+# initial network + tensors are supplied to BeeColonySearchRun.run() at call time.
+defaults:
+  - /search: bee_colony_base
+  - /search/models: no_neural_models
+  - /search/bee_sets: classic_bco_paper
+  - _self_
+
+run:
+  name: seeded/classic_bco_mumford0
+  seed: 0
+  cpu: true
+
+paths:
+  output_dir: artifacts/runs/seeded/classic_bco_mumford0
+
+search:
+  n_iterations: 200
+  n_bees: 10
