@@ -1,17 +1,31 @@
-colorlog==6.10.1
-geopandas==1.1.1
-h5py==3.8.0
-hydra-core==1.3.2
-matplotlib==3.7.5
-networkx==2.8.8
+# Top-level runtime requirements for connectpt (paper_combined experiments).
+# Only the main packages are pinned here; their transitive dependencies
+# (nvidia-cu12*, triton, sympy, antlr4, grpcio, alembic, shapely, pyproj,
+# pyogrio, branca, jupyter_*, joblib, ...) are resolved automatically by pip.
+
+# --- deep learning / GNN (pulls nvidia-cu12*, triton, sympy, mpmath, fsspec, filelock) ---
+torch==2.11.0          # CUDA 12.6 build: pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu126
+torch-geometric==2.7.0
+
+# --- scientific stack ---
 numpy==1.26.4
-omegaconf==2.3.0
-optuna==3.6.1
-pandas==2.3.3
-pyproj==3.6.1
-PyYAML==6.0
-scikit-learn==1.3.2
 scipy==1.10.1
-shapely==2.1.2
-tensorboard==2.13.0
+pandas==2.3.3          # pulls python-dateutil, pytz, tzdata
+scikit-learn==1.3.2    # pulls joblib, threadpoolctl
+networkx==2.8.8
+h5py==3.8.0
+
+# --- config / experiment orchestration ---
+hydra-core==1.3.2      # pulls omegaconf, antlr4-python3-runtime
+omegaconf==2.3.0
+optuna==3.6.1          # pulls alembic, SQLAlchemy, Mako, colorlog, greenlet
+tensorboard==2.13.0    # pulls grpcio, protobuf, werkzeug, markdown, google-auth, absl-py
 tqdm==4.64.1
+
+# --- visualization / geo ---
+matplotlib==3.7.5      # pulls contourpy, cycler, fonttools, kiwisolver, pillow, pyparsing
+geopandas==1.1.1       # pulls shapely, pyproj, pyogrio, packaging
+folium==0.20.0         # pulls branca, xyzservices
+
+# --- notebooks ---
+ipykernel==7.2.0       # pulls ipython, jupyter_client/core, debugpy, pyzmq, tornado, nest-asyncio
