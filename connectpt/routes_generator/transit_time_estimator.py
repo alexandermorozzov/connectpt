@@ -2,6 +2,7 @@ import logging as log
 import copy
 import math
 from collections import deque
+from contextlib import contextmanager
 from typing import Union
 from collections.abc import Sequence
 
@@ -37,9 +38,29 @@ COST_WEIGHT_KEY_ORDER = (
     'median_connectivity_weight',
 )
 
+# NOTE on ordering: the state exposes cost weights as a NAMED dict
+# (state.cost_weights) — exactly how the cost math consumes them (lookup by
+# key at each use site). A positional vector exists only where a neural net
+# needs one, and is assembled in a single place (get_cost_weights_tensor)
+# from an EXPLICIT key tuple supplied by the caller: the cost/reward math
+# passes COST_WEIGHT_KEY_ORDER; models pass the checkpoint-locked spec they
+# declare themselves (models.WEIGHT_FEATURE_KEYS / weight_feature_keys).
+
 # Short, human-readable names for the three cost components, index-aligned
 # with COST_WEIGHT_KEY_ORDER. Used to enable / disable individual components.
 COST_COMPONENT_NAMES = ('demand', 'route', 'connectivity')
+
+
+def _finite_time_diameter(times, eps=EPSILON):
+    """Per-batch max finite travel time for normalization."""
+    finite_times = torch.where(torch.isfinite(times),
+                               times, torch.zeros_like(times))
+    if finite_times.ndim >= 3:
+        diameter = finite_times.flatten(1, 2).max(1).values
+    else:
+        diameter = finite_times.flatten().max().reshape(1)
+    return diameter.clamp_min(eps)
+
 
 # Accepted spellings for each cost component, mapped to its index. Lets
 # configs / notebooks refer to a component by short name, by its weight-key
@@ -552,24 +573,27 @@ class RouteGenBatchState:
             updated_routes[bi, :len(trimmed)] = trimmed
 
     def _replace_planned_routes(self, finished_routes, current_routes):
-        self._clear_routes_helper()
-        if self.extra_data.fixed_routes.numel() > 0:
-            self._add_routes_to_tensors(self.extra_data.fixed_routes)
-            self._add_routes_to_context_masks(self.extra_data.fixed_routes)
+        # one transit-data rebuild for the whole replace + re-seed sequence
+        with self.defer_route_data_update():
+            self._clear_routes_helper()
+            if self.extra_data.fixed_routes.numel() > 0:
+                self._add_routes_to_tensors(self.extra_data.fixed_routes)
+                self._add_routes_to_context_masks(self.extra_data.fixed_routes)
 
-        has_finished_routes = any(len(routes) > 0 for routes in finished_routes)
-        if has_finished_routes:
-            finished_tensor = tu.get_batch_tensor_from_routes(
-                finished_routes, self.device
-            )
-            self.add_new_routes(finished_tensor)
-        else:
-            self._update_route_data()
+            has_finished_routes = any(len(routes) > 0
+                                      for routes in finished_routes)
+            if has_finished_routes:
+                finished_tensor = tu.get_batch_tensor_from_routes(
+                    finished_routes, self.device
+                )
+                self.add_new_routes(finished_tensor)
+            else:
+                self._update_route_data()
 
-        if current_routes.device != self.device:
-            current_routes = current_routes.to(self.device)
-        if (current_routes > -1).any():
-            self.set_current_routes(current_routes)
+            if current_routes.device != self.device:
+                current_routes = current_routes.to(self.device)
+            if (current_routes > -1).any():
+                self.set_current_routes(current_routes)
 
     def _clear_routes_helper(self, batch_index=None):
         if batch_index is None:
@@ -699,16 +723,17 @@ class RouteGenBatchState:
                 accumulate=True,
             )
     
-    def replace_routes(self, batch_new_routes, 
-                only_routes_with_demand_are_valid=False, 
+    def replace_routes(self, batch_new_routes,
+                only_routes_with_demand_are_valid=False,
                 invalid_directly_connected=False):
-        self._clear_routes_helper()
-        if self.extra_data.fixed_routes.numel() > 0:
-            self._add_routes_to_tensors(self.extra_data.fixed_routes)
-            self._add_routes_to_context_masks(self.extra_data.fixed_routes)
-        self.add_new_routes(batch_new_routes, 
-                            only_routes_with_demand_are_valid,
-                            invalid_directly_connected)
+        with self.defer_route_data_update():
+            self._clear_routes_helper()
+            if self.extra_data.fixed_routes.numel() > 0:
+                self._add_routes_to_tensors(self.extra_data.fixed_routes)
+                self._add_routes_to_context_masks(self.extra_data.fixed_routes)
+            self.add_new_routes(batch_new_routes,
+                                only_routes_with_demand_are_valid,
+                                invalid_directly_connected)
 
     def clear_routes(self):
         self._clear_routes_helper()
@@ -874,11 +899,38 @@ class RouteGenBatchState:
                     continue
                 self._finished_routes[bi].append(route[:length])
     
+    @contextmanager
+    def defer_route_data_update(self):
+        """Batch several route-tensor mutations into ONE _update_route_data.
+
+        Several mutation paths (replace + seed current route) rebuild the
+        transit data twice back-to-back although nothing reads the
+        intermediate result. _update_route_data is a pure function of
+        route_mat / transfer times, so running it once after the last
+        mutation yields exactly the tensors the eager per-mutation updates
+        would have produced -- bit-identical results, half the Floyd-Warshall
+        work on those paths.
+        """
+        if getattr(self, '_route_update_deferred', False):
+            yield   # already inside an outer deferral; its exit will update
+            return
+        self._route_update_deferred = True
+        try:
+            yield
+        finally:
+            self._route_update_deferred = False
+            self._update_route_data()
+
     def _update_route_data(self):
+        if getattr(self, '_route_update_deferred', False):
+            return
         # do things that have to be done whether we added or removed routes
         fw_mat = self.route_mat + self.transfer_time_s[:, None, None]
         nexts, transit_times = tu.floyd_warshall(fw_mat)
-        _, path_edge_counts = tu.reconstruct_all_paths(nexts)
+        # node counts of the shortest paths; identical to
+        # reconstruct_all_paths(nexts)[1] but without materializing the full
+        # (B, N, N, max_len) path tensor (only the counts are needed here).
+        path_edge_counts = tu.count_path_nodes(nexts)
         # subtract one transfer time from each transit time to avoid counting
          # a transfer for the first edge of a journey
         transit_times -= self.transfer_time_s[:, None, None]
@@ -1027,9 +1079,14 @@ class RouteGenBatchState:
 
         return route_time
     
-    def get_global_state_features(self, include_redundancy=None):
-        cost_weights = self.cost_weights_tensor
-        diameter = self.drive_times.flatten(1,2).max(1).values
+    def get_global_state_features(self, include_redundancy=None, *,
+                                  weight_feature_keys):
+        """Global feature vector for neural nets. ``weight_feature_keys`` is
+        required: the calling model declares the order of the cost-weight
+        slots (its checkpoint-locked spec, e.g. models.WEIGHT_FEATURE_KEYS) —
+        the state never chooses a weight order itself."""
+        cost_weights = self.get_cost_weights_tensor(weight_feature_keys)
+        diameter = _finite_time_diameter(self.drive_times)
         mean_route_time = self.total_route_time / (
             self.n_routes_to_plan * diameter)
 
@@ -1262,28 +1319,13 @@ class RouteGenBatchState:
             n_demand_edges = (n_demand_edges / 2).ceil()
         return n_demand_edges
 
-    @property
-    def cost_weights_tensor(self):
-        cost_weights_list = []
-        for key in sorted(self.cost_weights.keys()):
-            if type(self.cost_weights[key]) is Tensor:
-                cw = self.cost_weights[key].to(self.device)
-                if cw.ndim == 0:
-                    cw = cw[None]
-            else:
-                cw = torch.tensor(self.cost_weights[key], 
-                                  device=self.device)[None]
-
-            cost_weights_list.append(cw)
-        cost_weights = torch.stack(cost_weights_list, dim=1)
-        if cost_weights.shape[0] == 1:
-            cost_weights = cost_weights.expand(self.batch_size, -1)
-        if cost_weights.shape[0] > self.batch_size:
-            cost_weights = cost_weights[:self.batch_size]
-        return cost_weights
-
-    def get_cost_weights_tensor(self, key_order=COST_WEIGHT_KEY_ORDER,
-                                normalize=False):
+    def get_cost_weights_tensor(self, key_order, normalize=False):
+        """THE single point where the named cost-weight dict becomes a
+        positional vector. ``key_order`` is required: every caller states
+        which keys it wants and in which order — the cost/reward math passes
+        COST_WEIGHT_KEY_ORDER, models pass their own checkpoint-locked
+        ``weight_feature_keys`` spec. There is deliberately no default and no
+        implicit ordering (dict iteration / sorting never decides slots)."""
         cost_weights_list = []
         for key in key_order:
             if key not in self.cost_weights:
@@ -1610,7 +1652,13 @@ class CostHelperOutput:
     per_route_riders: Optional[Tensor] = None
     cost: Optional[Tensor] = None
     median_connectivity: Optional[Tensor] = None
+    # WMC = weighted_median_connectivity (the one the cost optimizes, per
+    # connectivity_mode). The two demand-weighted variants below are both
+    # reported (modified-Cp per-node demand-weighted travel time, aggregated
+    # over nodes by mean / median respectively).
     median_connectivity_weighted: Optional[Tensor] = None
+    mean_weighted_connectivity: Optional[Tensor] = None
+    median_weighted_connectivity: Optional[Tensor] = None
 
     @property
     def mean_demand_time(self):
@@ -1652,15 +1700,37 @@ class CostHelperOutput:
                # (self.n_skipped_stops > 0)
     
 
+CONNECTIVITY_MODES = ('mean_weighted', 'median_weighted')
+
+
 class CostModule(torch.nn.Module):
-    def __init__(self, mean_stop_time_s=MEAN_STOP_TIME_S, 
+    def __init__(self, mean_stop_time_s=MEAN_STOP_TIME_S,
                  avg_transfer_wait_time_s=AVG_TRANSFER_WAIT_TIME_S,
-                 symmetric_routes=True, low_memory_mode=False):
+                 symmetric_routes=True, low_memory_mode=False,
+                 connectivity_mode='median_weighted'):
         super().__init__()
         self.mean_stop_time_s = mean_stop_time_s
         self.avg_transfer_wait_time_s = avg_transfer_wait_time_s
         self.symmetric_routes = symmetric_routes
         self.low_memory_mode = low_memory_mode
+        # How the *weighted* connectivity (WMC = weighted_median_connectivity) is
+        # aggregated. The per-node value C_i is the demand-weighted travel time to
+        # every other node, with unreachable pairs penalised (modified-Cp,
+        # paper eq. 6):
+        #   'mean_weighted'   -- C_i = sum_j (D_ij / sum_j D_ij) *
+        #                            (delta_ij tau_ij + (1-delta_ij) 2 max T),
+        #                        then C = mean_i C_i. Demand-weighted mean travel
+        #                        time on the same scale as ATT, with unreachable
+        #                        pairs penalised by 2*max_{k,l} T_kl like the
+        #                        modified passenger cost (paper eq. 6).
+        #   'median_weighted' -- same per-node C_i as 'mean_weighted', but
+        #                        aggregated over nodes with the median instead of
+        #                        the mean (robust to a few badly-connected nodes).
+        if connectivity_mode not in CONNECTIVITY_MODES:
+            raise ValueError(
+                f"connectivity_mode={connectivity_mode!r}; expected one of "
+                f"{CONNECTIVITY_MODES}")
+        self.connectivity_mode = connectivity_mode
 
     def get_metric_names(self):
         dummy_obj = CostHelperOutput(
@@ -1670,16 +1740,35 @@ class CostModule(torch.nn.Module):
         return dummy_obj.get_metrics().keys()
     
     def _compute_all_pairs_times_floyd(self, state):
+        # state.transit_times is ALREADY the all-pairs shortest transit-time
+        # matrix (tau_Rij, transfer penalties included) -- it is produced by a
+        # Floyd-Warshall pass in RouteGenBatchState._update_route_data. Running
+        # Floyd-Warshall on it again does NOT add transfer penalties; it shaves
+        # one transfer penalty per intermediate junction (transit_times only
+        # satisfies the triangle inequality up to a +transfer_time slack after
+        # the boarding-transfer subtraction), undercounting transfer time by
+        # 10-30%. So we return it directly -- the same matrix ATT / the passenger
+        # cost use, exactly as in the paper.
+        return state.transit_times.clone()  # [B, N, N]
 
-        transit_times = state.transit_times.clone()
-        B, N, _ = transit_times.shape
-
-        dist = transit_times.clone()
-
-        for k in range(N):
-            dist = torch.minimum(dist, dist[:, :, k].unsqueeze(2) + dist[:, k, :].unsqueeze(1))
-
-        return dist  # [B, N, N]
+    @staticmethod
+    def _demand_weighted_node_times(values, weights, dim=-1, eps=1e-9):
+        """Per-node demand-weighted mean travel time:
+            C_i = sum_j (D_ij / sum_j D_ij) * tau_ij
+        computed along ``dim`` over reachable destinations only. Entries where
+        ``values`` (tau) is non-finite -- the NaN-masked diagonal and
+        unreachable pairs -- are dropped (weight 0). Nodes whose total demand to
+        reachable destinations is ~0 return NaN so the caller's nan-aware
+        reduction over nodes skips them. The weights are normalised by their own
+        row sum, so the result is a genuine travel time (a convex combination of
+        the tau values), not a demand-attenuated quantity."""
+        valid = torch.isfinite(values)
+        w = torch.where(valid, weights, torch.zeros_like(weights))
+        v = torch.where(valid, values, torch.zeros_like(values))
+        num = (w * v).sum(dim=dim)
+        den = w.sum(dim=dim)
+        return torch.where(den > eps, num / den.clamp(min=eps),
+                           torch.full_like(num, float('nan')))
 
 
     def _cost_helper(self, state, return_per_route_riders=False):
@@ -1748,48 +1837,71 @@ class CostModule(torch.nn.Module):
         n_duplicate_stops = count_duplicate_stops(state.max_n_nodes, 
                                                 batch_routes)
         
-        # Получаем матрицу кратчайших путей
+        # all-pairs transit times (tau_Rij, transfer penalties included)
         all_pairs = self._compute_all_pairs_times_floyd(state)
-        # Берём максимум по строкам (по оси 1)
-        row_max = demand_matrix.max(dim=1, keepdim=True).values  # [N, 1] или [B, N, 1] в батче
-
-        # Чтобы избежать деления на 0
-        row_max = torch.where(row_max == 0, torch.tensor(1., device=row_max.device), row_max)
-
-        # Делим каждую строку на её максимум
-        demand_weight = demand_matrix / row_max
         B, N, _ = all_pairs.shape
 
-        # Убираем диагональ (расстояние от узла к себе)
-        eye = torch.eye(N, device=all_pairs.device).bool().unsqueeze(0)  # [1, N, N]
-        masked = all_pairs.masked_fill(eye, float('nan'))                # [B, N, N]
-
-        # Меняем inf → nan, чтобы их исключить из медианы
-        masked = masked.masked_fill(~masked.isfinite(), float('nan'))    # теперь только достижимые пути
-
-        # === 1. Обычная медианная связанность ===
-        node_medians = torch.nanmedian(masked, dim=2).values              # [B, N]
+        # Plain (unweighted) median connectivity -- REPORTED only. Drop the
+        # diagonal and unreachable pairs (inf -> nan, ignored by the medians).
+        eye = torch.eye(N, device=all_pairs.device).bool().unsqueeze(0)   # [1, N, N]
+        masked = all_pairs.masked_fill(eye, float('nan'))                 # [B, N, N]
+        masked = masked.masked_fill(~masked.isfinite(), float('nan'))     # reachable only
+        node_medians = torch.nanmedian(masked, dim=2).values             # [B, N]
         tmp = torch.nanmean(node_medians, dim=1)
         median_connectivity = torch.where(torch.isnan(tmp), torch.tensor(0., device=tmp.device), tmp)
 
-        # === 2. Взвешенная медианная связанность ===
-        # Маска та же, но домножаем расстояния на веса спроса
-        # demand_weight: [N, N] → добавим ось батча
-        weighted_masked = masked * demand_weight             # [B, N, N]
-        node_medians_w = torch.nanmedian(weighted_masked, dim=2).values   # [B, N]
-        tmp_w = torch.nanmean(node_medians_w, dim=1)
-        median_connectivity_weighted = torch.where(torch.isnan(tmp_w), torch.tensor(0., device=tmp_w.device), tmp_w)
+        # WMC = weighted_median_connectivity, set by the modified-Cp block below
+        # (default connectivity_mode='median_weighted'). Fallback = plain median.
+        median_connectivity_weighted = median_connectivity
+
+        # Modes: per-node demand-weighted MEAN travel time, modified-Cp
+        # style (paper eq. 6) -- unreachable pairs are NOT dropped but penalised
+        # with 2 * max_{k,l} T_kl (T = the drive-time matrix), exactly like the
+        # passenger cost penalises unserved demand:
+        #   C_i = sum_j (D_ij / sum_j D_ij) *
+        #             ( delta_ij * tau_ij + (1 - delta_ij) * 2 * max T )
+        # aggregated over nodes by mean ('mean_weighted') or median
+        # ('median_weighted'). delta_ij = 1 if j is reachable from i, else 0; the
+        # denominator sum_j D_ij therefore spans ALL off-diagonal demand. Both
+        # yield a genuine travel time on the same scale as ATT and override the
+        # WMC used by the cost term (when use_weighted_connectivity) and the
+        # reported metric.
+        # all_pairs == state.transit_times (tau_Rij, transfer penalties included)
+        # -- the same matrix ATT / the passenger cost use. Unreachable pairs get
+        # 2 * max_{k,l} T_kl (delta_ij = 0), matching the unserved-demand penalty.
+        _conn_mode = getattr(self, 'connectivity_mode', 'median_weighted')
+        max_T = _finite_time_diameter(state.drive_times)                  # [B]
+        unreached_penalty = (2.0 * max_T).view(-1, 1, 1)                  # [B, 1, 1]
+        unreachable = nopath | (~all_pairs.isfinite())
+        conn_vals = torch.where(unreachable, unreached_penalty.expand_as(all_pairs), all_pairs)
+        conn_vals = conn_vals.masked_fill(eye, float('nan'))             # drop diagonal
+        # Per-node demand-weighted travel time C_i (modified-Cp). Aggregate over
+        # nodes by BOTH mean and median -- both are reported; the cost optimizes
+        # the one selected by connectivity_mode (WMC = weighted_median by default).
+        node_cw = self._demand_weighted_node_times(conn_vals, demand_matrix, dim=2)  # [B, N]
+        _mw = torch.nanmean(node_cw, dim=1)
+        mean_weighted_connectivity = torch.where(
+            torch.isnan(_mw), torch.tensor(0., device=_mw.device), _mw)
+        _dw = torch.nanmedian(node_cw, dim=1).values
+        median_weighted_connectivity = torch.where(
+            torch.isnan(_dw), torch.tensor(0., device=_dw.device), _dw)
+        # the WMC the cost term actually uses
+        median_connectivity_weighted = (
+            mean_weighted_connectivity if _conn_mode == 'mean_weighted'
+            else median_weighted_connectivity)
 
         unserved_demand_matrix = demand_matrix * nopath
 
         output = CostHelperOutput(
-            total_dmd_time, state.total_route_time, trips_at_transfers, 
+            total_dmd_time, state.total_route_time, trips_at_transfers,
             total_demand, unserved_demand, total_transfers, trip_times,
-            state.get_n_disconnected_demand_edges(), n_stops_oob, 
+            state.get_n_disconnected_demand_edges(), n_stops_oob,
             n_duplicate_stops, batch_routes,
-            unserved_demand_matrix, 
+            unserved_demand_matrix,
             median_connectivity=median_connectivity,
-            median_connectivity_weighted=median_connectivity_weighted
+            median_connectivity_weighted=median_connectivity_weighted,
+            mean_weighted_connectivity=mean_weighted_connectivity,
+            median_weighted_connectivity=median_weighted_connectivity,
         )
 
         if return_per_route_riders:
@@ -1828,9 +1940,10 @@ class MyCostModule(CostModule):
                  enabled_components=None, disabled_components=None,
                  adjustment_degree_weight=0.0, adjustment_degree_target=0.2,
                  adjustment_degree_objective='raw', adjustment_degree_gap=0.1,
-                 adjustment_degree_mode='paper'):
+                 adjustment_degree_mode='paper', connectivity_mode='median_weighted'):
         super().__init__(mean_stop_time_s, avg_transfer_wait_time_s,
-                         symmetric_routes, low_memory_mode)
+                         symmetric_routes, low_memory_mode,
+                         connectivity_mode=connectivity_mode)
         # Unified adjustment-degree penalty (single source of truth, shared by
         # BCO / metaheuristics / training). Gated: with weight 0 OR no seed set
         # the term is skipped entirely and cost is bit-for-bit unchanged.
@@ -1972,12 +2085,19 @@ class MyCostModule(CostModule):
             n_intermediate = is_intermediate.sum()
             
             if n_intermediate > 0:
-                # Generate random weights using uniform distribution on the simplex
-                weights = torch.rand(n_intermediate, 3, device=device)
-                weights = weights / weights.sum(dim=1, keepdim=True)  # Normalize to sum to 1
-                dtw[is_intermediate] = weights[:, 0]
-                rtw[is_intermediate] = weights[:, 1]
-                mcw[is_intermediate] = weights[:, 2]
+                # Uniform on the simplex over the ENABLED cost components only,
+                # so disabled components (e.g. demand) never receive weight and
+                # the variation is restricted to the remaining objectives (e.g.
+                # RTT/WMC). With all three enabled this is the original
+                # 3-component simplex.
+                enabled_idx = [i for i, on in enumerate(self._enabled_components)
+                               if on]
+                cols = [dtw, rtw, mcw]
+                weights = torch.rand(int(n_intermediate), len(enabled_idx),
+                                     device=device)
+                weights = weights / weights.sum(dim=1, keepdim=True)
+                for _j, _ci in enumerate(enabled_idx):
+                    cols[_ci][is_intermediate] = weights[:, _j]
 
         return self._mask_weight_dict({
             'demand_time_weight': dtw,
@@ -2082,7 +2202,7 @@ class MyCostModule(CostModule):
             constraint_weight, state.batch_size, state.device)
 
         # normalize all time values by the maximum drive time in the graph
-        time_normalizer = state.drive_times.flatten(1,2).max(1).values
+        time_normalizer = _finite_time_diameter(state.drive_times)
 
         n_routes = state.n_routes_to_plan
 
@@ -2192,6 +2312,11 @@ class MyCostModule(CostModule):
         adj_pen = self._adjustment_penalty(state, cost)
         cost = cost + adj_pen
         cho.adjustment_penalty = adj_pen   # exposed for multi-objective get_cost
+        # Normalized components (demand, route, connectivity) -- same scaling the
+        # scalar cost uses. Stashed so MultiObjectiveCostModule.get_cost (NSGA-II)
+        # can build O(1) Pareto objectives instead of raw total_route_time (~1e4),
+        # which otherwise swamps WMC (~1e2) and the adj penalty (~1).
+        cho.norm_components = components
         cho.cost = cost
 
         assert cost.isfinite().all(), "invalid cost was computed!"
@@ -2231,15 +2356,22 @@ class MultiObjectiveCostModule(MyCostModule):
         return cho
     
     def get_cost(self, cho):
-        if self.use_weighted_connectivity == True:
-            # Unified-objective regime: trade off total route time vs weighted
-            # mean connectivity (RTT vs WMC). Demand/ATT is dropped because the
-            # unified objective is route_time + connectivity + adj (demand=0),
-            # so NSGA-II's Pareto front matches the scalar-cost methods.
+        # Use the NORMALIZED cost components (same scaling as the scalar cost) so
+        # the Pareto axes are O(1) -- otherwise raw total_route_time (~1e4) swamps
+        # WMC (~1e2) and the adj penalty (~1), collapsing NSGA-II to argmin(RTT).
+        nc = getattr(cho, "norm_components", None)   # [B, 3] = (demand, route, conn)
+        if nc is not None:
+            if self.use_weighted_connectivity == True:
+                # Unified regime: (RTT_norm, WMC_norm). conn component already
+                # carries the weighted mean connectivity when uwc is on.
+                costs = torch.stack((nc[..., 1], nc[..., 2]), dim=-1)
+            else:
+                # Legacy paper baseline: (ATT_norm, RTT_norm).
+                costs = torch.stack((nc[..., 0], nc[..., 1]), dim=-1)
+        elif self.use_weighted_connectivity == True:   # fallback (no stashed norm)
             costs = torch.stack((cho.total_route_time, cho.median_connectivity_weighted),
                                 dim=-1)
         else:
-            # Legacy paper baseline: (mean demand time, total route time).
             costs = torch.stack((cho.mean_demand_time, cho.total_route_time),
                                 dim=-1)
         # Unified adjustment-degree penalty also shifts the multi-objective

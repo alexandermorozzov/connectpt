@@ -61,6 +61,21 @@ CENTERNODES_PER_NODE = 1 / 10
 SPEED_MPS = 15.0
 SIDE_LENGTH_M = 30_000
 
+
+def replace_nonfinite_drive_times(drive_times):
+    finite = torch.where(torch.isfinite(drive_times),
+                         drive_times, torch.zeros_like(drive_times))
+    if finite.ndim >= 3:
+        diameter = finite.flatten(1, 2).max(1).values
+    else:
+        diameter = finite.flatten().max().reshape(1)
+    penalty = (2.0 * diameter.clamp_min(1e-6)).to(
+        device=drive_times.device, dtype=drive_times.dtype)
+    while penalty.ndim < drive_times.ndim:
+        penalty = penalty.unsqueeze(-1)
+    return torch.where(torch.isfinite(drive_times), drive_times, penalty)
+
+
 def get_default_train_and_eval_split(path, split=0.9, space_scale=0.01, 
                                      demand_scale=0.01):
     transforms = [
@@ -589,7 +604,8 @@ class CityGraphData(HeteroData):
         demand_nonzeros = demand.nonzero()
         graph[DEMAND_KEY].edge_index = demand_nonzeros.t()
         dmd_feats = demand[demand_nonzeros[:, 0], demand_nonzeros[:, 1]]
-        drive_times = times[0, demand_nonzeros[:, 0], demand_nonzeros[:, 1]]
+        drive_times = replace_nonfinite_drive_times(times)[
+            0, demand_nonzeros[:, 0], demand_nonzeros[:, 1]]
         graph[DEMAND_KEY].edge_attr = torch.stack((dmd_feats, drive_times))
 
         if pos_only:
@@ -689,7 +705,8 @@ class CityGraphData(HeteroData):
 
         data[DEMAND_KEY].edge_index = dmd_idx
         demand_feat = od[dmd_idx[0], dmd_idx[1]]
-        drive_time_feat = drive_times[dmd_idx[0], dmd_idx[1]]
+        drive_time_feat = replace_nonfinite_drive_times(drive_times)[
+            dmd_idx[0], dmd_idx[1]]
         dmd_edge_feat = torch.stack((demand_feat, drive_time_feat), dim=1)
         data[DEMAND_KEY].edge_attr = dmd_edge_feat
         data.demand = od
@@ -790,7 +807,8 @@ class CityGraphData(HeteroData):
 
         data[DEMAND_KEY].edge_index = dmd_idx
         demand_feat = demand[dmd_idx[0], dmd_idx[1]]
-        drive_time_feat = drive_times.squeeze(0)[dmd_idx[0], dmd_idx[1]]
+        safe_drive_times = replace_nonfinite_drive_times(drive_times).squeeze(0)
+        drive_time_feat = safe_drive_times[dmd_idx[0], dmd_idx[1]]
         dmd_edge_feat = torch.stack((demand_feat, drive_time_feat), dim=1)
         data[DEMAND_KEY].edge_attr = dmd_edge_feat
         data.demand = demand

@@ -84,7 +84,8 @@ from .initialization import (
 )
 
 # === Optimization & Search ===
-from .bee_colony import bee_colony
+# The bee-colony engine is ``bee_colony.run_bee_colony_plan`` (plan-driven);
+# the search application wraps it via ``search.BeeColonySearchRun``.
 
 # === Comparison Baselines (ported from AHolliday/transit_learning) ===
 from .simulated_annealing import simulated_annealing_with_reheating
@@ -117,6 +118,7 @@ from .models import (
     PathCombiningRouteGenerator,
     TrimPathCombiningRouteGenerator,
     RandomPathCombiningRouteGenerator,
+    RandomTrimExtendRouteGenerator,
     UnbiasedPathCombiner,
     NodeWalker,
     GraphEncoder,
@@ -159,6 +161,19 @@ from .torch_utils import (
 
 # === Build Dataset (Simulation-Based) ===
 from .build_dataset import build_dataset
+
+# === Experiment orchestration API (M010 stage 6) ===
+# The narrow public surface the notebook uses: name an experiment, run it,
+# render it. Everything above is the legacy/library internals surface (narrowed
+# in stage 7 once eval_lib + baselines dissolve).
+from .core import (
+    ExperimentRunFactory,
+    ExperimentBatch,
+    build_experiment,
+    load_experiment,
+    load_suite,
+)
+from .reports import render_report
 
 # Author & license
 # __author__ = "Andrew Holliday"

@@ -17,13 +17,14 @@ from .citygraph_dataset import (
     SpaceScaleTransform,
 )
 from .transit_time_estimator import (
+    COST_WEIGHT_KEY_ORDER,
     ROUTE_ACTION_EXTEND,
     ROUTE_ACTION_HALT,
     ROUTE_ACTION_TRIM_END,
     ROUTE_ACTION_TRIM_START,
     RouteGenBatchState,
 )
-from .models import FeatureNorm, get_mlp
+from .models import FeatureNorm, get_mlp, WEIGHT_FEATURE_KEYS
 from .torch_utils import get_batch_tensor_from_routes
 
 ROUTE_ACTION_NAMES = {
@@ -546,6 +547,32 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
     return output
 
 
+def network_adjustment_penalty(route_degrees, weight, target, objective):
+    """Network-level adjustment penalty: ``weight * penalty(mean_i adj_i)``.
+
+    This is the same form as MyCostModule._adjustment_penalty (the eval / BCO
+    objective): the per-route degrees are averaged into one network degree
+    FIRST, and the cap / target / cap_sq transform is applied to that mean.
+    ``weight`` and ``target`` may be scalars or per-batch tensors (adjustment
+    conditioning).
+    """
+    network_degree = route_degrees.mean(dim=-1)
+    tgt = torch.as_tensor(target, dtype=network_degree.dtype,
+                          device=network_degree.device)
+    if objective == "cap":
+        pen = (network_degree - tgt).clamp(min=0.0)
+    elif objective == "cap_sq":
+        pen = (network_degree - tgt).clamp(min=0.0) ** 2
+    elif objective == "target":
+        pen = (network_degree - tgt).abs()
+    elif objective == "raw":
+        pen = network_degree
+    else:
+        raise ValueError(
+            f"Unknown adjustment degree objective '{objective}'.")
+    return weight * pen
+
+
 def _route_change_mask(seed_routes, generated_routes):
     seed_routes = seed_routes.detach()
     generated_routes = generated_routes.detach().to(seed_routes.device)
@@ -679,6 +706,12 @@ class D3POValueModule:
     21-feature input (kept for backwards compatibility).
     """
 
+    # Feature specs (checkpoint-locked, declared like on the actor models):
+    # order of the cost-weight slots inside the shared global state features,
+    # and inside this critic's own legacy input tail (slot -1-ii = key ii).
+    weight_feature_keys = WEIGHT_FEATURE_KEYS
+    weight_input_keys = COST_WEIGHT_KEY_ORDER
+
     def __init__(self, learning_rate=0.0005, n_objectives=3, decay=0.01,
                  device=None, actor_model=None):
         self.learning_rate = learning_rate
@@ -740,7 +773,13 @@ class D3POValueModule:
             x_dim = dl[STOP_KEY].x.shape[1]
             input_data[bi, 6:6 + x_dim] = dl[STOP_KEY].x.mean(dim=0)
 
-        for ii, cw in enumerate(cost_weights.values()):
+        # Named dict -> fixed slots by the explicit key spec (never dict
+        # iteration order). A key absent from the dict leaves its slot at
+        # zero.
+        for ii, key in enumerate(self.weight_input_keys):
+            if key not in cost_weights:
+                continue
+            cw = cost_weights[key]
             data_idx = -(1 + ii)
             if torch.is_tensor(cw):
                 input_data[:, data_idx] = cw.to(dev)
@@ -754,7 +793,8 @@ class D3POValueModule:
             return self.actor_model.get_critic_features(state)
         input_data = self.inputs_from_data(
             state.graph_data, state.cost_weights)
-        glob_feats = state.get_global_state_features()
+        glob_feats = state.get_global_state_features(
+            weight_feature_keys=self.weight_feature_keys)
         input_data[..., -glob_feats.shape[-1]:] = glob_feats
         return input_data
 
@@ -1393,7 +1433,10 @@ def _preference_dict_from_tensor(weights):
 def _get_state_preferences(cost_obj, state):
     if hasattr(cost_obj, "get_preference_weights"):
         return cost_obj.get_preference_weights(state, normalize=True)
-    return _normalize_preference_weights(state.get_cost_weights_tensor())
+    # Cost/reward math order: explicit canonical keys (matches
+    # _preference_dict_from_tensor's unpacking).
+    return _normalize_preference_weights(
+        state.get_cost_weights_tensor(COST_WEIGHT_KEY_ORDER))
 
 
 def _collect_lc_improvement_cfg_d3po_rollout(
@@ -2011,7 +2054,9 @@ def train_lc_improvement_cfg_ppo(
         max_trim_actions_per_route=None, train_indices=None, val_indices=None,
         best_model_path=None,
         max_rollout_samples=8192, target_n_routes=None,
-        curriculum_fn=None, history_checkpoint_path=None):
+        curriculum_fn=None, val_curriculum_fn=None,
+        history_checkpoint_path=None, tensorboard_logdir=None,
+        tensorboard_scalars=None):
     """Train LC improvement with the construction PPO machinery adapted to edits.
 
     ``curriculum_fn(iteration) -> (indices, stage_label)`` optionally restricts
@@ -2032,6 +2077,14 @@ def train_lc_improvement_cfg_ppo(
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    tb_writer = None
+    if tensorboard_logdir is not None:
+        from torch.utils.tensorboard import SummaryWriter
+        tb_writer = SummaryWriter(log_dir=str(tensorboard_logdir))
+        print(f"[tensorboard] logging training metrics to {tensorboard_logdir}\n"
+              f"              view live: tensorboard --logdir "
+              f"{Path(tensorboard_logdir).parent}")
 
     if min_route_len is None:
         min_route_len = int(cfg.eval.min_route_len)
@@ -2084,6 +2137,8 @@ def train_lc_improvement_cfg_ppo(
     clip_epsilon = float(cfg.ppo.epsilon)
     use_gae = bool(cfg.ppo.use_gae)
     gae_lambda = float(cfg.ppo.gae_lambda)
+    normalize_advantages = bool(
+        _get_cfg_value(cfg, "normalize_advantages", True))
 
     # Optional adjustment-degree reward shaping. When weight <= 0 (the default)
     # every code path below is bypassed and training is bit-for-bit unchanged.
@@ -2247,58 +2302,50 @@ def train_lc_improvement_cfg_ppo(
     # and the fixed cfg scalars are used.
     cur_adj_target = None    # [batch] tensor or None
     cur_adj_weight = None    # [batch] tensor or None
-    # Cached per-route penalties (shape [batch, n_routes]) for the current
-    # episode. Only the slot being edited changes within an episode, so we
-    # compute the full vector once per episode and refresh only the edited route
-    # per step (avoids an n_routes-wide Needleman-Wunsch every step).
-    episode_route_pen_holder = [None]
-
-    def _pen_per_route(adj):
-        """Per-route penalty [.,n_routes] from adjustment degrees, using the
-        sampled per-graph target when conditioning, else the fixed scalar."""
-        if adjustment_conditioning and cur_adj_target is not None:
-            tgt = cur_adj_target.reshape(-1, 1)
-        else:
-            tgt = adjustment_degree_target
-        if adjustment_degree_objective == "cap":
-            return (adj - tgt).clamp(min=0.0)
-        if adjustment_degree_objective == "cap_sq":
-            # quadratic one-sided: gradient grows with overshoot (target-aware)
-            return (adj - tgt).clamp(min=0.0) ** 2
-        if adjustment_degree_objective == "target":
-            return (adj - tgt).abs()
-        return adj  # 'raw'
+    # Cached per-route adjustment DEGREES (shape [batch, n_routes]) for the
+    # current episode. Only the slot being edited changes within an episode, so
+    # we compute the full vector once per episode and refresh only the edited
+    # route per step (avoids an n_routes-wide Needleman-Wunsch every step).
+    episode_route_adj_holder = [None]
 
     def _net_weight():
         if adjustment_conditioning and cur_adj_weight is not None:
             return cur_adj_weight.reshape(-1)
         return adjustment_degree_weight
 
+    def _net_target():
+        if adjustment_conditioning and cur_adj_target is not None:
+            return cur_adj_target.reshape(-1)
+        return adjustment_degree_target
+
     def _init_episode_adjustment():
-        """Compute the full per-route penalty vector once at episode start."""
+        """Compute the full per-route degree vector once at episode start."""
         if not use_adjustment_penalty or cur_seed_routes is None \
                 or cur_working_routes is None:
             return
-        adj = get_adjustment_degrees(
+        episode_route_adj_holder[0] = get_adjustment_degrees(
             cur_working_routes, cur_seed_routes, cost_obj.symmetric_routes,
             gap=adjustment_degree_gap, mode=adjustment_degree_mode)
-        episode_route_pen_holder[0] = _pen_per_route(adj)
 
     def adjustment_penalty_fn(state):
-        """Per-network adjustment-degree penalty (vs seed routes) for shaping.
+        """Network-level adjustment-degree penalty (vs seed routes) for shaping.
 
-        Returns ``[batch]`` = weight * mean_route penalty for the full current
-        network (frozen context slots + the live in-progress route), or None
-        when disabled / not yet initialized. Reuses the episode-cached per-route
-        penalties and recomputes only the edited route. With conditioning the
+        Returns ``[batch]`` = weight * penalty(mean_i adj_i) -- the penalty of
+        the NETWORK-mean degree, exactly matching the eval/BCO form in
+        MyCostModule._adjustment_penalty. (Penalizing each route's deviation
+        separately and averaging the penalties is a different, much more
+        restrictive objective: it forbids the concentrated rewrites -- e.g.
+        fully replacing one duplicated route -- that the network-budget
+        semantics deliberately allow.) Reuses the episode-cached per-route
+        degrees and recomputes only the edited route. With conditioning the
         per-graph sampled target/weight (also fed to the agent) are used.
         """
         if not use_adjustment_penalty:
             return None
         route_idx = prev_route_idx_holder[0]
-        base_pen = episode_route_pen_holder[0]
+        base_adj = episode_route_adj_holder[0]
         if route_idx is None or cur_seed_routes is None \
-                or cur_working_routes is None or base_pen is None:
+                or cur_working_routes is None or base_adj is None:
             return None
         cur_list = _get_current_routes_from_state(state)
         cur_tensor = get_batch_tensor_from_routes(
@@ -2310,10 +2357,10 @@ def train_lc_improvement_cfg_ppo(
             cur_seed_routes[:, route_idx:route_idx + 1, :],
             cost_obj.symmetric_routes,
             gap=adjustment_degree_gap, mode=adjustment_degree_mode)
-        pen_cur = _pen_per_route(adj_cur)
-        pens = base_pen.clone()
-        pens[:, route_idx] = pen_cur[:, 0]
-        return _net_weight() * pens.mean(dim=1)
+        degrees = base_adj.clone()
+        degrees[:, route_idx] = adj_cur[:, 0]
+        return network_adjustment_penalty(
+            degrees, _net_weight(), _net_target(), adjustment_degree_objective)
 
     def make_next_state(prev_state=None):
         nonlocal epoch_indices, index_cursor, route_cursor
@@ -2478,6 +2525,15 @@ def train_lc_improvement_cfg_ppo(
             rollout["rewards"], rollout["value_estimates"],
             rollout["dones"], rollout["final_value_estimates"], gamma,
             use_gae, gae_lambda)
+        if normalize_advantages:
+            # Standardize over the active steps of this update. Makes the
+            # policy gradient invariant to the reward scale, which otherwise
+            # varies a lot across batches (sampled cost weights alpha, graph
+            # difficulty) and drowns the small per-edit improvement signal.
+            _act = rollout["active_masks"]
+            if _act.any():
+                _a = advantages[_act]
+                advantages = (advantages - _a.mean()) / (_a.std() + 1e-8)
         ppo_stats = _update_lc_improvement_cfg_ppo_from_rollout(
             model, optimizer, value_module, rollout, returns, advantages,
             ppo_epochs, minibatch_size, clip_epsilon, entropy_weight, device)
@@ -2511,8 +2567,16 @@ def train_lc_improvement_cfg_ppo(
             or iteration == int(n_iterations) - 1
         )
         if eval_due:
+            # Curriculum-aware validation: when a val_curriculum_fn is given,
+            # validate ONLY on the tiers currently active in training, so the
+            # validation signal (and best-checkpoint selection) is comparable to
+            # what the agent is being trained on. At the final stage all tiers
+            # are active, so this reduces to the full validation set.
+            active_val_indices = (val_curriculum_fn(iteration)
+                                  if val_curriculum_fn is not None
+                                  else val_indices)
             last_val = evaluate_lc_improvement(
-                model, cost_obj, graphs, seed_routes, val_indices, device,
+                model, cost_obj, graphs, seed_routes, active_val_indices, device,
                 min_route_len, max_route_len,
                 batch_size=effective_batch_size,
                 force_nonhalt_first_step=force_nonhalt_first_step,
@@ -2616,30 +2680,40 @@ def train_lc_improvement_cfg_ppo(
         history.append(row)
         _write_history_checkpoint(history, history_checkpoint_path)
 
+        if tb_writer is not None:
+            _step = int(row.get("iteration", len(history)))
+            for _k, _v in row.items():
+                if tensorboard_scalars is not None and _k not in tensorboard_scalars:
+                    continue
+                if isinstance(_v, bool):
+                    _v = int(_v)
+                if isinstance(_v, (int, float)) and _v == _v:  # skip NaN
+                    tb_writer.add_scalar(_k, float(_v), _step)
+            tb_writer.flush()
+
+        # Unified, comparable progress metrics: the per-episode reward is the
+        # mean cost reduction over an episode (seed - final), computed the SAME
+        # way for train and validation, so train_ep_rew, val_ep_rew and their
+        # gap are directly comparable. (Train is at the per-batch sampled cost
+        # weights / adjustment target; validation at the fixed eval operating
+        # point.) Everything else stays in the history DataFrame for the figure
+        # and TensorBoard, but is kept out of the live line to reduce clutter.
+        _tr_ep = row["train_delta"]
+        _va_ep = row["val_delta"]
+        _gap = (_tr_ep - _va_ep
+                if _tr_ep == _tr_ep and _va_ep == _va_ep else float("nan"))
+        row["train_val_gap"] = _gap
         pbar.set_postfix({
-            "reward": f"{row['train_reward_mean']:.3f}",
-            "t_ret": f"{row['train_return_mean']:.3f}",
-            "delta": f"{row['train_delta']:.3f}",
-            "ratio": f"{row['train_ppo_ratio_mean']:.3f}",
-            "clip": f"{row['train_ppo_clip_fraction']:.2%}",
+            "stage": cur_stage_label,
+            "tr_rew": f"{_tr_ep:+.3f}",
+            "val_rew": f"{_va_ep:+.3f}",
+            "gap": f"{_gap:+.3f}",
         })
         print(
-            f"cfg_ppo_iter={row['iteration']:03d} "
-            f"reward={row['train_reward_mean']:.4f} "
-            f"reward_ep={row['train_reward_per_episode']:.4f} "
-            f"reward_delta_err={row['train_reward_delta_residual']:.4f} "
-            f"train_ret={row['train_return_mean']:.4f} "
-            f"train_delta={row['train_delta']:.4f} "
-            f"val_delta={row['val_delta']:.4f} "
-            f"ratio={row['train_ppo_ratio_mean']:.3f} "
-            f"clip={row['train_ppo_clip_fraction']:.2%} "
-            f"actions="
-            f"ext:{row['train_action_extend_count']} "
-            f"trim_s:{row['train_action_trim_start_count']} "
-            f"trim_e:{row['train_action_trim_end_count']} "
-            f"halt:{row['train_action_halt_count']} "
-            f"avg_steps={row['train_action_avg_actions_per_route']:.2f} "
-            f"eval={row['is_eval_iteration']}"
+            f"iter={row['iteration']:03d} stage={cur_stage_label:<10} "
+            f"train_ep_rew={_tr_ep:+.4f} val_ep_rew={_va_ep:+.4f} "
+            f"train_val_gap={_gap:+.4f}"
+            + ("  [eval]" if eval_due else "")
         )
         # Do not keep the previous rollout reachable while collecting the
         # next one. This matters especially when rollout states stay on GPU.
@@ -2657,6 +2731,9 @@ def train_lc_improvement_cfg_ppo(
             "values": ppo_stats["critic_last_values"].numpy(),
             "targets": ppo_stats["critic_last_targets"].numpy(),
         }
+
+    if tb_writer is not None:
+        tb_writer.close()
 
     return {
         "best_model_path": best_model_path,
@@ -2679,6 +2756,7 @@ def train_lc_improvement_cfg_d3po(
         max_trim_actions_per_route=None, train_indices=None, val_indices=None,
         best_model_path=None,
         max_rollout_samples=8192, target_n_routes=None,
+        curriculum_fn=None, val_curriculum_fn=None,
         history_checkpoint_path=None):
     """Train LC improvement with D3PO as a PPO alternative.
 
@@ -2995,8 +3073,16 @@ def train_lc_improvement_cfg_d3po(
             or iteration == int(n_iterations) - 1
         )
         if eval_due:
+            # Curriculum-aware validation: when a val_curriculum_fn is given,
+            # validate ONLY on the tiers currently active in training, so the
+            # validation signal (and best-checkpoint selection) is comparable to
+            # what the agent is being trained on. At the final stage all tiers
+            # are active, so this reduces to the full validation set.
+            active_val_indices = (val_curriculum_fn(iteration)
+                                  if val_curriculum_fn is not None
+                                  else val_indices)
             last_val = evaluate_lc_improvement(
-                model, cost_obj, graphs, seed_routes, val_indices, device,
+                model, cost_obj, graphs, seed_routes, active_val_indices, device,
                 min_route_len, max_route_len,
                 batch_size=effective_batch_size,
                 force_nonhalt_first_step=force_nonhalt_first_step,

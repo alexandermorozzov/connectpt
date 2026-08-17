@@ -267,9 +267,11 @@ def john_init(state: RouteGenBatchState, alpha=None,
             sorted_pairs = [(ss.item(), dd.item())
                             for ss, dd in nodepairs[sorted_indices]]
 
-            # build a networkx graph
+            # build a networkx graph (from_numpy_matrix was renamed to
+            # from_numpy_array in networkx >= 3.0)
             edge_costs[state.street_adj[0].isinf()] = 0
-            graph = nx.from_numpy_matrix(edge_costs.numpy())
+            _from_np = getattr(nx, "from_numpy_array", None) or nx.from_numpy_matrix
+            graph = _from_np(edge_costs.numpy())
 
             # add the existing routes to the graph to get the transit times
             state.add_new_routes([network])

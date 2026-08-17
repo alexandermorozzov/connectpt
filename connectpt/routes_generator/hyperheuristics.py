@@ -69,7 +69,8 @@ class HeuristicSequence:
 def hyperheuristic(state, cost_obj, f_0, delta_F=None, duration_s=None,
                    n_steps=None, init_network=None, model=None, silent=False,
                    sum_writer=None,
-                   early_stop_patience=None, early_stop_min_delta=0.0):
+                   early_stop_patience=None, early_stop_min_delta=0.0,
+                   max_repair_iters=None):
     """
     state: The initial state of the system, not including the routes.
     cost_obj: The cost-function object.
@@ -132,7 +133,8 @@ def hyperheuristic(state, cost_obj, f_0, delta_F=None, duration_s=None,
         init_network = tmp
 
     network = build_init_network(shortest_paths, state, init_network,
-                                 sum_writer, show_pbar=not silent)
+                                 sum_writer, show_pbar=not silent,
+                                 max_repair_iters=max_repair_iters)
     network = network.cpu()
     best_network = network.clone()
     sp_lens = (shortest_paths > -1).sum(dim=-1).cpu()
@@ -288,7 +290,7 @@ def hyperheuristic(state, cost_obj, f_0, delta_F=None, duration_s=None,
 
 
 def build_init_network(shortest_paths, state, init_network=None,
-                       sum_writer=None, show_pbar=True):
+                       sum_writer=None, show_pbar=True, max_repair_iters=None):
     batch_size = shortest_paths.shape[0]
     networks = []
     for bi in range(batch_size):
@@ -298,13 +300,14 @@ def build_init_network(shortest_paths, state, init_network=None,
             bis = None
         network = _build_init_network_helper(shortest_paths[bi], state, bis,
                                              sum_writer,
-                                             show_pbar=show_pbar)
+                                             show_pbar=show_pbar,
+                                             max_repair_iters=max_repair_iters)
         networks.append(network)
     return torch.stack(networks, dim=0)
 
 
 def _build_init_network_helper(shortest_paths, state, init_network, sum_writer,
-                               show_pbar=True):
+                               show_pbar=True, max_repair_iters=None):
     n_nodes = shortest_paths.shape[0]
     n_nodes = state.max_n_nodes
     min_stops = state.min_route_len[0]
@@ -385,7 +388,12 @@ def _build_init_network_helper(shortest_paths, state, init_network, sum_writer,
     repair_pbar = tqdm(desc="HH init repair", unit="it",
                        disable=not show_pbar)
     try:
-        while nv > 0:
+        # ``max_repair_iters`` caps the random-walk repair: the corrupt seed
+        # (e.g. covered_dup) can carry many duplicate-edge violations whose
+        # removal otherwise takes tens of thousands of random steps. With a cap,
+        # HH starts from a near-feasible network and lets the optimization (which
+        # penalizes residual violations) finish the cleanup.
+        while nv > 0 and (max_repair_iters is None or ii < max_repair_iters):
             # select a heuristic randomly
             heur_idx = torch.randint(len(heuristics), (1,))
             heuristic = heuristics[heur_idx]
@@ -407,6 +415,10 @@ def _build_init_network_helper(shortest_paths, state, init_network, sum_writer,
     finally:
         repair_pbar.close()
 
+    if nv > 0:
+        log.info(f"HH init repair hit the {max_repair_iters}-iter cap with "
+                 f"{float(nv.item()):.0f} residual violations; the optimization "
+                 f"loop (which penalizes violations) will finish the cleanup.")
     if sum_writer is not None:
         sum_writer.add_scalar('# init repair iterations', float(ii), 0)
     return network.cpu()

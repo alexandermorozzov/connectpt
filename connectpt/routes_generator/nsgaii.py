@@ -33,22 +33,22 @@ from . import torch_utils as tu
 from .models import RandomPathCombiningRouteGenerator
 
 
-# Module-global device. The ancestor's Hydra main() set this; that entry point
-# was dropped, so callers (e.g. the notebook run_nsgaii helper) set it directly
-# via `nsgaii.DEVICE = device`.
-DEVICE = torch.device('cpu')
-
-
 class NSGAII:
     """A class to implement the NSGA-II multi-objective optimization algorithm"""
 
     def __init__(self, cost_obj, init_models, mutators, n_iterations=200,
                  pop_size=200, p_crossover=0.9, p_mutation=0.9,
-                 mutator_p_t=0.03, batch_size=None):
-        """Constructor for the NSGA-II object"""
+                 mutator_p_t=0.03, batch_size=None,
+                 device=torch.device('cpu')):
+        """Constructor for the NSGA-II object.
+
+        ``device`` is explicit (the ancestor read a module-global set by its
+        Hydra main(); callers now pass the resolved device directly).
+        """
 
         assert isinstance(cost_obj, MultiObjectiveCostModule), \
             "cost_obj must be a MultiObjectiveCostModule"
+        self.device = torch.device(device)
         self.cost_obj = cost_obj
         self.init_models = init_models
         self.mutators = mutators
@@ -190,7 +190,7 @@ class NSGAII:
                 mutated_networks[has_violation] = child_networks[has_violation]
                 # clear the mutator indices for invalid mutants
                 mutator_idxs[has_violation] = -1
-                child_states.replace_routes(mutated_networks.to(DEVICE))
+                child_states.replace_routes(mutated_networks.to(self.device))
                 # recompute costs
                 child_costs, has_violation = self._get_costs(child_states)
             if has_violation.any():
@@ -328,16 +328,16 @@ class NSGAII:
         if mode == 'model':
             exp_states = [state] * self.batch_size
             gen_states = RouteGenBatchState.batch_from_list(exp_states)
-            gen_states = gen_states.to_device(DEVICE)
+            gen_states = gen_states.to_device(self.device)
             # set cost function weights to a spread
             gen_weights = self.cost_obj.sample_weights(self.batch_size)
             gen_states.set_cost_weights(gen_weights)
 
             rpc_weights = {}
             rpc_weights['demand_time_weight'] = torch.ones(self.batch_size,
-                                                           device=DEVICE)
+                                                           device=self.device)
             rpc_weights['route_time_weight'] = torch.zeros(self.batch_size,
-                                                           device=DEVICE)
+                                                           device=self.device)
 
         while len(pop) < self.pop_size:
             if mode == 'model':
@@ -501,11 +501,12 @@ class NSGAII:
 # mutation functions.  These are required to return only valid mutant networks.
 
 
-def model_mutator(model, state, networks, greedy=False, weight_mode='random'):
+def model_mutator(model, state, networks, greedy=False, weight_mode='random',
+                  device=torch.device('cpu')):
     """weight_mode: 'random', 'all_passenger', or 'all_operator'"""
     # choose a random route to replace
     with torch.no_grad():
-        state = model.setup_planning(state.to_device(DEVICE))
+        state = model.setup_planning(state.to_device(device))
     n_routes = networks.shape[-2]
     if networks.ndim == 2:
         networks = networks.unsqueeze(0)
@@ -519,11 +520,11 @@ def model_mutator(model, state, networks, greedy=False, weight_mode='random'):
 
     # select cost weights
     if weight_mode == 'random':
-        demand_time_weights = torch.rand(n_networks, device=DEVICE)
+        demand_time_weights = torch.rand(n_networks, device=device)
     elif weight_mode == 'all_passenger':
-        demand_time_weights = torch.ones(n_networks, device=DEVICE)
+        demand_time_weights = torch.ones(n_networks, device=device)
     elif weight_mode == 'all_operator':
-        demand_time_weights = torch.zeros(n_networks, device=DEVICE)
+        demand_time_weights = torch.zeros(n_networks, device=device)
     weights_dict = {
         'demand_time_weight': demand_time_weights,
         'route_time_weight': 1 - demand_time_weights
@@ -531,8 +532,8 @@ def model_mutator(model, state, networks, greedy=False, weight_mode='random'):
     exp_states.set_cost_weights(weights_dict)
 
     with torch.no_grad():
-        mutated = get_neural_variants(model, exp_states, networks.to(DEVICE),
-                                      routes_idxs.to(DEVICE), greedy=greedy)
+        mutated = get_neural_variants(model, exp_states, networks.to(device),
+                                      routes_idxs.to(device), greedy=greedy)
 
     return mutated.cpu()
 

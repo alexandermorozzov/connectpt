@@ -20,9 +20,10 @@ import hydra
 from .citygraph_dataset import CityGraphData, CityGraphDataset, \
     get_default_train_and_eval_split, get_dynamic_training_set, STOP_KEY, \
     DEMAND_KEY
-from .transit_time_estimator import ROUTE_ACTION_EXTEND, RouteGenBatchState
+from .transit_time_estimator import (COST_WEIGHT_KEY_ORDER,
+                                     ROUTE_ACTION_EXTEND, RouteGenBatchState)
 from . import utils as lrnu
-from .models import FeatureNorm, get_mlp
+from .models import FeatureNorm, get_mlp, WEIGHT_FEATURE_KEYS
 from .eval_route_generator import eval_model
 
 
@@ -95,6 +96,12 @@ class NNBaseline:
     built lazily. When ``actor_model`` is None it uses the legacy
     21-feature input (unchanged for construction PPO).
     """
+
+    # Feature specs (checkpoint-locked, declared like on the actor models):
+    # order of the cost-weight slots inside the shared global state features,
+    # and inside this baseline's own legacy input tail (slot -1-ii = key ii).
+    weight_feature_keys = WEIGHT_FEATURE_KEYS
+    weight_input_keys = COST_WEIGHT_KEY_ORDER
 
     def __init__(self, learning_rate=0.0005, decay=0.01, actor_model=None,
                  normalize_returns=False, huber=False, huber_delta=1.0,
@@ -248,9 +255,12 @@ class NNBaseline:
             x_dim = dl[STOP_KEY].x.shape[1]
             input_data[bi, 6:6+x_dim] = dl[STOP_KEY].x.mean(dim=0)
 
-        for ii, cw in enumerate(cost_weights.values()):
-            data_idx = -(1 + ii)
-            input_data[:, data_idx] = cw
+        # Named dict -> fixed slots by the explicit key spec (never dict
+        # iteration order). A key absent from the dict (e.g. the {} passed by
+        # set_input_norm) leaves its slot at zero.
+        for ii, key in enumerate(self.weight_input_keys):
+            if key in cost_weights:
+                input_data[:, -(1 + ii)] = cost_weights[key]
 
         return input_data
 
@@ -269,7 +279,8 @@ class NNBaseline:
             return self.actor_model.get_critic_features(state)
         input_data = self.inputs_from_data(state.graph_data,
                                            state.cost_weights)
-        glob_feats = state.get_global_state_features()
+        glob_feats = state.get_global_state_features(
+            weight_feature_keys=self.weight_feature_keys)
         input_data[..., -glob_feats.shape[-1]:] = glob_feats
         return input_data
 
@@ -755,7 +766,8 @@ def train(model, min_n_routes, max_n_routes, cfg, optimizer, train_dataloader,
 
             while not state.is_done().all():
                 n_routes_so_far.append(state.n_finished_routes)
-                state_vecs.append(state.get_global_state_features())
+                state_vecs.append(state.get_global_state_features(
+                    weight_feature_keys=model.weight_feature_keys))
                 if supports_route_actions:
                     action_kinds, actions, logits, entropy = \
                         model.step_route_action(state)
@@ -946,7 +958,7 @@ def setup_and_train(cfg: DictConfig, trial: optuna.trial.Trial = None):
     
     return best_cost
 
-@hydra.main(version_base=None, config_path="../cfg", config_name="ppo_20nodes")
+@hydra.main(version_base=None, config_path="../cfg", config_name="training/ppo_20nodes")
 def main(cfg: DictConfig):
     return setup_and_train(cfg)
 

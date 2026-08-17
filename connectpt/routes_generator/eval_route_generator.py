@@ -238,7 +238,7 @@ def eval_model(model, eval_dataloader, eval_cfg, cost_obj, sum_writer=None,
 
 
 # @hydra.main(version_base=None, config_path="../cfg", 
-#             config_name="eval_model_mumford")
+#             config_name="evaluation/eval_model_mumford")
 def main(cfg: DictConfig, tensors:dict):
     global DEVICE
     assert 'model' in cfg, "Must provide config for model!"
