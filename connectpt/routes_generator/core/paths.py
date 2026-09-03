@@ -29,7 +29,6 @@ ARTIFACTS_DIR = ROOT_DIR / "artifacts"
 MODEL_WEIGHTS_DIR = ARTIFACTS_DIR / "model_weights"
 EDIT_MODEL_WEIGHTS_DIR = MODEL_WEIGHTS_DIR / "improvement"
 MODEL_OUTPUTS_DIR = ARTIFACTS_DIR / "lc_improvement_outputs"
-OUTPUT_ROUTES_DIR = ARTIFACTS_DIR / "output_routes"
 
 # Pretrained construction (neural-BCO bee) checkpoint that ships with the repo.
 CONSTRUCTION_MODEL_WEIGHTS_PATH = (
@@ -55,6 +54,5 @@ def resolve_under_root(path) -> Path:
 
 def ensure_output_dirs() -> None:
     """Create the artifact write targets (inputs under datasets/ must exist)."""
-    for d in (MODEL_WEIGHTS_DIR, EDIT_MODEL_WEIGHTS_DIR, MODEL_OUTPUTS_DIR,
-              OUTPUT_ROUTES_DIR):
+    for d in (MODEL_WEIGHTS_DIR, EDIT_MODEL_WEIGHTS_DIR, MODEL_OUTPUTS_DIR):
         d.mkdir(parents=True, exist_ok=True)

@@ -33,10 +33,8 @@ TILE_URL = "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
 TILE_SIZE = 256
 WEB_MERCATOR_HALF_WORLD = 20037508.342789244
 
-# Canonical write target, plus the tile set already shipped in the repo (kept
-# read-only so a warm offline render works without duplicating the cache).
+# The one place tiles are read from and written to.
 TILE_CACHE_DIR = ARTIFACTS_DIR / "_tile_cache"
-FALLBACK_TILE_CACHE_DIR = ARTIFACTS_DIR / "archive" / "paper_results" / "_tile_cache"
 
 DEFAULT_ZOOM = 11
 DEFAULT_PAD_M = 1000.0   # just enough context; wider margins shrink the network
@@ -71,13 +69,9 @@ def _tile_bounds(tile_x: int, tile_y: int, zoom: int):
 
 
 def _cached_tile_path(tile_x: int, tile_y: int, zoom: int, cache_dir: Path):
-    """First existing cached copy of a tile (canonical dir, then the shipped one)."""
-    rel = Path(str(zoom)) / str(tile_x) / f"{tile_y}.png"
-    for base in (cache_dir, FALLBACK_TILE_CACHE_DIR):
-        candidate = Path(base) / rel
-        if candidate.exists():
-            return candidate
-    return None
+    """The cached copy of a tile, or ``None`` when it has not been fetched yet."""
+    candidate = Path(cache_dir) / str(zoom) / str(tile_x) / f"{tile_y}.png"
+    return candidate if candidate.exists() else None
 
 
 def _load_tile(tile_x: int, tile_y: int, zoom: int, cache_dir: Path, *,

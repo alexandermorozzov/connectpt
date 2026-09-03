@@ -463,8 +463,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
         operator groups (rebuild / shorten / RPC / construction-extend /
         edit / trim / trim-then-extend) with their bee counts, models and
         per-operator halt/max-len flags. Built from declarative BeeSpecs via
-        ``ExecutablePlan.from_specs``, or from the legacy flat ``n_type*_bees``
-        config via ``search.compat.plan_from_flat_cfg``.
+        ``ExecutablePlan.from_specs``.
     silent -- if true, no tqdm output or printing
     adjustment_degree_weight -- penalty weight for changing routes too much
         relative to the original initialized network.

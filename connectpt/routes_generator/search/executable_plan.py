@@ -12,10 +12,8 @@ preserved by construction:
 * the random-path-combiner model is created lazily at the same point of the
   engine (``materialize()``) where the legacy code built it.
 
-Builders: :meth:`ExecutablePlan.from_specs` builds a plan from declarative
-BeeSpecs (``cfg/search/bee_sets``) -- the way new bee sets are written. The
-legacy flat ``n_type*_bees`` format and the old-signature ``bee_colony`` entry
-live entirely in :mod:`connectpt.routes_generator.search.compat`.
+Builder: :meth:`ExecutablePlan.from_specs` builds a plan from declarative
+BeeSpecs (``cfg/search/bee_sets``) -- the only way bee sets are written.
 """
 from __future__ import annotations
 

@@ -9,9 +9,8 @@ block. Adjustment defaults come from the unified objective (single source), not
 from scattered literals.
 
 The plan is the single source for *what the bees are*; the caller builds it once
-(``ExecutablePlan.from_specs`` or the legacy ``search.compat.plan_from_flat_cfg``
-/ ``plan_from_counts``) and hands it in, so the invocation layer no longer
-re-derives ``n_type*`` counts.
+(``ExecutablePlan.from_specs``) and hands it in, so the invocation layer no
+longer re-derives ``n_type*`` counts.
 """
 from __future__ import annotations
 
