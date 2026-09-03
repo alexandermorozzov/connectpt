@@ -53,6 +53,35 @@ def adj_vs_init(routes, init_routes):
         r[:, :nr, :w], s[:, :nr, :w], True, gap=_ADJ_GAP, mode=_ADJ_MODE).mean().item())
 
 
+def route_adjustment_degrees(routes, reference_routes):
+    """Per-route adjustment degree vs a reference network (numpy vector).
+
+    Same gap/mode as :func:`adj_vs_init`, but without the mean -- route figures
+    colour each route by how much it moved, and the mean of this vector is the
+    reported ``adj_vs_seed``. Both route sets are padded to a common width so a
+    candidate longer than the seed still aligns.
+    """
+    r = as_route_tensor(routes).long()
+    s = as_route_tensor(reference_routes).long()
+    if r.ndim == 3:
+        r = r[0]
+    if s.ndim == 3:
+        s = s[0]
+    width = max(int(r.shape[-1]), int(s.shape[-1]))
+    r, s = _pad_route_width(r, width)[None], _pad_route_width(s, width)[None]
+    return get_adjustment_degrees(
+        r, s, True, gap=_ADJ_GAP, mode=_ADJ_MODE)[0].detach().cpu().numpy()
+
+
+def _pad_route_width(routes, width):
+    """Right-pad a ``[n_routes, L]`` tensor with ``-1`` up to ``width``."""
+    if routes.shape[-1] >= width:
+        return routes[..., :width]
+    pad = torch.full((routes.shape[0], width - routes.shape[-1]), -1,
+                     dtype=routes.dtype)
+    return torch.cat([routes, pad], dim=-1)
+
+
 def redundancy_pct(routes):
     """% of edge traversals that re-cover an already-covered edge."""
     R = as_route_tensor(routes)

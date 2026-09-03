@@ -29,6 +29,35 @@ def project_coords(coords, source_crs):
     return np.column_stack((lat, lon))
 
 
+def project_coords_3857(coords, source_crs):
+    """Project metric coordinates to web-mercator ``(x, y)`` metres.
+
+    The projection slippy-map tiles live in, so route geometry and the basemap
+    underlay (``reports.basemap``) share one coordinate frame.
+    """
+    if isinstance(coords, torch.Tensor):
+        coords = coords.detach().cpu().numpy()
+    coords = np.asarray(coords, dtype=float)
+    transformer = Transformer.from_crs(source_crs, "EPSG:3857", always_xy=True)
+    x_coord, y_coord = transformer.transform(coords[:, 0], coords[:, 1])
+    return np.column_stack((x_coord, y_coord))
+
+
+def route_adjustments(routes, reference_routes):
+    """Per-route adjustment degree vs a reference network, as a numpy vector.
+
+    The route-wise counterpart of the network-mean ``adj_vs_seed`` every results
+    table reports -- what the adjustment-gradient panel colours routes by. The
+    Needleman-Wunsch gap/mode come from the single objective source
+    (``cfg/objective/*.yaml``), so a figure can never disagree with the search.
+    The import is deferred: ``reports`` reads artifacts and must not pull the
+    scoring stack in at module import time.
+    """
+    from ..evaluation.route_scoring import route_adjustment_degrees
+
+    return route_adjustment_degrees(routes, reference_routes)
+
+
 def route_stats(routes):
     """Compact route-set statistics for map titles and notebook tables."""
     rr = as_route_tensor(routes)

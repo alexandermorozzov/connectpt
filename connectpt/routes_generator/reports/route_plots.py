@@ -109,8 +109,18 @@ def extract_coords_street_adj(graph_or_coords, street_adj=None):
     return coords, street_adj
 
 
-def draw_street_graph(ax, coords, street_adj):
-    """Draw the underlying street graph as faint grey lines."""
+# Street-underlay styles. The default is the faint grey used on benchmark
+# figures; the geo one is darker and thicker so the road network stays
+# readable on top of a map basemap. A style is a plain kwargs dict passed to
+# ``draw_street_graph`` -- panels take it as ``street_style=``, which is what
+# the paper figures used to achieve by monkey-patching this module.
+DEFAULT_STREET_STYLE = dict(color="lightgray", linewidth=1.0, alpha=0.35, zorder=1)
+GEO_STREET_STYLE = dict(color="#6f7378", linewidth=1.2, alpha=0.50, zorder=1.2)
+
+
+def draw_street_graph(ax, coords, street_adj, *, color="lightgray",
+                      linewidth=1.0, alpha=0.35, zorder=1):
+    """Draw the underlying street graph as faint lines (caller picks the style)."""
     n_nodes = coords.shape[0]
     for start in range(n_nodes):
         for end in range(start + 1, n_nodes):
@@ -119,12 +129,121 @@ def draw_street_graph(ax, coords, street_adj):
                 ax.plot(
                     [coords[start, 0], coords[end, 0]],
                     [coords[start, 1], coords[end, 1]],
-                    color="lightgray",
-                    linewidth=1.0,
-                    alpha=0.35,
-                    zorder=1,
+                    color=color,
+                    linewidth=linewidth,
+                    alpha=alpha,
+                    solid_capstyle="round",
+                    zorder=zorder,
                 )
 
+
+# Palette generation bounds. Colors are picked for a LIGHT map basemap: nothing
+# so pale it washes out, nothing so dark it reads as the street graph, and enough
+# chroma that hue -- not lightness -- is what distinguishes two routes.
+PALETTE_LIGHTNESS = (24.0, 74.0)     # CIE L*
+PALETTE_MIN_CHROMA = 22.0            # sqrt(a*^2 + b*^2)
+PALETTE_GRID_STEPS = 14              # sRGB cube sampling per channel
+
+
+def _srgb_to_lab(rgb):
+    """Convert sRGB in ``[0, 1]`` to CIE L*a*b* (D65) -- vectorized, no deps.
+
+    Route colors have to be spaced by how DIFFERENT THEY LOOK, and RGB distance
+    is a poor proxy for that; L*a*b* is close enough to perceptual that greedy
+    farthest-point selection in it produces a genuinely distinguishable set.
+    """
+    rgb = np.asarray(rgb, dtype=float)
+    linear = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    to_xyz = np.array([[0.4124564, 0.3575761, 0.1804375],
+                       [0.2126729, 0.7151522, 0.0721750],
+                       [0.0193339, 0.1191920, 0.9503041]])
+    xyz = linear @ to_xyz.T / np.array([0.95047, 1.0, 1.08883])
+    f = np.where(xyz > 0.008856, np.cbrt(xyz), 7.787 * xyz + 16.0 / 116.0)
+    return np.stack([116.0 * f[..., 1] - 16.0,
+                     500.0 * (f[..., 0] - f[..., 1]),
+                     200.0 * (f[..., 1] - f[..., 2])], axis=-1)
+
+
+def _spaced_colors(n_colors: int):
+    """``n_colors`` maximally distinguishable sRGB colors, deterministically.
+
+    Samples the sRGB cube, drops anything too light / too dark / too grey for a
+    map figure, then greedily takes the candidate furthest (in L*a*b*) from
+    everything already taken. The greedy order does not depend on ``n_colors``,
+    so a 20-route figure uses the first 20 colors of the 67-route palette.
+    """
+    axis = np.linspace(0.0, 1.0, PALETTE_GRID_STEPS)
+    grid = np.stack(np.meshgrid(axis, axis, axis, indexing="ij"), axis=-1)
+    candidates = grid.reshape(-1, 3)
+    lab = _srgb_to_lab(candidates)
+    chroma = np.hypot(lab[:, 1], lab[:, 2])
+    keep = ((lab[:, 0] >= PALETTE_LIGHTNESS[0]) & (lab[:, 0] <= PALETTE_LIGHTNESS[1])
+            & (chroma >= PALETTE_MIN_CHROMA))
+    candidates, lab, chroma = candidates[keep], lab[keep], chroma[keep]
+
+    picked = [int(np.argmax(chroma))]     # start from the most saturated color
+    min_dist = np.linalg.norm(lab - lab[picked[0]], axis=1)
+    while len(picked) < min(n_colors, len(candidates)):
+        nxt = int(np.argmax(min_dist))
+        picked.append(nxt)
+        min_dist = np.minimum(min_dist, np.linalg.norm(lab - lab[nxt], axis=1))
+    return candidates[picked]
+
+
+def large_palette(n_routes: int, name: str = "connectpt_large") -> str:
+    """Register (once) and return a palette with ``n_routes`` distinct colors.
+
+    Named matplotlib qualitative colormaps top out around 20 entries, and simply
+    chaining them (tab20 + Set3 + ...) yields near-duplicate pastels that vanish
+    over a light basemap. This builds the palette by perceptual spacing instead
+    and caches it under ``name`` so :func:`route_colors_for` treats it like any
+    built-in palette.
+    """
+    n_routes = max(int(n_routes), 1)
+    cached = _PALETTE_CACHE.get(name)
+    if cached is not None and len(cached) >= n_routes:
+        return name
+    rgb = _spaced_colors(n_routes)
+    _PALETTE_CACHE[name] = np.concatenate(
+        [rgb, np.ones((len(rgb), 1))], axis=1)
+    return name
+
+
+def drawn_node_mask(street_adj, *route_sets):
+    """Boolean mask of the nodes worth drawing on a route figure.
+
+    A stop with no street edge at all is an artefact of the source data, not a
+    place a route can reach -- drawing it leaves a dot floating in empty space.
+    A node is kept when the street graph connects it, or when one of the drawn
+    route sets visits it anyway.
+    """
+    adj = np.asarray(street_adj)
+    finite = np.isfinite(adj)
+    mask = finite.any(axis=1) | finite.any(axis=0)
+    for route_set in route_sets:
+        if route_set is None:
+            continue
+        routes = get_first_route_set(route_set)
+        nodes = routes[routes >= 0]
+        if nodes.numel():
+            mask[np.unique(nodes.numpy())] = True
+    return mask
+
+
+def scatter_nodes(ax, coords, mask, *, size, alpha=None, color="black", zorder=5):
+    """Draw the node markers for the kept nodes only."""
+    if size is None or size <= 0:
+        return
+    ax.scatter(coords[mask, 0], coords[mask, 1], c=color, s=size, alpha=alpha,
+               zorder=zorder)
+
+
+def label_nodes(ax, coords, mask, *, zorder=6):
+    """Write node ids on the kept nodes only."""
+    for node_idx in np.flatnonzero(mask):
+        x_coord, y_coord = coords[node_idx]
+        ax.text(x_coord, y_coord, str(int(node_idx)), fontsize=7, color="white",
+                ha="center", va="center", zorder=zorder)
 
 def build_edge_overlap_map(*route_sets):
     """Build a map ``(route_idx, edge_key) -> (pos, count)`` for curved-edge
@@ -274,7 +393,8 @@ def summarize_route_changes(routes, reference_routes):
 def plot_plain_route_set(ax, routes, graph_or_coords, street_adj=None,
                          title=None, subtitle=None, *,
                          palette="tab20", with_overlap_curves=True,
-                         show_node_labels=True, node_size=55):
+                         show_node_labels=True, node_size=55, node_alpha=None,
+                         street_style=None):
     """Draw a single route set on top of the underlying street graph.
 
     Two positional conventions are supported:
@@ -295,7 +415,8 @@ def plot_plain_route_set(ax, routes, graph_or_coords, street_adj=None,
     routes = get_first_route_set(routes)
     coords, street_adj_arr = extract_coords_street_adj(
         graph_or_coords, street_adj)
-    draw_street_graph(ax, coords, street_adj_arr)
+    draw_street_graph(ax, coords, street_adj_arr,
+                      **(street_style or DEFAULT_STREET_STYLE))
 
     colors = route_colors_for(routes, palette=palette)
     overlap_map = build_edge_overlap_map(routes) \
@@ -317,14 +438,10 @@ def plot_plain_route_set(ax, routes, graph_or_coords, street_adj=None,
             zorder=3,
         )
 
-    if node_size is not None and node_size > 0:
-        ax.scatter(coords[:, 0], coords[:, 1], c="black", s=node_size, zorder=5)
+    shown = drawn_node_mask(street_adj_arr, routes)
+    scatter_nodes(ax, coords, shown, size=node_size, alpha=node_alpha)
     if show_node_labels:
-        for node_idx, (x_coord, y_coord) in enumerate(coords):
-            ax.text(
-                x_coord, y_coord, str(node_idx),
-                fontsize=7, color="white", ha="center", va="center", zorder=6,
-            )
+        label_nodes(ax, coords, shown)
 
     ax.set_title(f"{title}\n{subtitle}" if subtitle else title,
                  fontsize=12, fontweight="bold")
@@ -376,10 +493,9 @@ def plot_demand_graph(ax, demand, graph_or_coords, street_adj=None,
         ax.add_collection(line_coll)
         ax.figure.colorbar(line_coll, ax=ax, fraction=0.046, pad=0.04, label="demand")
 
-    ax.scatter(coords[:, 0], coords[:, 1], c="black", s=55, zorder=5)
-    for node_idx, (x_coord, y_coord) in enumerate(coords):
-        ax.text(x_coord, y_coord, str(node_idx), fontsize=7, color="white",
-                ha="center", va="center", zorder=6)
+    shown = drawn_node_mask(street_adj_arr)
+    scatter_nodes(ax, coords, shown, size=55)
+    label_nodes(ax, coords, shown)
     ax.set_title(f"{title}\n{subtitle}" if subtitle else (title or ""),
                  fontsize=12, fontweight="bold")
     ax.set_aspect("equal")
@@ -389,7 +505,7 @@ def plot_demand_graph(ax, demand, graph_or_coords, street_adj=None,
 def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
                     street_adj=None, title=None, subtitle=None, *,
                     palette="tab20", with_overlap_curves=True,
-                    show_node_labels=True, node_size=45):
+                    show_node_labels=True, node_size=45, street_style=None):
     """Draw ``routes`` overlaid with diff markings vs ``reference_routes``.
 
     Edge coverage that the candidate dropped relative to the seed is drawn as
@@ -412,7 +528,8 @@ def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
     reference_routes = get_first_route_set(reference_routes)
     coords, street_adj_arr = extract_coords_street_adj(
         graph_or_coords, street_adj)
-    draw_street_graph(ax, coords, street_adj_arr)
+    draw_street_graph(ax, coords, street_adj_arr,
+                      **(street_style or DEFAULT_STREET_STYLE))
 
     colors = route_colors_for(routes, palette=palette)
     # Curve overlapping edges using the CANDIDATE routes (added/shared belong to
@@ -497,21 +614,142 @@ def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
         ax.scatter(coords[removed_nodes, 0], coords[removed_nodes, 1],
                    s=55, c="crimson", marker="x", linewidths=1.6, zorder=6)
 
-    if node_size is not None and node_size > 0:
-        ax.scatter(coords[:, 0], coords[:, 1],
-                   c="black", s=node_size, alpha=0.65, zorder=4)
+    shown = drawn_node_mask(street_adj_arr, routes, reference_routes)
+    scatter_nodes(ax, coords, shown, size=node_size, alpha=0.65, zorder=4)
     if show_node_labels:
-        for node_idx, (x_coord, y_coord) in enumerate(coords):
-            ax.text(
-                x_coord, y_coord, str(node_idx),
-                fontsize=7, color="white", ha="center", va="center", zorder=7,
-            )
+        label_nodes(ax, coords, shown, zorder=7)
 
     ax.set_title(f"{title}\n{subtitle}" if subtitle else title,
                  fontsize=12, fontweight="bold")
     ax.set_aspect("equal")
     ax.axis("off")
 
+
+# ---------------------------------------------------------------------------
+# Change-oriented panels (candidate vs reference network)
+# ---------------------------------------------------------------------------
+# ``plot_route_diff`` answers "which edges moved"; these two answer "which
+# ROUTES moved, and by how much" -- the view the paper's case-study figure
+# needs, where a 67-route network makes a per-edge diff unreadable.
+
+# yellow -> red -> purple: low adjustment stays warm and thin, a heavily
+# rewritten route reads as a thick purple line.
+ADJ_CMAP_COLORS = ("#ffd84d", "#f05a28", "#7b1fa2")
+UNCHANGED_ROUTE_COLOR = "#9aa1a8"
+
+
+def adj_colormap(name: str = "route_adj_yellow_red_purple"):
+    """The route-adjustment colormap (yellow -> red -> purple)."""
+    import matplotlib.colors as mcolors
+
+    return mcolors.LinearSegmentedColormap.from_list(name, list(ADJ_CMAP_COLORS))
+
+
+def plot_changed_route_slots(ax, routes, reference_routes, graph_or_coords,
+                             street_adj=None, title=None, subtitle=None, *,
+                             palette="tab20", with_overlap_curves=True,
+                             node_size=15, node_alpha=0.30, street_style=None):
+    """Highlight the route slots that changed; ghost the ones that did not.
+
+    Comparison is per SLOT (route ``i`` against reference route ``i``), which is
+    what an edit policy actually rewrites -- unlike the network-level multiset
+    diff in :func:`plot_route_diff`. Changed routes are drawn thick and opaque
+    in their route color, unchanged ones stay as a faint context layer.
+    """
+    routes = get_first_route_set(routes)
+    reference_routes = get_first_route_set(reference_routes)
+    coords, street_adj_arr = extract_coords_street_adj(graph_or_coords, street_adj)
+    draw_street_graph(ax, coords, street_adj_arr,
+                      **(street_style or DEFAULT_STREET_STYLE))
+
+    colors = route_colors_for(routes, palette=palette)
+    overlap_map = build_edge_overlap_map(routes) if with_overlap_curves else None
+    for route_idx, route_tensor in enumerate(routes):
+        route = route_to_list(route_tensor)
+        if len(route) < 2:
+            continue
+        reference = (route_to_list(reference_routes[route_idx])
+                     if route_idx < reference_routes.shape[0] else [])
+        changed = route != reference
+        plot_edges(
+            ax, coords, route_edge_list(route),
+            color=colors[route_idx % len(colors)],
+            linewidth=3.8 if changed else 1.2,
+            alpha=0.96 if changed else 0.16,
+            route_idx=route_idx, overlap_map=overlap_map,
+            zorder=4 if changed else 3,
+        )
+
+    scatter_nodes(ax, coords, drawn_node_mask(street_adj_arr, routes,
+                                              reference_routes),
+                  size=node_size, alpha=node_alpha)
+    ax.set_title(f"{title}\n{subtitle}" if subtitle else (title or ""),
+                 fontsize=12, fontweight="bold")
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+
+def plot_route_adj_gradient(ax, routes, reference_routes, graph_or_coords,
+                            street_adj=None, title=None, subtitle=None, *,
+                            adj_values=None, with_overlap_curves=True,
+                            node_size=15, node_alpha=0.30, street_style=None):
+    """Color each route by its adjustment degree vs the reference network.
+
+    ``adj_values`` is the per-route adjustment vector; when omitted it is
+    computed via ``reports.geo.route_adjustments`` (objective-configured gap and
+    mode). Untouched routes (adj ~ 0) are drawn grey and thin underneath so the
+    rewritten ones stand out of a dense network. Returns
+    ``(ScalarMappable, mean_adj)`` -- the mappable is what a colorbar needs.
+    """
+    import matplotlib.colors as mcolors
+
+    routes = get_first_route_set(routes)
+    reference_routes = get_first_route_set(reference_routes)
+    coords, street_adj_arr = extract_coords_street_adj(graph_or_coords, street_adj)
+    draw_street_graph(ax, coords, street_adj_arr,
+                      **(street_style or DEFAULT_STREET_STYLE))
+
+    if adj_values is None:
+        from .geo import route_adjustments
+        adj_values = route_adjustments(routes, reference_routes)
+    adj_values = np.asarray(adj_values, dtype=float)
+    cmap = adj_colormap()
+    norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
+    overlap_map = build_edge_overlap_map(routes) if with_overlap_curves else None
+
+    items = []
+    for route_idx, route_tensor in enumerate(routes):
+        route = route_to_list(route_tensor)
+        if len(route) < 2:
+            continue
+        value = float(adj_values[route_idx]) if route_idx < len(adj_values) else 0.0
+        items.append((value, route_idx, route))
+
+    # Quiet context layer first, then rewritten routes on top (ascending adj) so
+    # the most-changed route is never buried under an untouched one.
+    for value, route_idx, route in sorted(items, key=lambda item: item[0]):
+        if value <= 1e-6:
+            plot_edges(ax, coords, route_edge_list(route),
+                       color=UNCHANGED_ROUTE_COLOR, linewidth=0.9, alpha=0.16,
+                       route_idx=route_idx, overlap_map=overlap_map, zorder=2.6)
+            continue
+        plot_edges(ax, coords, route_edge_list(route), color=cmap(norm(value)),
+                   linewidth=2.0 + 3.5 * value, alpha=0.98,
+                   route_idx=route_idx, overlap_map=overlap_map,
+                   zorder=4 + value)
+
+    scatter_nodes(ax, coords, drawn_node_mask(street_adj_arr, routes,
+                                              reference_routes),
+                  size=node_size, alpha=node_alpha, zorder=5.5)
+    ax.set_title(f"{title}\n{subtitle}" if subtitle else (title or ""),
+                 fontsize=12, fontweight="bold")
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    scalar = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    scalar.set_array(adj_values)
+    mean_adj = float(np.mean(adj_values)) if adj_values.size else 0.0
+    return scalar, mean_adj
 
 # ---------------------------------------------------------------------------
 # Cost-component enable / disable helpers
@@ -564,6 +802,11 @@ __all__ = [
     "route_colors_for_n",
     "extract_coords_street_adj",
     "draw_street_graph",
+    "drawn_node_mask",
+    "DEFAULT_STREET_STYLE",
+    "GEO_STREET_STYLE",
+    "large_palette",
+    "adj_colormap",
     "build_edge_overlap_map",
     "overlapping_edge_rad",
     "plot_edge",
@@ -571,6 +814,8 @@ __all__ = [
     "summarize_route_changes",
     "plot_plain_route_set",
     "plot_route_diff",
+    "plot_changed_route_slots",
+    "plot_route_adj_gradient",
     "COST_COMPONENT_NAMES",
     "resolve_enabled_components",
     "disabled_components",

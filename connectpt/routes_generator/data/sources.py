@@ -12,8 +12,8 @@ from typing import Any
 import torch
 
 from .init import resolve_init_routes
-from .loaders import (benchmark_spec, eval_spec, load_benchmark_tensors,
-                      load_ekb_routes, load_ekb_tensors)
+from .loaders import (EKB_COORD_CRS, benchmark_spec, eval_spec,
+                      load_benchmark_tensors, load_ekb_routes, load_ekb_tensors)
 from .routes import as_route_tensor
 
 
@@ -95,7 +95,7 @@ class EKBDataSource(DataSource):
         return Instance(
             label="EKB", tensors=tensors, init_routes=as_route_tensor(routes),
             spec={"city": "EKB", **eval_spec("ekb")}, coords=tensors["node_locs"],
-            street_adj=tensors["street_adj"], meta={"crs": "gis"})
+            street_adj=tensors["street_adj"], meta={"crs": EKB_COORD_CRS})
 
 
 REGISTRY = {

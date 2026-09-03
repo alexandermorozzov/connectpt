@@ -13,14 +13,14 @@ from ..data.routes import as_route_tensor
 
 
 EKB_DATA_DIR = DATASETS_DIR / "EKB"
-EKB_COORD_CRS = "EPSG:32641"  # UTM zone 41N: Ekaterinburg -> WGS84.
-EKB_CITY_NAME = "EKB"
 EKB_STATIC_MAP_PATH = ARTIFACTS_DIR / "paper_results" / "ekb_seed_routes_static.png"
 
 
 # EKB data loading moved to the library -- single implementation.
+# EKB data loading + the coordinate CRS live with the data layer -- single
+# implementation; re-exported here so ``reports.ekb`` stays the EKB entry point.
 from connectpt.routes_generator.data.loaders import (  # noqa: F401
-    load_ekb_tensors, load_ekb_routes, ekb_spec)
+    EKB_CITY_NAME, EKB_COORD_CRS, load_ekb_tensors, load_ekb_routes, ekb_spec)
 
 
 def make_ekb_crop_case(
