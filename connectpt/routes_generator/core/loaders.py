@@ -1,9 +1,9 @@
-"""Compose an experiment / suite config by name -- the notebook's entry point.
+"""Compose an experiment config by name -- the entry point of every run.
 
-``load_experiment("e1/mumford0/our_nbco")`` composes the declarative run config
-under ``cfg/experiments/`` (the ``experiments/`` prefix is added if absent);
-``load_suite`` does the same for a batch config. The notebook names an
-experiment and runs it -- no hydra plumbing, no config building in cells.
+``load_experiment("table3_nbco_vs_our")`` composes the declarative run config
+under ``cfg/experiments/`` (the ``experiments/`` prefix is added if absent) --
+single runs and batch configs alike. The caller names an experiment and runs it:
+no hydra plumbing, no config building in cells.
 
 ``build_experiment`` is the procedural layer on top: it composes the parent
 config, then injects sweep/data/run parameters (alpha, adj_target, city, route
@@ -26,11 +26,6 @@ def _slug(text: str) -> str:
     """Filesystem-safe slug for a method label (disambiguates run outputs)."""
     return re.sub(r"[^a-z0-9]+", "_", str(text).lower()).strip("_")
 
-# Smoke = a fast throwaway dry-run: the SAME experiment at a tiny iteration
-# budget (the only thing every ``*_smoke.yaml`` twin used to change). Driven by
-# ``build_experiment(smoke=True)`` now -- no per-experiment smoke files.
-SMOKE_ITERS = 2
-
 
 def _compose_experiment(name: str, overrides):
     config_name = name if name.startswith("experiments/") else f"experiments/{name}"
@@ -43,16 +38,21 @@ def load_experiment(name: str, *, overrides=None):
     return _compose_experiment(name, overrides)
 
 
-def load_suite(name: str, *, overrides=None):
-    """Compose a batch/suite config (``cfg/experiments/<name>.yaml``)."""
-    return _compose_experiment(name, overrides)
-
-
 def _as_list(value):
     """A scalar sweep axis is normalised to a one-element grid."""
     if isinstance(value, (list, tuple)):
         return list(value)
     return [value]
+
+
+def _runs_root(cfg) -> str:
+    """The scratch root for per-run outputs (``paths.runs_dir``)."""
+    return str((cfg.get("paths") or {}).get("runs_dir") or "artifacts/runs")
+
+
+def _set_run_dir(cfg) -> None:
+    """Re-point ``paths.output_dir`` at ``<runs_dir>/<run.name>``."""
+    cfg.paths.output_dir = f"{_runs_root(cfg)}/{cfg.run.name}"
 
 
 def _retarget_city(cfg, city: str) -> None:
@@ -78,7 +78,7 @@ def _retarget_city(cfg, city: str) -> None:
     seg = city.lower()
     if not base.endswith(f"/{seg}") and not base.endswith(seg):
         cfg.run.name = f"{base}/{seg}"
-    cfg.paths.output_dir = f"artifacts/runs/{cfg.run.name}"
+    _set_run_dir(cfg)
 
 
 def build_experiment(
@@ -97,7 +97,8 @@ def build_experiment(
     n_routes: int | None = None,
     seed: int | None = None,
     cpu: bool | None = None,
-    smoke: bool = False,
+    weights_dir: str | None = None,
+    runs_dir: str | None = None,
     overrides=None,
 ):
     """Compose a declarative experiment and inject parameters procedurally.
@@ -115,9 +116,11 @@ def build_experiment(
     N leaf files -- see :class:`ExperimentBatch`.
 
     ``alpha``/``adj_target`` accept a scalar or a list (the sweep grid axis);
-    ``route_len`` is ``(min_route_len, max_route_len)``. ``smoke=True`` caps the
-    iteration budget to :data:`SMOKE_ITERS` for a fast dry-run (an explicit
-    ``n_iterations`` still wins).
+    ``route_len`` is ``(min_route_len, max_route_len)``.
+
+    ``weights_dir`` is the root relative checkpoint paths resolve against and
+    ``runs_dir`` the root of the per-run scratch dir -- both default to the
+    config's ``paths`` block (``artifacts/model_weights`` / ``artifacts/runs``).
     """
     # Group selections must be compose-time overrides (Hydra picks the defaults
     # group before merge); everything else is injected into the composed cfg.
@@ -128,6 +131,14 @@ def build_experiment(
         group_overrides.append(f"search/models={models}")
     cfg = _compose_experiment(name, group_overrides)
     with open_dict(cfg):
+        # -- output roots (weights read from, scratch written to) --
+        if cfg.get("paths") is None:
+            cfg.paths = OmegaConf.create({})
+        if weights_dir is not None:
+            cfg.paths.weights_dir = str(weights_dir)
+        if runs_dir is not None:
+            cfg.paths.runs_dir = str(runs_dir)
+            _set_run_dir(cfg)
         # -- method (group choice already applied at compose; size + name here) --
         if n_bees is not None:
             cfg.search.n_bees = int(n_bees)
@@ -140,7 +151,7 @@ def build_experiment(
             seg = _slug(label)
             if seg and not str(cfg.run.name).endswith(seg):
                 cfg.run.name = f"{cfg.run.name}/{seg}"
-                cfg.paths.output_dir = f"artifacts/runs/{cfg.run.name}"
+                _set_run_dir(cfg)
         if n_routes is not None:
             cfg.data.n_routes = int(n_routes)
         if route_len is not None:
@@ -160,8 +171,6 @@ def build_experiment(
             cfg.sweep.adj_weight = adj_weight
         if n_iterations is not None:
             cfg.sweep.n_iterations = int(n_iterations)
-        elif smoke:
-            cfg.sweep.n_iterations = SMOKE_ITERS
 
         # -- run --
         if seed is not None:

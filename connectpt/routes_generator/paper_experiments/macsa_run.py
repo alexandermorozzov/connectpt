@@ -1,12 +1,12 @@
 """MACSA Table-B case study as ONE config-first call for the notebook.
 
-``run_macsa_table_b(suite)`` runs the whole Mandl-8 Table-B workflow:
+``run_macsa_table_b()`` runs the whole Mandl-8 Table-B workflow:
 
 1. the Our-NBCO alpha sweep goes through the SAME declarative path as every
-   other experiment (:func:`paper_runs.run_experiment` on
-   ``macsa_alpha_sweep``; the ``_smoke`` variant is one BCO
-   iteration per point) -- the grid, budget, bee set and model checkpoints all
-   live in the experiment YAML, nothing here;
+   other experiment (:func:`paper_runs.run_experiment` on ``macsa_alpha_sweep``,
+   or on ``macsa_alpha_sweep_iter1`` when ``sweep_name`` says so) -- the grid,
+   budget, bee set and model checkpoints all live in the experiment YAML,
+   nothing here;
 2. what stays in this module is only the case-study specificity: reading the
    fixed Table-B route sets from the scenario txt files, scoring them (and the
    best sweep solution) as FIXED networks via
@@ -14,8 +14,8 @@
    that beats MACSA on both RTT and WMC, and drawing the route grids through
    the shared :func:`reports.plot_routes_grid`.
 
-Every run recomputes and overwrites its outputs under the suite's paper folder;
-the returned :class:`MacsaResult` is what the notebook cell displays.
+Every run recomputes and overwrites its outputs under ``out_dir``; the returned
+:class:`MacsaResult` is what the caller displays.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ from ..evaluation import adj_vs_init, score_fixed_routes
 from ..objectives import load_unified_objective
 from ..reports import paper_row, plot_routes_grid, save_paper_fig
 from ._common import pad_routes_to
-from .paper_runs import paper_dir, run_experiment, save_paper
+from .paper_runs import results_dir, run_experiment, save_results
 
 # --- static scenario constants --------------------------------------------------
 SCENARIO_NAME = "mandl_8"
@@ -53,9 +53,9 @@ REF_METHOD = METHOD_TITLE["original"]
 ARTICLE_STEM = "final_macsa_mandl8_tableb_article_only"
 COMPARISON_STEM = "final_macsa_mandl8_tableb"
 SWEEP_EXPERIMENT = "macsa_alpha_sweep"
-# The smoke path is a distinct paper config (iter=1 alpha sweep, Table 7) -- NOT
-# a generic 2-iter dry-run -- so it is selected by name and run with its own budget.
-SWEEP_EXPERIMENT_SMOKE = "macsa_alpha_sweep_iter1"
+# The one-step alpha sweep is a paper artifact in its own right (Table 7), not a
+# cheap variant: it is selected by name and carries its own budget.
+SWEEP_EXPERIMENT_ITER1 = "macsa_alpha_sweep_iter1"
 NODE_SIZE = 70.0
 
 # Fixed-network scoring point: the paper's eval alpha + the unified objective's
@@ -160,18 +160,20 @@ def _select_best(sweep_df, macsa_row):
 # --- the one call ---------------------------------------------------------------
 
 
-def run_macsa_table_b(suite) -> MacsaResult:
-    """Score Table-B, sweep Our NBCO, compare, draw grids -- one call, one object."""
-    prefix = str(suite.output_prefix or "")
-    out_dir = paper_dir(suite)
+def run_macsa_table_b(*, out_dir=None, sweep_name: str = SWEEP_EXPERIMENT,
+                      **params) -> MacsaResult:
+    """Score Table-B, sweep Our NBCO, compare, draw grids -- one call, one object.
+
+    ``sweep_name`` picks the alpha-sweep config (default the full budget; pass
+    ``SWEEP_EXPERIMENT_ITER1`` for the one-step paper table); ``**params`` are
+    forwarded to :func:`run_experiment` (``n_iterations``, ``seed``, ...).
+    """
+    out_dir = results_dir(sweep_name, out_dir)
 
     # 1) the alpha sweep -- the same declarative path as every other experiment
-    #    (persisted + Pareto-rendered by run_experiment, stem from the YAML). The
-    #    smoke profile runs the iter-1 paper table (its own budget), so smoke is
-    #    off here -- it must not be capped to the generic dry-run budget.
-    sweep_name = SWEEP_EXPERIMENT_SMOKE if suite.smoke else SWEEP_EXPERIMENT
-    sweep = run_experiment(sweep_name, suite, kind="pareto", smoke=False,
-                           title="Mandl-8 MACSA: Our NBCO alpha sweep")
+    #    (persisted + Pareto-rendered by run_experiment, stem from the YAML).
+    sweep = run_experiment(sweep_name, out_dir=out_dir, kind="pareto",
+                           title="Mandl-8 MACSA: Our NBCO alpha sweep", **params)
     art = sweep.artifact
     sweep_df = art.table
     n_iterations = int(sweep_df["n_iterations"].iloc[0])
@@ -206,9 +208,9 @@ def run_macsa_table_b(suite) -> MacsaResult:
         rows.append(row)
         tableb_routes[method] = scored
     tableb_df = pd.DataFrame(rows).round(6)
-    save_paper(suite, ARTICLE_STEM, table=tableb_df, routes=tableb_routes,
-               coords=coords, street_adj=street_adj,
-               meta={"scenario": SCENARIO_NAME})
+    save_results(ARTICLE_STEM, out_dir=out_dir, table=tableb_df,
+                 routes=tableb_routes, coords=coords, street_adj=street_adj,
+                 meta={"scenario": SCENARIO_NAME})
 
     # 3) best sweep solution vs MACSA + the combined comparison table.
     macsa_row = tableb_df[tableb_df["method"] == "MACSA"].iloc[0]
@@ -227,9 +229,9 @@ def run_macsa_table_b(suite) -> MacsaResult:
     comparison_routes[compare_label] = best_scored
     comparison_df = pd.concat([tableb_df, pd.DataFrame([row])],
                               ignore_index=True, sort=False).round(6)
-    save_paper(suite, COMPARISON_STEM, table=comparison_df, routes=comparison_routes,
-               coords=coords, street_adj=street_adj,
-               meta={"scenario": SCENARIO_NAME, "best": compare_label})
+    save_results(COMPARISON_STEM, out_dir=out_dir, table=comparison_df,
+                 routes=comparison_routes, coords=coords, street_adj=street_adj,
+                 meta={"scenario": SCENARIO_NAME, "best": compare_label})
 
     # 4) the four route grids -- the shared grid plotter, MACSA styling on top.
     cmp_subs = {str(r["method"]): _metric_subtitle(r)
@@ -256,7 +258,7 @@ def run_macsa_table_b(suite) -> MacsaResult:
     for key, fig_name, kw in grids:
         fig = plot_routes_grid(kw.pop("route_sets"), coords, street_adj,
                                **{**style, **kw})
-        save_paper_fig(fig, fig_name, prefix=prefix, out_dir=out_dir)
+        save_paper_fig(fig, fig_name, out_dir=out_dir)
         figures[key] = fig
 
     return MacsaResult(tableb=tableb_df, sweep=sweep_df, comparison=comparison_df,

@@ -9,11 +9,11 @@ Logging is done by run_nbco.py itself (`--log`), which is added only when the
 caller did not supply one: Start-Process cannot send stdout and stderr to a
 single file, so PowerShell-side redirection is deliberately NOT used.
 
-  .\scripts\run_nbco.ps1 table3_nbco_vs_our --suite suite_rerun
-  .\scripts\run_nbco.ps1 table5_fig5_5model --cities Mumford1
-  .\scripts\run_nbco.ps1 ekb_case_study --suite suite_smoke
+  .\scripts\run_nbco.ps1 table3_nbco_vs_our --cities Mandl Mumford0
+  .\scripts\run_nbco.ps1 table5_fig5_5model --out-dir artifacts/results/table5_rerun
+  .\scripts\run_nbco.ps1 ekb_case_study -p n_iterations=2
 
-  follow: Get-Content -Wait -Tail 20 artifacts\cli_logs\nbco_<stamp>.log
+  follow: Get-Content -Wait -Tail 20 artifacts\logs\nbco_<stamp>.log
   stop:   Stop-Process -Id <PID>
 #>
 $ErrorActionPreference = 'Stop'
@@ -25,7 +25,7 @@ if (-not (Test-Path -LiteralPath $py)) {
     throw "project venv not found at $py; create it with 'python -m venv .venv' first"
 }
 
-$logDir = Join-Path $root 'artifacts\cli_logs'
+$logDir = Join-Path $root 'artifacts\logs'
 if (-not (Test-Path -LiteralPath $logDir)) {
     New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 }

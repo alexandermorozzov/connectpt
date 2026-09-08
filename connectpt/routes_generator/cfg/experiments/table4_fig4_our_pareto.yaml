@@ -14,8 +14,6 @@ run:
   seed: 0
   cpu: false
 
-paths:
-  output_dir: artifacts/runs/table4_fig4_our_pareto
 
 # n_bees must match the bee-set total.
 search:

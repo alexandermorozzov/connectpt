@@ -16,8 +16,6 @@ run:
   seed: 0
   cpu: true
 
-paths:
-  output_dir: artifacts/runs/ekb_case_study
 
 # n_bees must match the bee-set total.
 search:

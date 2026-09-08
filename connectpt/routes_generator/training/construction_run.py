@@ -8,6 +8,7 @@ full PPO loop is wired the same way as EditTrainingRun when needed.
 from __future__ import annotations
 
 from ..core.checkpoints import CheckpointStore
+from ..core.paths import resolve_weights_path
 from ..core.runtime import RunContext
 from ..model_factory import RouteModelFactory
 from ..objectives import CostFactory
@@ -29,7 +30,8 @@ class ConstructionTrainingRun(ExperimentRun):
         init_ckpt = cfg.paths.get("init_checkpoint_path")
         if init_ckpt:
             CheckpointStore.load_model_weights(
-                self.model, init_ckpt,
+                self.model,
+                resolve_weights_path(init_ckpt, cfg.paths.get("weights_dir")),
                 strict=bool(cfg.get("checkpoint", {}).get("strict_load", True)),
                 map_location=device,
             )

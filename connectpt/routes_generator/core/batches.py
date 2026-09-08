@@ -71,8 +71,8 @@ class ExperimentBatch:
 
     def run(self, *, dry_run: bool = False, **params) -> BatchArtifact:
         """Compose + dispatch each run. ``**params`` (``city``, ``alpha``,
-        ``smoke``, ...) are injected into every run via :func:`build_experiment`,
-        so one batch config serves any city."""
+        ``n_iterations``, ...) are injected into every run via
+        :func:`build_experiment`, so one batch config serves any city."""
         artifacts: list[RunArtifact] = []
         methods = self.cfg.get("methods")
         if methods:

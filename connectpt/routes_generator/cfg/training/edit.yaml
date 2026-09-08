@@ -78,8 +78,9 @@ run:
   cpu: false
 
 paths:
+  weights_dir: artifacts/model_weights
   output_dir: artifacts/runs/edit_training_v1
-  checkpoint_path: artifacts/model_weights/improvement/edit_training_v1.pt
+  checkpoint_path: improvement/edit_training_v1.pt
   init_checkpoint_path: null
 
 data:

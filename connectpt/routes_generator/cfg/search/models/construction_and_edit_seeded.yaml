@@ -6,12 +6,12 @@ models:
   construction:
     enabled: true
     config: construction
-    checkpoint_path: artifacts/model_weights/inductive_random_graphs_weighted_connectivity.pt
+    checkpoint_path: inductive_random_graphs_weighted_connectivity.pt
     strict_load: true
   edit:
     enabled: true
     config: edit_trim_seeded
-    checkpoint_path: artifacts/model_weights/improvement/improvement_lc_rttconn_adj_w10_t02_finetune100.pt
+    checkpoint_path: improvement/improvement_lc_rttconn_adj_w10_t02_finetune100.pt
     strict_load: true
 
 policies:

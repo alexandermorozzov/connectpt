@@ -19,9 +19,8 @@ from .render import render_report, figure_key_slug, ReportArtifact
 from .geo import (project_coords, project_coords_3857, route_adjustments,
                  route_stats, network_connectivity_stats,
                  street_underlay_adj, route_underlay_adj)
-from .paper_io import (PAPER_DIR, paper_path, paper_row, save_paper_table,
-                      save_paper_routes, append_paper_row, reset_paper_table,
-                      save_paper_fig, ravel_hist)
+from .paper_io import (paper_row, save_paper_table, save_paper_routes,
+                       save_paper_fig, ravel_hist)
 from .report_run import ReportRun
 
 
@@ -53,13 +52,9 @@ __all__ = [
     "network_connectivity_stats",
     "street_underlay_adj",
     "route_underlay_adj",
-    "PAPER_DIR",
-    "paper_path",
     "paper_row",
     "save_paper_table",
     "save_paper_routes",
-    "append_paper_row",
-    "reset_paper_table",
     "save_paper_fig",
     "ravel_hist",
     "ReportRun",

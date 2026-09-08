@@ -14,7 +14,11 @@ run:
   cpu: false
 
 paths:
-  output_dir: artifacts/runs/${run.name}
+  # Output roots. Overridable per run: --weights-dir / --runs-dir on the CLI,
+  # weights_dir= / runs_dir= through build_experiment.
+  weights_dir: artifacts/model_weights     # checkpoint paths resolve against this
+  runs_dir: artifacts/runs                 # per-run scratch: partial CSV, TensorBoard
+  output_dir: ${paths.runs_dir}/${run.name}
 
 search:
   algorithm: bee_colony

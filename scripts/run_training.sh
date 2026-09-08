@@ -9,13 +9,13 @@
 #
 # Unlike PowerShell, a shell CAN merge stdout+stderr into one file, so the
 # console log (INFO + tqdm) is captured here; run_training.py additionally
-# writes its own INFO log under artifacts/cli_logs.
+# writes its own INFO log under artifacts/logs.
 set -e
 cd "$(dirname "$0")/.."
 [ -f .venv/bin/activate ] && source .venv/bin/activate
-mkdir -p artifacts/cli_logs
+mkdir -p artifacts/logs
 
-LOG_PATH="artifacts/cli_logs/train_$(date +%Y%m%d_%H%M%S).log"
+LOG_PATH="artifacts/logs/train_$(date +%Y%m%d_%H%M%S).log"
 setsid nohup python -u scripts/run_training.py "$@" \
     > "$LOG_PATH" 2>&1 < /dev/null &
 PID=$!

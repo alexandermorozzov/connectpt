@@ -13,7 +13,7 @@ paths:
 
 model:
   config: edit_trim_paper
-  checkpoint_path: artifacts/model_weights/improvement/improvement_lc_redundancy_rttwmc_v1_PRESERVED.pt
+  checkpoint_path: improvement/improvement_lc_redundancy_rttwmc_v1_PRESERVED.pt
   strict_load: true
 
 data:

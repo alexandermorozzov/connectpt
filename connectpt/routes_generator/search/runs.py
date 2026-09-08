@@ -27,7 +27,7 @@ def _fs_key(text: Any) -> str:
 
 from ..core.artifacts import ArtifactStore
 from ..core.checkpoints import CheckpointStore
-from ..core.paths import resolve_under_root
+from ..core.paths import resolve_weights_path
 from ..core.runs import ExperimentRun, RunArtifact
 from ..core.runtime import RunContext
 from ..data import BenchmarkDataSource, create_data_source
@@ -80,7 +80,9 @@ class BeeColonySearchRun(ExperimentRun):
             checkpoint_path = m_cfg.get("checkpoint_path")
             if checkpoint_path is not None:
                 CheckpointStore.load_model_weights(
-                    model, resolve_under_root(checkpoint_path),
+                    model,
+                    resolve_weights_path(checkpoint_path,
+                                         cfg.paths.get("weights_dir")),
                     strict=bool(m_cfg.get("strict_load", True)),
                     map_location=device,
                 )

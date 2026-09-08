@@ -23,11 +23,16 @@ from .routes import as_route_tensor
 def resolve_init_routes(spec, tensors, *, init_dump=None, init_routes_path=None,
                         seed: int = 0, device=None) -> torch.Tensor:
     """Return the batched init route tensor for ``spec`` on ``tensors``."""
+    from ..core.paths import resolve_under_root
+
+    # Both are config paths: relative means "from the repo root", so they mean
+    # the same thing from a notebook (examples/route_generator) and the CLI.
     if init_dump:
-        return _init_from_dump(init_dump, spec)
+        return _init_from_dump(resolve_under_root(init_dump), spec)
     if init_routes_path:
         from ..torch_utils import load_routes_tensor
-        return as_route_tensor(load_routes_tensor(init_routes_path))
+        return as_route_tensor(
+            load_routes_tensor(resolve_under_root(init_routes_path)))
     if device is None:
         from ..core.runtime import resolve_device
         device = resolve_device()

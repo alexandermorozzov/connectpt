@@ -14,7 +14,7 @@ single file, so PowerShell-side redirection is deliberately NOT used.
   .\scripts\run_training.ps1 --dry-run
   .\scripts\run_training.ps1 run.seed=3
 
-  follow: Get-Content -Wait -Tail 20 artifacts\cli_logs\train_<stamp>.log
+  follow: Get-Content -Wait -Tail 20 artifacts\logs\train_<stamp>.log
   stop:   Stop-Process -Id <PID>
 #>
 $ErrorActionPreference = 'Stop'
@@ -26,7 +26,7 @@ if (-not (Test-Path -LiteralPath $py)) {
     throw "project venv not found at $py; create it with 'python -m venv .venv' first"
 }
 
-$logDir = Join-Path $root 'artifacts\cli_logs'
+$logDir = Join-Path $root 'artifacts\logs'
 if (-not (Test-Path -LiteralPath $logDir)) {
     New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 }

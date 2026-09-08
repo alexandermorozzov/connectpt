@@ -171,7 +171,6 @@ from .core import (
     ExperimentBatch,
     build_experiment,
     load_experiment,
-    load_suite,
 )
 from .reports import render_report
 

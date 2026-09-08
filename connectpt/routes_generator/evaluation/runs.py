@@ -8,22 +8,16 @@ search benchmark data module -- a different data shape).
 """
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
 from ..core.artifacts import ArtifactStore
 from ..core.checkpoints import CheckpointStore
-from ..core.paths import DATASETS_DIR, ROOT_DIR
+from ..core.paths import DATASETS_DIR, resolve_weights_path
 from ..core.runs import ExperimentRun, RunArtifact
 from ..core.runtime import RunContext
 from ..model_factory import RouteModelFactory
 from ..objectives import CostFactory
 from .evaluators import EditModelEvaluator
-
-
-def _resolve(path) -> Path:
-    p = Path(path)
-    return p if p.is_absolute() else ROOT_DIR / p
 
 
 class ModelEvaluationRun(ExperimentRun):
@@ -37,7 +31,9 @@ class ModelEvaluationRun(ExperimentRun):
 
         self.model = RouteModelFactory.build_edit_model_by_name(cfg.model.config)
         CheckpointStore.load_model_weights(
-            self.model, _resolve(cfg.model.checkpoint_path),
+            self.model,
+            resolve_weights_path(cfg.model.checkpoint_path,
+                                 cfg.paths.get("weights_dir")),
             strict=bool(cfg.model.get("strict_load", True)), map_location=device,
         )
         self.model.to(device)

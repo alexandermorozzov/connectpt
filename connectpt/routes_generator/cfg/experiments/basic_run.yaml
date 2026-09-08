@@ -1,0 +1,49 @@
+# @package _global_
+# Базовый прогон: улучшить существующую сеть на заданных данных.
+#
+# НЕ артефакт статьи: одна точка (один alpha, один adj_target), один метод.
+# Всё, что обычно меняют, задаётся из CLI без правки файла:
+#
+#   python scripts/run_nbco.py basic_run                       # как ниже
+#   python scripts/run_nbco.py basic_run -p city=Mumford0 -p alpha=0.7
+#   python scripts/run_nbco.py basic_run -p n_iterations=10 --out-dir artifacts/results/probe
+#   python scripts/run_nbco.py basic_run -p bee_sets=classic_trim_extend -p models=edit_only_seeded
+#
+# Стартовая сеть по умолчанию строится learned-construction + realistic tier.
+# Своя сеть подключается полем data.init_routes_path (тензор маршрутов) или
+# data.init_dump (дамп *_routes.pt, берётся набор с меткой "Initial*").
+defaults:
+  - /search: bee_colony_base
+  - /search/models: construction_and_edit_seeded
+  - /search/bee_sets: our_nbco
+  - _self_
+
+run:
+  name: basic_run
+  label: Our NBCO
+  seed: 0
+  cpu: false
+
+# n_bees = сумма count выбранного набора пчёл (our_nbco: 5 + 5).
+search:
+  n_bees: 10
+
+data:
+  source: benchmark
+  city: Mandl
+  # init_routes_path: datasets/my_network_routes.pt
+  # init_dump: artifacts/results/table3_nbco_vs_our/table3_nbco_vs_our_mandl_routes.pt
+
+# Одна точка: скаляр в alpha -- это список из одного элемента.
+sweep:
+  alpha: [0.5]
+  adj_target: 0.2
+  n_iterations: 100
+
+metrics: [RTT, WMC, ATT, adj_vs_seed, "redun%", cost]
+
+logging:
+  tensorboard: true
+
+output:
+  paper_stem: basic_run

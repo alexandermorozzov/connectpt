@@ -1,15 +1,9 @@
-"""paper_results output sinks + the results-table row builder.
+"""Result sinks (CSV tables, route dumps, figures) + the results-row builder.
 
-Library home of the notebook's ``paper_results`` IO (was eval_lib.paper): the
-prefix-aware CSV / route-dump sinks (thin wrappers over :class:`ArtifactStore`,
-the single tabular/route sink) and ``paper_row`` (identity columns + the full
-metric set). Figures are intentionally not persisted -- the underlying data is
-(CSV tables + route ``.pt`` dumps), so any figure rebuilds from disk.
-
-Every sink takes the output-filename prefix and (optional) output folder
-EXPLICITLY (keyword-only): the caller threads them from the loaded ``suite``
-(``suite.output_prefix`` = "TEMP_" on smoke runs, "" on full runs;
-``suite.paper_output_dir``) -- there is no module-global prefix.
+Thin wrappers over :class:`ArtifactStore` plus ``paper_row`` (identity columns +
+the full metric set). Every sink takes its output folder EXPLICITLY
+(keyword-only ``out_dir``), so where a run writes is decided by the caller
+(``--out-dir`` / ``run_experiment(out_dir=...)``) and never by module state.
 """
 from __future__ import annotations
 
@@ -18,20 +12,8 @@ from pathlib import Path
 import numpy as np
 
 from ..core.artifacts import ArtifactStore
-from ..core.paths import ARTIFACTS_DIR
 from ..data.routes import as_route_tensor
 from ..evaluation import full_metric_row
-
-PAPER_DIR = ARTIFACTS_DIR / "paper_results"
-PAPER_DIR.mkdir(parents=True, exist_ok=True)
-_STORE = ArtifactStore(PAPER_DIR)
-
-
-def _store_for(out_dir):
-    """Sink for an explicit output dir (created on demand), else the default."""
-    if out_dir is None:
-        return _STORE
-    return ArtifactStore(Path(out_dir))
 
 
 def ravel_hist(h):
@@ -50,55 +32,36 @@ def paper_row(city, method, source, m, rt, seed, duration_s=None):
             **full_metric_row(m, rt, seed)}
 
 
-def paper_path(name, *, prefix, out_dir=None):
-    """Prefix-aware path under the paper output dir (to read back a saved dump)."""
-    return (Path(out_dir) if out_dir is not None else PAPER_DIR) / f"{prefix}{name}"
-
-
-def save_paper_table(df, name, *, prefix, out_dir=None):
-    path = _store_for(out_dir).save_table(df, f"{prefix}{name}")
-    print(f"[paper] table ({len(df)} rows) -> {path}")
+def save_paper_table(df, name, *, out_dir):
+    path = ArtifactStore(out_dir).save_table(df, name)
+    print(f"[results] table ({len(df)} rows) -> {path}")
     return path
 
 
-def reset_paper_table(name, *, prefix):
-    path = PAPER_DIR / f"{prefix}{name}.csv"
-    if path.exists():
-        path.unlink()
-    return path
-
-
-def append_paper_row(row, name, ndigits=3, *, prefix):
-    path = _STORE.append_row(row, f"{prefix}{name}", ndigits=ndigits)
-    print(f"[paper] row -> {path}", flush=True)
-    return path
-
-
-def save_paper_fig(fig, name, *, prefix="", out_dir=None, dpi=220):
-    """Persist a manuscript figure PNG under the paper output dir.
+def save_paper_fig(fig, name, *, out_dir, dpi=220):
+    """Persist a figure PNG under ``out_dir``.
 
     Most figures are NOT persisted -- they rebuild from the saved CSV tables and
     route dumps. This sink is only for panels that go into the manuscript as
     rendered images (the MACSA route grids)."""
-    base = Path(out_dir) if out_dir is not None else PAPER_DIR
+    base = Path(out_dir)
     base.mkdir(parents=True, exist_ok=True)
-    path = base / f"{prefix}{name}.png"
+    path = base / f"{name}.png"
     fig.savefig(path, dpi=dpi, bbox_inches="tight")
-    print(f"[paper] figure -> {path}")
+    print(f"[results] figure -> {path}")
     return path
-    return None
 
 
 def save_paper_routes(name, routes, coords=None, street_adj=None, meta=None, *,
-                      prefix, out_dir=None):
-    """Dump a {label: route_tensor} mapping (+ coords/street_adj) to the paper
-    output dir so the route figures can be reconstructed later."""
+                      out_dir):
+    """Dump a {label: route_tensor} mapping (+ coords/street_adj) into ``out_dir``
+    so the route figures can be reconstructed later."""
     payload = {
         "routes": {k: as_route_tensor(v).cpu() for k, v in routes.items()},
         "coords": (coords.cpu() if hasattr(coords, "cpu") else coords),
         "street_adj": (street_adj.cpu() if hasattr(street_adj, "cpu") else street_adj),
         "meta": meta or {},
     }
-    path = _store_for(out_dir).save_routes(payload, f"{prefix}{name}_routes")
-    print(f"[paper] route dump ({len(payload['routes'])} sets) -> {path}")
+    path = ArtifactStore(out_dir).save_routes(payload, f"{name}_routes")
+    print(f"[results] route dump ({len(payload['routes'])} sets) -> {path}")
     return path

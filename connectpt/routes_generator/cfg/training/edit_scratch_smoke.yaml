@@ -11,7 +11,8 @@ run:
   name: TEMP_smoke_edit_scratch
 
 paths:
-  checkpoint_path: artifacts/model_weights/improvement/TEMP_smoke_edit_scratch.pt
+  weights_dir: artifacts/model_weights
+  checkpoint_path: improvement/TEMP_smoke_edit_scratch.pt
 
 ppo:
   n_iterations: 1
