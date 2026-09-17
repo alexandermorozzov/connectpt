@@ -1,0 +1,8 @@
+# Mandl initial network -- learned construction + realistic tier, seed 0
+# 0-indexed; one route per line
+0 1 2 5 7 9 12
+6 14 5 3 4
+9 10 11
+10 11
+14 7
+14 6

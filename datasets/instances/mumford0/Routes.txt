@@ -1,0 +1,14 @@
+# Mumford0 initial network -- learned construction + realistic tier, seed 0
+# 0-indexed; one route per line
+29 27 16 28 0 12 8
+1 14 11 25 28 16 27 10 6 5
+9 3 11 17 0 13
+24 7 25 0
+15 10 7 20
+4 7 25 22
+21 6 13 18
+23 14 7 2
+19 8
+9 23
+11 14
+7 20

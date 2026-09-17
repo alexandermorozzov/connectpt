@@ -38,12 +38,10 @@ ENV/
 # Editors
 .idea
 
-# datasets/ is tracked, except files over GitHub's 100 MB hard limit
-# (restore raw_graphs_1000.pkl locally or use git-lfs).
 
 
 # Generated run artifacts -- results CSV, route dumps, model weights,
-# training logs -- are kept local only; regenerate by running the notebooks.
+# training logs -- are kept local only; regenerate with the scripts/ entry points.
 artifacts/
 .tmp_pycache
 
@@ -54,4 +52,11 @@ board/
 artifacts (2).zip
 artifacts.zip
 artifacts do not delete.zip
-datasets/
+# datasets/ is local; only Mandl and Mumford benchmark instances are tracked
+# (raw graphs, training data, EKB and MACSA stay local, or use git-lfs).
+datasets/*
+!datasets/instances/
+datasets/instances/*
+!datasets/instances/mandl/
+!datasets/instances/mumford*/
+graphify-out/
