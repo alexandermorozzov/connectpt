@@ -33,15 +33,9 @@ from .hyperheuristics import hyperheuristic
 from .nsgaii import NSGAII
 from .nx_heuristic import build_nx_heuristic_routes
 from .citygraph_dataset import CityGraphData
-from .objectives import load_unified_objective
+from .objectives import cost_kwargs
 from .simulated_annealing import simulated_annealing_with_reheating
 from .transit_time_estimator import RouteGenBatchState
-
-# Unified cost weights (single source: cfg/objective/*.yaml).
-_OBJ = load_unified_objective()
-DEMAND_TIME_WEIGHT = _OBJ.demand_time_weight
-ROUTE_TIME_WEIGHT = _OBJ.route_time_weight
-MEDIAN_CONNECTIVITY_WEIGHT = _OBJ.median_connectivity_weight
 
 CITY_NAME = "Mumford0"
 
@@ -73,15 +67,16 @@ def make_tensor_dataloader(dataset_cfg, tensors):
 
 def _baseline_cfg_overrides(run_name, n_routes, min_route_len, max_route_len,
                             connectivity_mode="median_weighted"):
+    defaults = cost_kwargs()
     return [
         "++eval.dataset.type=tensor",
         "++experiment.logdir=null",  # no empty TensorBoard run dir for eval runs
         f"++eval.n_routes={n_routes}",
         f"++eval.min_route_len={min_route_len}",
         f"++eval.max_route_len={max_route_len}",
-        f"++experiment.cost_function.kwargs.demand_time_weight={DEMAND_TIME_WEIGHT}",
-        f"++experiment.cost_function.kwargs.route_time_weight={ROUTE_TIME_WEIGHT}",
-        f"++experiment.cost_function.kwargs.median_connectivity_weight={MEDIAN_CONNECTIVITY_WEIGHT}",
+        f"++experiment.cost_function.kwargs.demand_time_weight={defaults.demand_time_weight}",
+        f"++experiment.cost_function.kwargs.route_time_weight={defaults.route_time_weight}",
+        f"++experiment.cost_function.kwargs.median_connectivity_weight={defaults.median_connectivity_weight}",
         f"++experiment.cost_function.kwargs.connectivity_mode={connectivity_mode}",
         f"++run_name={safe_run_name(run_name)}",
     ]

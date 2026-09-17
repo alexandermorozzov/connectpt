@@ -39,15 +39,6 @@ def build_bee_colony_kwargs(cfg, *, plan, mutation_counts_out=None) -> dict:
         adjustment_degree_target=cfg.get("adjustment_degree_target", 0.2),
         use_demand_weighted_route_selection=cfg.get(
             "use_demand_weighted_route_selection", False),
-        worse_accept_temperature=cfg.get("worse_accept_temperature", 0.0),
-        worse_accept_decay=cfg.get("worse_accept_decay", 0.995),
-        worse_accept_min_temperature=cfg.get("worse_accept_min_temperature", 0.001),
-        worse_selection_temperature=cfg.get("worse_selection_temperature", 0.0),
-        worse_selection_decay=cfg.get("worse_selection_decay", 0.995),
-        worse_selection_min_temperature=cfg.get(
-            "worse_selection_min_temperature", 0.001),
-        worse_selection_uniform_mix=cfg.get("worse_selection_uniform_mix", 0.05),
-        worse_selection_elite_count=cfg.get("worse_selection_elite_count", 1),
         trim_grace_period=cfg.get("trim_grace_period", 0),
         process_neural_bees_sequentially=cfg.get(
             "process_neural_bees_sequentially", False),

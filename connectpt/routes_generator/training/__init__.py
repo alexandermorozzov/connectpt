@@ -10,6 +10,7 @@ from .runs import ExperimentRun, RunArtifact, TrainingArtifact
 from .edit_ppo_trainer import EditPPOTrainer
 from .edit_run import EditTrainingRun
 from .construction_run import ConstructionTrainingRun
+from .dataset_build import DatasetPreparationRun
 
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "EditPPOTrainer",
     "EditTrainingRun",
     "ConstructionTrainingRun",
+    "DatasetPreparationRun",
 ]

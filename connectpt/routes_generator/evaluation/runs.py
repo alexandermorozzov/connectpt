@@ -38,7 +38,7 @@ class ModelEvaluationRun(ExperimentRun):
         )
         self.model.to(device)
 
-        self.cost_obj = CostFactory.build_unified("rtt_wmc_no_demand", for_training=False)
+        self.cost_obj = CostFactory.build(cfg.cost)
         self.cost_obj.to(device)
 
         self.dataset_dir = DATASETS_DIR / cfg.data.dataset_dirname

@@ -168,7 +168,6 @@ from .build_dataset import build_dataset
 # in stage 7 once eval_lib + baselines dissolve).
 from .core import (
     ExperimentRunFactory,
-    ExperimentBatch,
     build_experiment,
     load_experiment,
 )

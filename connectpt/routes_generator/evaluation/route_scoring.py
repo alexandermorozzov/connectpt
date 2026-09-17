@@ -1,4 +1,4 @@
-"""Score a route set into the full paper metric row.
+"""Score a route set into a full metric row.
 
 The unified objective computes normalized RTT / WMC / cost components during the
 search; this module turns the engine's raw metrics dict (plus the route tensors)
@@ -7,9 +7,8 @@ metrics the engine does not emit (adjustment degree vs the seed network, edge
 redundancy). One implementation: ``eval_lib`` re-exports these names so the
 notebook / frozen path use the same code.
 
-Adjustment-degree gap/mode are read from the single objective source
-(``cfg/objective/*.yaml``) via :func:`load_unified_objective`, matching what the
-search acceptance and PPO reward use.
+Adjustment-degree gap/mode come from the composed ``cost.kwargs`` block. The
+standalone compatibility helpers fall back to the default cost preset.
 """
 from __future__ import annotations
 
@@ -19,11 +18,13 @@ import torch
 from ..bee_colony import get_adjustment_degrees
 from ..data.route_copies import redundancy_fraction
 from ..data.routes import as_route_tensor
-from ..objectives import load_unified_objective
+from ..objectives import cost_kwargs
 
-_OBJ = load_unified_objective()
-_ADJ_GAP = _OBJ.adj_gap
-_ADJ_MODE = _OBJ.adj_mode
+
+def _adjustment_values(adjustment=None):
+    """Resolve adjustment settings at the call boundary, never at import time."""
+    values = cost_kwargs() if adjustment is None else adjustment
+    return values.adjustment_degree_gap, values.adjustment_degree_mode
 
 
 def metric_value(metrics, key, default=np.nan):
@@ -39,7 +40,7 @@ def metric_value(metrics, key, default=np.nan):
     return float(value)
 
 
-def adj_vs_init(routes, init_routes):
+def adj_vs_init(routes, init_routes, adjustment=None):
     """Mean adjustment degree of a route set vs the init network."""
     r = as_route_tensor(routes)
     s = as_route_tensor(init_routes)
@@ -49,11 +50,12 @@ def adj_vs_init(routes, init_routes):
         s = s[None]
     nr = min(r.shape[1], s.shape[1])
     w = min(r.shape[-1], s.shape[-1])
+    gap, mode = _adjustment_values(adjustment)
     return float(get_adjustment_degrees(
-        r[:, :nr, :w], s[:, :nr, :w], True, gap=_ADJ_GAP, mode=_ADJ_MODE).mean().item())
+        r[:, :nr, :w], s[:, :nr, :w], True, gap=gap, mode=mode).mean().item())
 
 
-def route_adjustment_degrees(routes, reference_routes):
+def route_adjustment_degrees(routes, reference_routes, adjustment=None):
     """Per-route adjustment degree vs a reference network (numpy vector).
 
     Same gap/mode as :func:`adj_vs_init`, but without the mean -- route figures
@@ -69,8 +71,9 @@ def route_adjustment_degrees(routes, reference_routes):
         s = s[0]
     width = max(int(r.shape[-1]), int(s.shape[-1]))
     r, s = _pad_route_width(r, width)[None], _pad_route_width(s, width)[None]
+    gap, mode = _adjustment_values(adjustment)
     return get_adjustment_degrees(
-        r, s, True, gap=_ADJ_GAP, mode=_ADJ_MODE)[0].detach().cpu().numpy()
+        r, s, True, gap=gap, mode=mode)[0].detach().cpu().numpy()
 
 
 def _pad_route_width(routes, width):
@@ -96,7 +99,7 @@ def conn_metric(m):
     return v if np.isfinite(v) else metric_value(m, "median_connectivity")
 
 
-def full_metric_row(m, rt, seed):
+def full_metric_row(m, rt, seed, adjustment=None):
     """Full metric set for every results row: we optimize a subset (RTT+conn+adj)
     but always compute/report/save ALL of them."""
     rt = as_route_tensor(rt)
@@ -107,7 +110,7 @@ def full_metric_row(m, rt, seed):
         "WMC": conn_metric(m),
         "WMC_mean": metric_value(m, "WMC_mean"),
         "WMC_median": metric_value(m, "WMC_median"),
-        "adj_vs_seed": adj_vs_init(rt, seed),
+        "adj_vs_seed": adj_vs_init(rt, seed, adjustment),
         # normalized cost components -- the RTT / WMC the algorithm actually
         # optimizes (route_cost and weighted_median_connectivity, /time_normalizer).
         "rtt_cost": metric_value(m, "cost_route_component"),
@@ -127,12 +130,12 @@ def select_metrics(row: dict, keep) -> dict:
 
 def score_fixed_routes(routes, tensors, spec, *, alpha=None, adj_target=None,
                        adj_weight=None, adj_objective=None, seed_routes=None,
-                       device=None):
+                       device=None, cost_cfg=None):
     """Score a FIXED route set under the unified objective -- no search at all.
 
     The atomic evaluation every "compare against an external network" experiment
     uses (MACSA Table-B, the pinned-Initial parity check): build the unified cost
-    (``CostFactory.build_unified``), evaluate ``routes`` on the instance
+    (``CostFactory.build_cost``), evaluate ``routes`` on the instance
     ``tensors`` with the ``spec`` route bounds, and return the engine metrics
     (with the cost breakdown attached) plus the scored route tensor.
 
@@ -152,7 +155,8 @@ def score_fixed_routes(routes, tensors, spec, *, alpha=None, adj_target=None,
     from .cost_breakdown import add_cost_breakdown_to_metrics
 
     device = torch.device("cpu") if device is None else device
-    cost_obj = CostFactory.build_unified("rtt_wmc_no_demand", for_training=False)
+    cost_obj = (CostFactory.build_cost() if cost_cfg is None
+                else CostFactory.build(cost_cfg))
     if alpha is not None:
         cost_obj.route_time_weight = float(alpha)
         cost_obj.median_connectivity_weight = float(1.0 - float(alpha))
@@ -181,3 +185,15 @@ def score_fixed_routes(routes, tensors, spec, *, alpha=None, adj_target=None,
     metrics = add_cost_breakdown_to_metrics(
         metrics, dataloader, eval_cfg, cost_obj, scored, device)
     return metrics, scored
+
+
+def initial_row(instance, *, alpha=None, adj_target=None, adj_weight=None,
+                keep=None, cost_cfg=None) -> dict:
+    """Metric row of the instance's initial (unoptimized) network."""
+    metrics, scored = score_fixed_routes(
+        instance.init_routes, instance.tensors, instance.spec,
+        alpha=alpha, adj_target=adj_target, adj_weight=adj_weight,
+        seed_routes=instance.init_routes, cost_cfg=cost_cfg)
+    adjustment = None if cost_cfg is None else cost_cfg.kwargs
+    row = full_metric_row(metrics, scored, instance.init_routes, adjustment)
+    return select_metrics(row, keep) if keep else row

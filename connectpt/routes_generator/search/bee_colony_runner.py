@@ -8,9 +8,6 @@ in the plan, not a wrapper. This layer must NOT import training.
 """
 from __future__ import annotations
 
-from ..objectives import CostFactory
-
-
 class BeeColonyRunner:
     def __init__(self, cfg, *, cost_obj, models: dict, policies: dict, plan,
                  data_module, device):
@@ -23,10 +20,10 @@ class BeeColonyRunner:
         self.device = device
 
     def _schedule(self):
-        """Schedule knobs (n_bees / n_iterations / acceptance).
+        """Schedule knobs (n_bees / n_iterations).
 
         The two shipped BeeColonySearchRun config shapes place them differently:
-        ``bee_colony_base`` (bee_type_comparison experiments) nests them under a
+        the run config nests them under a
         ``search:`` block; ``bco_flexible_bees`` puts them at the top level.
         Read from whichever one is present.
         """
@@ -43,15 +40,9 @@ class BeeColonyRunner:
         }
 
     def _adjustment_kwargs(self) -> dict:
-        """The adjustment-degree penalty kwargs from the unified objective."""
-        adj = CostFactory.load_objective("rtt_wmc_no_demand").adjustment
-        return dict(
-            adjustment_degree_weight=float(adj.weight),
-            adjustment_degree_target=float(adj.target),
-            adjustment_degree_objective=str(adj.objective),  # two-sided "target"
-            adjustment_degree_gap=float(adj.gap),
-            adjustment_degree_mode=str(adj.mode),
-        )
+        """The adjustment-degree penalty kwargs from the cost config."""
+        return {k: v for k, v in self.cfg.cost.kwargs.items()
+                if k.startswith("adjustment_degree_")}
 
     def run_seeded(self, init_routes, tensors, *, eval_dims, n_iterations=None,
                    alpha=None, adj_target=None, adj_weight=None, sequential=None,
@@ -90,13 +81,12 @@ class BeeColonyRunner:
         # csv default: the non-silent eval path reads eval_cfg.csv strictly.
         eval_cfg = OmegaConf.create({"csv": False, **dict(eval_dims)})
         sched = self._schedule()
-        acceptance = sched.get("acceptance")
         seq = (sched.get("process_neural_bees_sequentially", False)
                if sequential is None else sequential)
         search_cfg = build_bco_schedule_cfg(
-            n_bees=int(sched.n_bees),
+            n_bees=self.plan.total_bees,
             n_iterations=int(sched.n_iterations if n_iterations is None else n_iterations),
-            acceptance=None if acceptance is None else dict(acceptance),
+            cost_cfg=self.cfg.cost,
             process_neural_bees_sequentially=bool(seq), adj_weight=adj_weight)
         if adj_target is not None:
             search_cfg.adjustment_degree_target = float(adj_target)
@@ -160,7 +150,7 @@ class BeeColonyRunner:
             run_bee_colony_plan, dataloader, eval_cfg, init_cfg, self.cost_obj,
             silent=bool(self.cfg.run.get("silent", True)),
             return_routes=True, device=self.device,
-            n_bees=int(self._schedule().n_bees),
+            n_bees=self.plan.total_bees,
             n_iterations=int(self._schedule().n_iterations),
             plan=self.plan, **self._adjustment_kwargs(),
         )

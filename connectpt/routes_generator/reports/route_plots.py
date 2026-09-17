@@ -1,20 +1,7 @@
-"""Shared route visualization helpers for the LC-improvement notebooks.
+"""Shared route visualization helpers.
 
-Both ``lc_improvement_training.ipynb`` and
-``evaluation_seeded_lc_bco_mumford0.ipynb`` previously carried near-duplicate
-copies of these helpers. The lc_improvement_training version is the richer
-one (curved edges for overlapping routes, tab20 palette, accepts PyG
-``HeteroData``); the evaluation_seeded version is simpler (straight edges,
-tab10 palette, raw ``coords``/``street_adj`` arrays).
-
-The functions here unify both. Adapter ``extract_coords_street_adj`` accepts
-either a PyG graph or raw coords+street_adj. ``plot_plain_route_set`` /
-``plot_route_diff`` expose ``palette`` and ``with_overlap_curves`` kwargs so
-each notebook can pick its visual style.
-
-Canonical lineage: V2 of cell ``80161e50`` in
-``lc_improvement_training.ipynb``. Do not re-introduce the earlier V1 of
-``compute_cost_breakdown`` etc. — they are dead code.
+Curved edges for overlapping routes, tab20 palette, accepts PyG ``HeteroData``
+or raw ``coords`` / ``street_adj`` arrays.
 """
 from __future__ import annotations
 

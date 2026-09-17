@@ -22,24 +22,20 @@ from .core.paths import CFG_DIR, CONSTRUCTION_MODEL_WEIGHTS_PATH as MODEL_WEIGHT
 from .data.routes import as_route_tensor
 from .eval_route_generator import eval_model
 from .evaluation.cost_breakdown import add_cost_breakdown_to_metrics
-from .objectives import load_unified_objective
+from .objectives import cost_kwargs
 from .utils import get_eval_cfg
 
-_OBJ = load_unified_objective()
-DEMAND_TIME_WEIGHT = _OBJ.demand_time_weight
-ROUTE_TIME_WEIGHT = _OBJ.route_time_weight
-MEDIAN_CONNECTIVITY_WEIGHT = _OBJ.median_connectivity_weight
 LC_SAMPLES = 100
 
 
 def _apply_disabled_components(cfg):
     """Inject the objective's disabled cost components into the cost kwargs (so
     the built cost drops them + renormalizes the survivors). Was compat."""
-    disabled = list(_OBJ.disabled_components)
+    disabled = list(cfg.cost.kwargs.disabled_components)
     if not disabled:
         return cfg
     OmegaConf.set_struct(cfg, False)
-    cfg.experiment.cost_function.kwargs.disabled_components = disabled
+    cfg.cost.kwargs.disabled_components = disabled
     OmegaConf.set_struct(cfg, True)
     return cfg
 
@@ -53,10 +49,17 @@ def make_tensor_dataloader(dataset_cfg, tensors):
 
 
 def build_lc_cfg(run_name, n_routes, min_route_len, max_route_len,
-                 demand_time_weight=DEMAND_TIME_WEIGHT,
-                 route_time_weight=ROUTE_TIME_WEIGHT,
-                 median_connectivity_weight=MEDIAN_CONNECTIVITY_WEIGHT,
+                 demand_time_weight=None, route_time_weight=None,
+                 median_connectivity_weight=None,
                  connectivity_mode="median_weighted"):
+    defaults = cost_kwargs()
+    demand_time_weight = (defaults.demand_time_weight if demand_time_weight is None
+                          else demand_time_weight)
+    route_time_weight = (defaults.route_time_weight if route_time_weight is None
+                         else route_time_weight)
+    median_connectivity_weight = (
+        defaults.median_connectivity_weight if median_connectivity_weight is None
+        else median_connectivity_weight)
     run_name = safe_run_name(run_name)
     params = {
         "dataset_name": "tensor",
@@ -70,17 +73,23 @@ def build_lc_cfg(run_name, n_routes, min_route_len, max_route_len,
         "run_name": run_name,
         "model_weights": str(MODEL_WEIGHTS_PATH),
     }
-    cfg = get_eval_cfg(str(CFG_DIR), "evaluation/eval_model_mumford", params)
-    cfg.batch_size = 1
+    cfg = get_eval_cfg(str(CFG_DIR), "stacks/model_eval", params)
     return _apply_disabled_components(cfg)
 
 
 def build_rpc_cfg(run_name, n_routes, min_route_len, max_route_len,
-                  demand_time_weight=DEMAND_TIME_WEIGHT,
-                  route_time_weight=ROUTE_TIME_WEIGHT,
-                  median_connectivity_weight=MEDIAN_CONNECTIVITY_WEIGHT,
+                  demand_time_weight=None, route_time_weight=None,
+                  median_connectivity_weight=None,
                   connectivity_mode="median_weighted"):
     """LC-style eval cfg backed by random_path_combiner (no trained weights)."""
+    defaults = cost_kwargs()
+    demand_time_weight = (defaults.demand_time_weight if demand_time_weight is None
+                          else demand_time_weight)
+    route_time_weight = (defaults.route_time_weight if route_time_weight is None
+                         else route_time_weight)
+    median_connectivity_weight = (
+        defaults.median_connectivity_weight if median_connectivity_weight is None
+        else median_connectivity_weight)
     run_name = safe_run_name(run_name)
     overrides = [
         "+eval=mumford0",
@@ -89,16 +98,15 @@ def build_rpc_cfg(run_name, n_routes, min_route_len, max_route_len,
         f"++eval.n_routes={n_routes}",
         f"++eval.min_route_len={min_route_len}",
         f"++eval.max_route_len={max_route_len}",
-        f"++experiment.cost_function.kwargs.demand_time_weight={demand_time_weight}",
-        f"++experiment.cost_function.kwargs.route_time_weight={route_time_weight}",
-        f"++experiment.cost_function.kwargs.median_connectivity_weight={median_connectivity_weight}",
-        f"++experiment.cost_function.kwargs.connectivity_mode={connectivity_mode}",
+        f"++cost.kwargs.demand_time_weight={demand_time_weight}",
+        f"++cost.kwargs.route_time_weight={route_time_weight}",
+        f"++cost.kwargs.median_connectivity_weight={median_connectivity_weight}",
+        f"++cost.kwargs.connectivity_mode={connectivity_mode}",
         f"++run_name={run_name}",
         "model=random_path_combiner",
     ]
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        cfg = compose(config_name="evaluation/eval_model_mumford", overrides=overrides)
-    cfg.batch_size = 1
+        cfg = compose(config_name="stacks/model_eval", overrides=overrides)
     return _apply_disabled_components(cfg)
 
 

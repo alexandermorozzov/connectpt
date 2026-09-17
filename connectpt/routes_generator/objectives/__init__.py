@@ -1,19 +1,16 @@
-"""Objective / cost construction for route-generation experiments.
+"""Cost construction for route-generation experiments.
 
-The unified paper objective lives in ``cfg/objective/*.yaml`` (the single source
-of truth). :class:`CostFactory` loads those YAMLs and builds / configures the
-existing :class:`MyCostModule` so training, search and evaluation all optimize
-the same cost.
+The cost config (``cfg/cost/*.yaml`` plus ``cfg/adjustment/*.yaml``) is the source of
+truth; :class:`CostFactory` builds :class:`MyCostModule` from it, so training,
+search and evaluation optimize the same cost. :func:`cost_kwargs` exposes the
+same values to callers that need the numbers without building a module.
 """
 
-from .factory import CostFactory
-from .unified import (UnifiedObjective, load_bco_algo_config,
-                      load_unified_objective)
+from .factory import CostFactory, adjustment_kwargs, cost_kwargs
 
 
 __all__ = [
     "CostFactory",
-    "UnifiedObjective",
-    "load_unified_objective",
-    "load_bco_algo_config",
+    "cost_kwargs",
+    "adjustment_kwargs",
 ]

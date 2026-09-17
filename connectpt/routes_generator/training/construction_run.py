@@ -37,10 +37,9 @@ class ConstructionTrainingRun(ExperimentRun):
             )
 
         self.cost_obj = CostFactory.build(
-            cfg.experiment.cost_function,
+            cfg.cost,
             symmetric_routes=bool(cfg.experiment.symmetric_routes),
         )
-        CostFactory.apply_objective(self.cost_obj, "rtt_wmc_no_demand", for_training=True)
         self.cost_obj.to(device)
 
     def run(self, *, dry_run: bool = False) -> TrainingArtifact:

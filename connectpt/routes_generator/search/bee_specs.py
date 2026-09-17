@@ -16,7 +16,7 @@ class BeeSpec:
     name: str
     count: int
     operator: str
-    policy: str | None = None
+    model_ref: str | None = None
     allowed_actions: list[str] | None = None
     route_selection: str = "uniform"
     acceptance: str = "greedy"
@@ -26,15 +26,15 @@ class BeeSpec:
 
 
 def parse_bee_specs(bees_cfg) -> list[BeeSpec]:
-    """Parse a list of bee config nodes (from cfg.bees) into BeeSpec objects."""
+    """Parse the named ``cfg.bees`` mapping into :class:`BeeSpec` objects."""
     specs: list[BeeSpec] = []
-    for raw in bees_cfg:
+    for name, raw in dict(bees_cfg).items():
         d = dict(raw)
         specs.append(BeeSpec(
-            name=d["name"],
+            name=name,
             count=int(d["count"]),
             operator=d["operator"],
-            policy=d.get("policy"),
+            model_ref=d.get("model_ref"),
             allowed_actions=list(d["allowed_actions"]) if d.get("allowed_actions") else None,
             route_selection=d.get("route_selection", "uniform"),
             acceptance=d.get("acceptance", "greedy"),

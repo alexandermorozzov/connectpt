@@ -72,16 +72,7 @@ _ADAPTERS = {
 }
 
 
-def build_policies(policies_cfg, models: dict) -> dict[str, SearchPolicyAdapter]:
-    """Build named policy adapters from cfg.policies + a {name: model} map.
-
-    Each policy entry has ``model_ref`` (key into ``models``) and ``adapter``
-    (one of the registered adapter names). Returns {policy_name: adapter}.
-    """
-    out: dict[str, SearchPolicyAdapter] = {}
-    for name, spec in dict(policies_cfg).items():
-        spec = dict(spec)
-        model = models[spec["model_ref"]]
-        adapter_cls = _ADAPTERS[spec["adapter"]]
-        out[name] = adapter_cls(model, name=name)
-    return out
+def build_policies(models: dict) -> dict[str, SearchPolicyAdapter]:
+    """Build the canonical adapter for each loaded model role."""
+    return {role: _ADAPTERS[role](model, name=role)
+            for role, model in models.items()}

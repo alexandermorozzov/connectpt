@@ -30,10 +30,10 @@ from ..core.checkpoints import CheckpointStore
 from ..core.paths import resolve_weights_path
 from ..core.runs import ExperimentRun, RunArtifact
 from ..core.runtime import RunContext
-from ..data import BenchmarkDataSource, create_data_source
+from ..data import load_instance
 from ..evaluation import full_metric_row, select_metrics
 from ..model_factory import RouteModelFactory
-from ..objectives import CostFactory, load_bco_algo_config
+from ..objectives import CostFactory
 from .bee_colony_runner import BeeColonyRunner
 from .bee_specs import parse_bee_specs
 from .executable_plan import ExecutablePlan
@@ -65,9 +65,8 @@ class BeeColonySearchRun(ExperimentRun):
         )
         device = self.context.device
 
-        # cost: built config-first from the YAML cost base + unified objective
-        # in its search/eval form (two-sided adjustment "target").
-        self.cost_obj = CostFactory.build_unified("rtt_wmc_no_demand", for_training=False)
+        # cost: the /cost group this run composed (single source).
+        self.cost_obj = CostFactory.build(cfg.cost)
         self.cost_obj.to(device)
 
         # models: build (role-checked) + strict-load the checkpoint into the class
@@ -89,25 +88,15 @@ class BeeColonySearchRun(ExperimentRun):
             model.to(device)
             self.models[role] = model
 
-        self.policies = build_policies(cfg.policies, self.models)
+        self.policies = build_policies(self.models)
         self.specs = parse_bee_specs(cfg.bees)
         self.plan = ExecutablePlan.from_specs(
             self.specs, self.policies, models=self.models,
-            algo_cfg=load_bco_algo_config())
+            algo_cfg=cfg.search)
 
-        # from-scratch benchmark suite needs a BenchmarkDataModule; a sweep
-        # (``cfg.data.source`` set, or ekb/macsa) loads its instance in run()
-        # instead, so skip the module here.
+        # A sweep loads its instance in run(); no config reaches the
+        # from-scratch BenchmarkDataModule path any more.
         self.data = None
-        if (cfg.data.get("source") is None
-                and cfg.data.get("city") is not None
-                and cfg.data.get("n_routes") is not None):
-            self.data = BenchmarkDataModule(
-                city=cfg.data.city,
-                n_routes=int(cfg.data.n_routes),
-                min_route_len=int(cfg.data.min_route_len),
-                max_route_len=int(cfg.data.max_route_len),
-            )
         self.runner = BeeColonyRunner(
             cfg, cost_obj=self.cost_obj, models=self.models,
             policies=self.policies, plan=self.plan, data_module=self.data,
@@ -141,7 +130,7 @@ class BeeColonySearchRun(ExperimentRun):
                 plan=summary, metadata={"seeded": True},
             )
 
-        # Config-driven sweep: load the instance from ``cfg.data`` and improve it
+        # Config-driven sweep: load the selected instance and improve it
         # across the alpha x adj_target grid (the notebook's per-experiment loop).
         if self.cfg.get("sweep") is not None:
             return self._run_sweep(summary)
@@ -166,21 +155,8 @@ class BeeColonySearchRun(ExperimentRun):
     # -- config-driven sweep ------------------------------------------------
 
     def _load_instance(self):
-        """Load the experiment instance from ``cfg.data``.
-
-        Supports the source shape (``source: ekb|macsa|benchmark`` + params) and
-        the plain benchmark shape (``city:`` + bounds, the from-scratch data
-        group) -- the latter is loaded as a benchmark source so a benchmark
-        sweep and an ekb/macsa sweep share one code path.
-        """
-        d = self.cfg.data
-        if d.get("source") is not None:
-            return create_data_source(d).load()
-        return BenchmarkDataSource(
-            city=d.city, n_routes=d.get("n_routes"),
-            min_route_len=d.get("min_route_len"),
-            max_route_len=d.get("max_route_len"),
-        ).load()
+        """Load the composed ``cfg.instance`` preset."""
+        return load_instance(self.cfg.instance)
 
     def _sweep_grid(self):
         """Parse the ``cfg.sweep`` block into (alphas, adj_targets, n_iterations).
@@ -247,7 +223,8 @@ class BeeColonySearchRun(ExperimentRun):
             return routes, metrics
 
         def score(m, routes):
-            row = full_metric_row(m, routes, inst.init_routes)
+            row = full_metric_row(
+                m, routes, inst.init_routes, adjustment=self.cfg.cost.kwargs)
             return select_metrics(row, keep) if keep else row
 
         def on_point(row, key, out_routes):

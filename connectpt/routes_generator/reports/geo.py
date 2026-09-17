@@ -49,7 +49,7 @@ def route_adjustments(routes, reference_routes):
     The route-wise counterpart of the network-mean ``adj_vs_seed`` every results
     table reports -- what the adjustment-gradient panel colours routes by. The
     Needleman-Wunsch gap/mode come from the single objective source
-    (``cfg/objective/*.yaml``), so a figure can never disagree with the search.
+    (``cfg/experiment/cost_function/*.yaml``), so a figure can never disagree with the search.
     The import is deferred: ``reports`` reads artifacts and must not pull the
     scoring stack in at module import time.
     """

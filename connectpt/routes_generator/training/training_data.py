@@ -37,6 +37,12 @@ class TrainingDataModule:
     # --- loading ------------------------------------------------------------
     def setup(self) -> "TrainingDataModule":
         """Load graphs and LC seed routes into memory."""
+        if not Path(self.raw_graphs_path).exists():
+            raise FileNotFoundError(
+                f"training dataset not found: {self.raw_graphs_path}. "
+                f"Build it once with `python scripts/prepare_data.py` "
+                f"(about an hour for the default 1000 graphs)."
+            )
         self.graphs, self.seed_routes = load_raw_graphs_and_lc_routes(
             self.raw_graphs_path, self.lc_results_dir
         )

@@ -957,10 +957,3 @@ def setup_and_train(cfg: DictConfig, trial: optuna.trial.Trial = None):
     torch.save(best_model.state_dict(), output_dir / (run_name + '.pt'))
     
     return best_cost
-
-@hydra.main(version_base=None, config_path="../cfg", config_name="training/ppo_20nodes")
-def main(cfg: DictConfig):
-    return setup_and_train(cfg)
-
-if __name__ == "__main__":
-    main()

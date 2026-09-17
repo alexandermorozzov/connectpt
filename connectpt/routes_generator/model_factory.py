@@ -70,14 +70,13 @@ class RouteModelFactory:
 
     @staticmethod
     def compose_and_build(model_name: str, *, cfg_dir: Path | str = CFG_DIR):
-        """Build a model from its standalone ``model_build/<model_name>`` config.
+        """Build a model from the internal model-evaluation stack.
 
-        Config-first: no ``model=...`` Hydra override. ``model_build/<name>.yaml``
-        pulls in the experiment group + the model group, so the composed cfg has
-        both ``.model`` and ``.experiment``.
+        The wrapper pulls in the experiment + cost groups, so the composed cfg
+        has everything ``build_model_from_cfg`` needs.
         """
         with initialize_config_dir(config_dir=str(cfg_dir), version_base=None):
-            cfg = compose(config_name=f"model_build/{model_name}")
+            cfg = compose(config_name="stacks/model_eval", overrides=[f"model={model_name}"])
         return build_model_from_cfg(cfg.model, cfg.experiment)
 
     @staticmethod

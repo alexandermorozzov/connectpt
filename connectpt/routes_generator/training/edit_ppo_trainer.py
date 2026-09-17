@@ -27,7 +27,7 @@ class EditPPOTrainer:
     def fit(self, *, train_indices=None, val_indices=None,
             curriculum_fn=None, val_curriculum_fn=None) -> pd.DataFrame:
         """Run training and return the history as a DataFrame."""
-        data_cfg = self.cfg.data
+        data_cfg = self.cfg.dataset
         trainer_cfg = self.cfg.get("train_loop", {}) or {}
         # gpu-aware graph batch size (was the notebook's BATCH_SIZE = 16 if cuda
         # else 4); n_iterations from the trainer block (was N_ITERATIONS).

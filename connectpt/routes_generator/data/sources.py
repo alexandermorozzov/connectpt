@@ -1,20 +1,31 @@
-"""Experiment data sources: one ``load() -> Instance`` contract per source.
+"""Load a problem instance from ``datasets/instances/<name>/``.
 
-Every experiment (benchmark / MACSA / EKB) differs only in WHERE its data comes
-from; the data source hides that so the search/experiment runner is identical
-across them. A new experiment adds a data source config, not a notebook cell.
+One folder per instance, always the same four files:
+
+* ``Coords.txt``      -- first line is the node count N, then N lines of "x y";
+* ``TravelTimes.txt`` -- N x N street travel times **in minutes**;
+* ``Demand.txt``      -- N x N OD demand;
+* ``Routes.txt``      -- the initial network: one route per line, whitespace-
+  separated **0-indexed** node ids, ``#`` comments and blank lines ignored.
+
+Route counts and length bounds come from ``cfg/instance/<name>.yaml``; the loader
+validates the files against them. A new city is a new folder plus that yaml.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
-from .init import resolve_init_routes
-from .loaders import (EKB_COORD_CRS, benchmark_spec, eval_spec,
-                      load_benchmark_tensors, load_ekb_routes, load_ekb_tensors)
-from .routes import as_route_tensor
+from ..core.paths import DATASETS_DIR, resolve_under_root
+from .loaders import instance_spec
+from .routes import pad_routes_to
+
+INSTANCES_DIR = DATASETS_DIR / "instances"
+TRAVEL_TIME_SCALE = 60.0  # files are in minutes, the cost modules work in seconds
 
 
 @dataclass
@@ -30,93 +41,82 @@ class Instance:
     meta: dict = field(default_factory=dict)
 
 
-class DataSource:
-    def load(self) -> Instance:
-        raise NotImplementedError
+def load_matrices(instance_dir) -> dict:
+    """``node_locs`` / ``street_adj`` / ``demand`` from the three text files."""
+    d = Path(instance_dir)
+    node_locs = torch.tensor(
+        np.atleast_2d(np.genfromtxt(d / "Coords.txt", skip_header=1)),
+        dtype=torch.float32)
+    street_adj = torch.tensor(
+        np.atleast_2d(np.genfromtxt(d / "TravelTimes.txt")),
+        dtype=torch.float32) * TRAVEL_TIME_SCALE
+    demand = torch.tensor(
+        np.atleast_2d(np.genfromtxt(d / "Demand.txt")), dtype=torch.float32)
+
+    expected = (node_locs.shape[0],) * 2
+    for name, mat in (("TravelTimes.txt", street_adj), ("Demand.txt", demand)):
+        if tuple(mat.shape) != expected:
+            raise ValueError(f"{d / name}: shape {tuple(mat.shape)}, expected {expected}")
+    return {"node_locs": node_locs, "street_adj": street_adj, "demand": demand}
 
 
-class BenchmarkDataSource(DataSource):
-    """A standard benchmark city (Mandl / Mumford).
+def load_routes_txt(path, *, n_nodes, spec) -> torch.Tensor:
+    """Parse ``Routes.txt`` into a padded ``(1, n_routes, max_route_len)`` tensor.
 
-    Init routes come from a pinned dump / route file when configured, else are
-    generated from scratch by learned construction + the realistic tier.
+    Node ids are 0-indexed. Validates the id range, the route count and the
+    longest route against ``spec``.
     """
+    path = Path(path)
+    routes = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stops = line.split("#", 1)[0].split()
+        if stops:
+            routes.append([int(s) for s in stops])
 
-    def __init__(self, city: str, init_routes_path: str | None = None,
-                 init_dump: str | None = None, seed: int = 0,
-                 n_routes: int | None = None, min_route_len: int | None = None,
-                 max_route_len: int | None = None):
-        self.city = city
-        self.init_routes_path = init_routes_path
-        self.init_dump = init_dump
-        self.seed = seed
-        # cfg-supplied bounds win over the literature registry (single source:
-        # the ``data:`` block / build_experiment(route_len=, n_routes=)).
-        self.bounds = {k: v for k, v in
-                       (("n_routes", n_routes), ("min_route_len", min_route_len),
-                        ("max_route_len", max_route_len)) if v is not None}
+    if len(routes) != int(spec["n_routes"]):
+        raise ValueError(
+            f"{path}: {len(routes)} routes, but cfg/instance says {spec['n_routes']}")
+    flat = [s for r in routes for s in r]
+    if min(flat) < 0 or max(flat) >= n_nodes:
+        raise ValueError(
+            f"{path}: node ids {min(flat)}..{max(flat)} outside 0..{n_nodes - 1} "
+            f"(routes must be 0-indexed)")
+    longest = max(len(r) for r in routes)
+    if longest > int(spec["max_route_len"]):
+        raise ValueError(
+            f"{path}: longest route has {longest} stops, max_route_len is "
+            f"{spec['max_route_len']}")
 
-    def load(self) -> Instance:
-        tensors = load_benchmark_tensors(self.city)
-        spec = {**benchmark_spec(self.city), **self.bounds}
-        init = resolve_init_routes(
-            spec, tensors, init_dump=self.init_dump,
-            init_routes_path=self.init_routes_path, seed=self.seed)
-        return Instance(
-            label=self.city, tensors=tensors, init_routes=init, spec=dict(spec),
-            coords=tensors["node_locs"], street_adj=tensors["street_adj"])
-
-
-class MACSADataSource(DataSource):
-    """A MACSA scenario (tensors + seeded routes from a scenario dir)."""
-
-    def __init__(self, scenario: str):
-        self.scenario = scenario
-
-    def load(self) -> Instance:
-        from ..citygraph_dataset import load_macsa_scenario
-        from ..core.paths import MACSA_DATA_DIR
-
-        sc = load_macsa_scenario(MACSA_DATA_DIR / self.scenario)
-        tensors = sc["tensors"]
-        return Instance(
-            label=f"MACSA/{self.scenario}", tensors=tensors,
-            init_routes=as_route_tensor(sc["routes"]),
-            spec=eval_spec(f"macsa_{self.scenario}"),
-            coords=tensors["node_locs"], street_adj=tensors["street_adj"])
+    padded = torch.full((len(routes), int(spec["max_route_len"])), -1, dtype=torch.long)
+    for i, r in enumerate(routes):
+        padded[i, :len(r)] = torch.tensor(r, dtype=torch.long)
+    return padded[None]
 
 
-class EKBDataSource(DataSource):
-    """Ekaterinburg case study (tensors + seed routes from disk)."""
-
-    def load(self) -> Instance:
-        tensors = load_ekb_tensors()
-        routes = load_ekb_routes()
-        return Instance(
-            label="EKB", tensors=tensors, init_routes=as_route_tensor(routes),
-            spec={"city": "EKB", **eval_spec("ekb")}, coords=tensors["node_locs"],
-            street_adj=tensors["street_adj"], meta={"crs": EKB_COORD_CRS})
-
-
-REGISTRY = {
-    "ekb": EKBDataSource,
-    "macsa": MACSADataSource,
-    "benchmark": BenchmarkDataSource,
-}
-
-
-def create_data_source(data_cfg) -> DataSource:
-    """Build a DataSource from a ``data:`` config node (``source`` + params).
-
-    Only keys the target source accepts are forwarded, so a ``data:`` block that
-    also carries from-scratch benchmark bounds (``n_routes`` / lengths, inherited
-    from the ``/data`` group when composing on ``bee_colony_base``) is tolerated
-    -- the source reads its own bounds from the loaded instance.
-    """
-    import inspect
-
-    cls = REGISTRY[data_cfg["source"]]
-    accepted = set(inspect.signature(cls.__init__).parameters) - {"self"}
-    params = {k: v for k, v in dict(data_cfg).items()
-              if k != "source" and k in accepted}
-    return cls(**params)
+def load_instance(instance, *, instances_dir=None) -> Instance:
+    """Load an instance preset (or its name) as an :class:`Instance`."""
+    if isinstance(instance, str):
+        cfg = instance_spec(instance)
+        name = instance
+    else:
+        cfg = instance
+        name = str(cfg.name)
+    if instances_dir is not None:
+        d = Path(instances_dir) / name
+    elif cfg.get("path"):
+        d = resolve_under_root(cfg.path)
+    else:
+        d = INSTANCES_DIR / name
+    if not d.is_dir():
+        raise FileNotFoundError(
+            f"instance folder not found: {d}. An instance is a folder with "
+            f"Coords.txt / TravelTimes.txt / Demand.txt / Routes.txt.")
+    tensors = load_matrices(d)
+    spec = {"city": name, **{k: int(cfg[k]) for k in
+                             ("n_routes", "min_route_len", "max_route_len")}}
+    routes = load_routes_txt(d / "Routes.txt",
+                             n_nodes=tensors["node_locs"].shape[0], spec=spec)
+    meta = {"crs": cfg["crs"]} if "crs" in cfg else {}
+    return Instance(label=name, tensors=tensors, init_routes=routes, spec=spec,
+                    coords=tensors["node_locs"], street_adj=tensors["street_adj"],
+                    meta=meta)

@@ -470,7 +470,7 @@ def _format_hydra_override_value(value):
         return "null"
     return str(value)
 
-def get_eval_cfg(cfg_dir: str, base_cfg_name: str = "evaluation/eval_model_mumford", params: dict | None = None):
+def get_eval_cfg(cfg_dir: str, base_cfg_name: str = "stacks/model_eval", params: dict | None = None):
     """
     Creates a Hydra config for model evaluation.
 
@@ -499,16 +499,16 @@ def get_eval_cfg(cfg_dir: str, base_cfg_name: str = "evaluation/eval_model_mumfo
         "n_routes": "+eval.n_routes",          # добавляем новый ключ, если нет
         "min_route_len": "+eval.min_route_len",
         "max_route_len": "+eval.max_route_len",
-        "demand_time_weight": "++experiment.cost_function.kwargs.demand_time_weight",
-        "route_time_weight": "++experiment.cost_function.kwargs.route_time_weight",
-        "median_connectivity_weight": "++experiment.cost_function.kwargs.median_connectivity_weight",
-        "connectivity_mode": "++experiment.cost_function.kwargs.connectivity_mode",
-        "constraint_violation_weight": "++experiment.cost_function.kwargs.constraint_violation_weight",
-        "use_weighted_connectivity": "++experiment.cost_function.kwargs.use_weighted_connectivity",
-        "variable_weights": "++experiment.cost_function.kwargs.variable_weights",
-        "pp_fraction": "++experiment.cost_function.kwargs.pp_fraction",
-        "op_fraction": "++experiment.cost_function.kwargs.op_fraction",
-        "mcw_fraction": "++experiment.cost_function.kwargs.mcw_fraction",
+        "demand_time_weight": "++cost.kwargs.demand_time_weight",
+        "route_time_weight": "++cost.kwargs.route_time_weight",
+        "median_connectivity_weight": "++cost.kwargs.median_connectivity_weight",
+        "connectivity_mode": "++cost.kwargs.connectivity_mode",
+        "constraint_violation_weight": "++cost.kwargs.constraint_violation_weight",
+        "use_weighted_connectivity": "++cost.kwargs.use_weighted_connectivity",
+        "variable_weights": "++cost.kwargs.variable_weights",
+        "pp_fraction": "++cost.kwargs.pp_fraction",
+        "op_fraction": "++cost.kwargs.op_fraction",
+        "mcw_fraction": "++cost.kwargs.mcw_fraction",
         "run_name": "++run_name",
         "model_weights": "++model.weights",
         "starting_routes_init": "++init.method",

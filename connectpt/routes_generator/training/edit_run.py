@@ -43,27 +43,23 @@ class EditTrainingRun(ExperimentRun):
                 map_location=device,
             )
 
-        # cost -- built then configured from the unified objective (training form)
+        # cost -- everything (weights, connectivity, adjustment, sampling
+        # fractions) comes from cfg.experiment.cost_function
         self.cost_obj = CostFactory.build(
-            cfg.experiment.cost_function,
+            cfg.cost,
             symmetric_routes=bool(cfg.experiment.symmetric_routes),
         )
-        CostFactory.apply_objective(self.cost_obj, "rtt_wmc_no_demand", for_training=True)
-        # config-driven cost tuning (replaces build_edit_run's variable_weights /
-        # op/mcw fractions / ignore_stops_oob magic constants).
-        for attr, value in dict(cfg.get("cost", {}) or {}).items():
-            setattr(self.cost_obj, attr, value)
         self.cost_obj.to(device)
 
         # data module (not loaded yet -- loading happens in run())
-        dataset_dir = DATASETS_DIR / cfg.data.dataset_dirname
+        dataset_dir = DATASETS_DIR / cfg.dataset.dataset_dirname
         self.data = TrainingDataModule(
             raw_graphs_path=dataset_dir / "raw_graphs_1000.pkl",
             lc_results_dir=dataset_dir,
             device=device,
-            min_route_len=int(cfg.data.min_route_len),
-            max_route_len=int(cfg.data.max_route_len),
-            target_n_routes=cfg.data.get("target_n_routes"),
+            min_route_len=int(cfg.dataset.min_route_len),
+            max_route_len=int(cfg.dataset.max_route_len),
+            target_n_routes=cfg.dataset.get("target_n_routes"),
         )
 
         # Resolve against the weights root (CWD-independent; the notebook runs
@@ -87,14 +83,14 @@ class EditTrainingRun(ExperimentRun):
         if not cur:
             return None, None, None, None
         import pandas as pd
-        dataset_dir = DATASETS_DIR / self.cfg.data.dataset_dirname
+        dataset_dir = DATASETS_DIR / self.cfg.dataset.dataset_dirname
         meta = pd.read_csv(dataset_dir / "meta.csv")
         tier_of = dict(zip(meta["graph_index"].astype(int), meta["tier"]))
         tiers = list(cur.tiers)
         train_idx, val_idx, _monitor, train_by_tier, val_by_tier = self.data.stratified_split(
-            tier_of, tiers, train_fraction=float(self.cfg.data.train_fraction),
+            tier_of, tiers, train_fraction=float(self.cfg.dataset.train_fraction),
             n_val_per_tier=int(cur.get("n_val_per_tier", 4)),
-            seed=int(self.cfg.data.split_seed))
+            seed=int(self.cfg.dataset.split_seed))
         n_iter = int(self.cfg.get("train_loop", {}).get("n_iterations",
                                                         self.cfg.ppo.n_iterations))
         schedule = [(round(float(frac) * n_iter), list(t), label)
@@ -110,7 +106,7 @@ class EditTrainingRun(ExperimentRun):
                 output_dir=self.context.output_dir,
                 metadata={"dry_run": True,
                           "model_class": type(self.model).__name__,
-                          "dataset_dir": str(DATASETS_DIR / self.cfg.data.dataset_dirname)},
+                          "dataset_dir": str(DATASETS_DIR / self.cfg.dataset.dataset_dirname)},
             )
 
         self.data.setup()

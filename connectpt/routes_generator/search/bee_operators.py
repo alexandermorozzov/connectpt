@@ -77,7 +77,7 @@ def build_bee(spec, policies: dict):
     acceptance = get_acceptance(spec.acceptance)
 
     if spec.operator == "neural_route_action":
-        policy = policies[spec.policy]
+        policy = policies[spec.model_ref]
         return NeuralRouteActionBee(
             policy=policy,
             allowed_actions=spec.allowed_actions or [],
@@ -87,7 +87,7 @@ def build_bee(spec, policies: dict):
 
     if spec.operator == "neural_rebuild":
         return NeuralRebuildBee(
-            policy=policies[spec.policy],
+            policy=policies[spec.model_ref],
             route_selector=get_route_selector(spec.route_selection),
             acceptance_policy=acceptance,
         )
@@ -102,7 +102,7 @@ def build_bee(spec, policies: dict):
     if spec.operator == "compound":
         steps = []
         for step in spec.steps or []:
-            policy = policies[step["policy"]]
+            policy = policies[step["model_ref"]]
             steps.append(NeuralRouteActionBee(
                 policy=policy,
                 allowed_actions=list(step.get("allowed_actions", [])),

@@ -1,17 +1,7 @@
-"""Resolve the initial route network for an experiment instance.
+"""Build an initial route network for a benchmark instance.
 
-Three sources, in priority order:
-
-* ``init_dump``       -- a ``paper_results`` ``*_routes.pt`` dump; the route set
-  whose label starts with "Initial" is used (pins a machine-independent init a
-  previous run saved);
-* ``init_routes_path``-- a plain route-tensor file (``torch_utils`` format);
-* from scratch        -- learned-construction (LC) network + realistic-tier
-  corruption, the E1 init pipeline.
-
-The from-scratch path is written against the library factories
-(``RouteModelFactory`` / ``CostFactory`` / ``eval_model``) -- it does NOT go
-through the legacy ``process_standard_experiment_cfg``.
+A run never builds one on the fly -- it reads ``Routes.txt`` from the instance
+folder. This is what ``scripts/make_init_routes.py`` calls to produce that file.
 """
 from __future__ import annotations
 
@@ -20,61 +10,32 @@ import torch
 from .routes import as_route_tensor
 
 
-def resolve_init_routes(spec, tensors, *, init_dump=None, init_routes_path=None,
-                        seed: int = 0, device=None) -> torch.Tensor:
-    """Return the batched init route tensor for ``spec`` on ``tensors``."""
-    from ..core.paths import resolve_under_root
-
-    # Both are config paths: relative means "from the repo root", so they mean
-    # the same thing from a notebook (examples/route_generator) and the CLI.
-    if init_dump:
-        return _init_from_dump(resolve_under_root(init_dump), spec)
-    if init_routes_path:
-        from ..torch_utils import load_routes_tensor
-        return as_route_tensor(
-            load_routes_tensor(resolve_under_root(init_routes_path)))
-    if device is None:
-        from ..core.runtime import resolve_device
-        device = resolve_device()
-    return _init_from_scratch(spec, tensors, seed=seed, device=device)
-
-
-def _init_from_dump(init_dump, spec) -> torch.Tensor:
-    from .route_copies import pad_routes
-    dump = torch.load(init_dump, map_location="cpu", weights_only=False)
-    routes = dump.get("routes", {})
-    key = next((k for k in routes if str(k).startswith("Initial")), None)
-    if key is None:
-        raise ValueError(
-            f"init_dump {init_dump}: no 'Initial*' route set among {list(routes)}")
-    init = pad_routes(as_route_tensor(routes[key]), spec["n_routes"],
-                      spec["max_route_len"])
-    return init[None] if init.ndim == 2 else init
-
-
-def _init_from_scratch(spec, tensors, *, seed: int, device) -> torch.Tensor:
+def build_init_routes(spec, tensors, *, seed: int = 0, device=None,
+                      clean: bool = False) -> torch.Tensor:
+    """Build an initial network: one stochastic sample of the learned
+    construction model, plus the realistic corruption tier unless ``clean``."""
     import random
 
     from .route_copies import inject_realistic_tier, pad_routes
 
-    clean = _lc_construct(spec, tensors, device=device)
-    clean = pad_routes(clean, spec["n_routes"], spec["max_route_len"])
-    rng = random.Random(seed)
-    init, _ = inject_realistic_tier(
-        clean, rng, spec["min_route_len"], spec["max_route_len"],
-        street_adj=tensors["street_adj"], demand=tensors["demand"],
-        n_nodes=tensors["node_locs"].shape[0])
-    init = as_route_tensor(init)
-    return init[None] if init.ndim == 2 else init
+    if device is None:
+        from ..core.runtime import resolve_device
+        device = resolve_device()
+
+    routes = _lc_construct(spec, tensors, device=device)
+    routes = pad_routes(routes, spec["n_routes"], spec["max_route_len"])
+    if not clean:
+        rng = random.Random(seed)
+        routes, _ = inject_realistic_tier(
+            routes, rng, spec["min_route_len"], spec["max_route_len"],
+            street_adj=tensors["street_adj"], demand=tensors["demand"],
+            n_nodes=tensors["node_locs"].shape[0])
+    routes = as_route_tensor(routes)
+    return routes[None] if routes.ndim == 2 else routes
 
 
 def _lc_construct(spec, tensors, *, device) -> torch.Tensor:
-    """Build a clean learned-construction network for ``spec`` on ``tensors``.
-
-    Config-first: composes the ``evaluation/eval_model_mumford`` eval cfg with the unified
-    objective's weights + the construction checkpoint, then builds model/cost
-    through the factories and rolls out one sample via ``eval_model``.
-    """
+    """One learned-construction rollout for ``spec`` on ``tensors``."""
     from omegaconf import OmegaConf
     from torch_geometric.loader import DataLoader
 
@@ -84,33 +45,34 @@ def _lc_construct(spec, tensors, *, device) -> torch.Tensor:
     from ..core.runtime import seed_everything
     from ..eval_route_generator import eval_model
     from ..model_factory import RouteModelFactory
-    from ..objectives import CostFactory, load_unified_objective
+    from ..objectives import CostFactory, cost_kwargs
     from ..utils import get_eval_cfg
 
-    obj = load_unified_objective()
+    kw = cost_kwargs()
     params = {
         "dataset_name": "tensor",
         "n_routes": spec["n_routes"],
         "min_route_len": spec["min_route_len"],
         "max_route_len": spec["max_route_len"],
-        "connectivity_mode": obj.connectivity_mode,
+        "connectivity_mode": kw.connectivity_mode,
         "run_name": f"lc_init_{spec.get('city', 'inst')}",
         "model_weights": str(CONSTRUCTION_MODEL_WEIGHTS_PATH),
-        **obj.weights,
+        "demand_time_weight": kw.demand_time_weight,
+        "route_time_weight": kw.route_time_weight,
+        "median_connectivity_weight": kw.median_connectivity_weight,
     }
-    cfg = get_eval_cfg(str(CFG_DIR), "evaluation/eval_model_mumford", params)
-    cfg.batch_size = 1
-    disabled = list(obj.disabled_components)
+    cfg = get_eval_cfg(str(CFG_DIR), "stacks/model_eval", params)
+    disabled = list(kw.disabled_components)
     if disabled:
         OmegaConf.set_struct(cfg, False)
-        cfg.experiment.cost_function.kwargs.disabled_components = disabled
+        cfg.cost.kwargs.disabled_components = disabled
         OmegaConf.set_struct(cfg, True)
 
     seed_everything(cfg.experiment.get("seed"))
     dataloader = DataLoader(
         get_dataset_from_config(cfg.eval.dataset, tensors=tensors), batch_size=1)
     cost_obj = CostFactory.build(
-        cfg.experiment.cost_function,
+        cfg.cost,
         symmetric_routes=bool(cfg.experiment.symmetric_routes))
     cost_obj.to(device)
     model = RouteModelFactory.build_construction_model(cfg.model, cfg.experiment)

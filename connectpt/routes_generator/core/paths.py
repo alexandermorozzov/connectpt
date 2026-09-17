@@ -61,7 +61,7 @@ def resolve_under_root(path) -> Path:
 def resolve_weights_path(path, weights_dir=None) -> Path:
     """Resolve a checkpoint path against the weights root.
 
-    Checkpoint paths in config (``cfg/search/models/*``, ``paths.checkpoint_path``)
+    Checkpoint paths in config (``cfg/method/*``, ``paths.checkpoint_path``)
     are written RELATIVE to the weights root -- ``paths.weights_dir`` when the cfg
     sets one, else :data:`MODEL_WEIGHTS_DIR`. Absolute paths pass through
     unchanged, so a checkpoint outside the repo is named by its full path.

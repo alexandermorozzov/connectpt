@@ -16,10 +16,8 @@ from omegaconf import OmegaConf
 from ..core.paths import BENCHMARK_DIR, DATASETS_DIR
 from .routes import as_route_tensor
 
-# Benchmark instance specs (route counts / length bounds) live ONLY in the YAML
-# group cfg/eval/<city>.yaml -- the single source of truth. No duplicated Python
-# table: benchmark_spec() reads the YAML.
-EVAL_DIR = Path(__file__).resolve().parents[1] / "cfg" / "eval"
+# Instance specs live in the Hydra ``cfg/instance`` group.
+INSTANCE_CONFIG_DIR = Path(__file__).resolve().parents[1] / "cfg" / "instance"
 
 # Default route-length bounds for the geometric case studies (EKB / MACSA),
 # where the seed network -- not a benchmark spec -- sets the counts.
@@ -30,20 +28,20 @@ EKB_DATA_DIR = DATASETS_DIR / "EKB"
 EKB_COORD_CRS = "EPSG:32641"  # UTM zone 41N: Ekaterinburg -> WGS84
 EKB_CITY_NAME = "EKB"
 
-def eval_spec(name: str) -> dict:
-    """Route-count / length bounds for a dataset, from its single YAML source
-    ``cfg/eval/<name>.yaml`` -- the registry every data source reads its spec
-    from (benchmarks by city, EKB / MACSA by dataset name)."""
-    cfg = OmegaConf.load(EVAL_DIR / f"{name}.yaml")
-    return {"n_routes": int(cfg.n_routes),
-            "min_route_len": int(cfg.min_route_len),
-            "max_route_len": int(cfg.max_route_len)}
+def instance_spec(name: str):
+    """The instance spec from ``cfg/instance/<name>.yaml`` -- route count, length
+    bounds and any extras (``crs``). One file per instance, same name as its
+    folder under ``datasets/instances/``."""
+    path = INSTANCE_CONFIG_DIR / f"{name}.yaml"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"no spec for instance {name!r}: expected {path} with n_routes / "
+            f"min_route_len / max_route_len")
+    return OmegaConf.load(path)
 
 
-def benchmark_spec(city: str) -> dict:
-    """Route-count / length bounds for a benchmark city (``cfg/eval/<city>.yaml``,
-    route counts / length bounds from the literature)."""
-    return {"city": city, **eval_spec(city.lower())}
+# Compatibility for callers outside the new run/config layer.
+eval_spec = instance_spec
 
 
 def load_benchmark_tensors(city: str) -> dict:
@@ -110,14 +108,3 @@ def ekb_spec(routes=None, city: str = EKB_CITY_NAME) -> dict:
         "min_route_len": int(route_lens[route_lens > 0].min().item()),
         "max_route_len": int(rr.shape[-1]),
     }
-
-
-def macsa_eval_bounds(scenario) -> tuple[int, int, int]:
-    """Route-count / length bounds for evaluating a MACSA scenario."""
-    n_nodes = int(scenario["tensors"]["node_locs"].shape[0])
-    n_routes = int(scenario["routes"].shape[1])
-    seed_route_lens = (scenario["routes"] > -1).sum(dim=-1)
-    longest_seed_route = (int(seed_route_lens.max().item())
-                          if seed_route_lens.numel() else MIN_ROUTE_LEN)
-    max_route_len = min(n_nodes, max(MAX_ROUTE_LEN, longest_seed_route))
-    return n_routes, MIN_ROUTE_LEN, max_route_len

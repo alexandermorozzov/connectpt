@@ -1,18 +1,12 @@
-"""Build and configure cost modules from the objective YAMLs.
+"""Build cost modules from the cost config.
 
-The objective YAMLs (``cfg/objective/*.yaml``) are the single source of truth
-for *what* the cost is (weights, connectivity mode, adjustment penalty). This
-factory:
-
-* delegates raw cost-module construction to the existing
-  :func:`get_cost_module_from_cfg` (no behaviour change -- the v1 path);
-* applies an objective YAML onto an already-built cost module, centralising the
-  weight / connectivity / adjustment / disabled-component assignment that the
-  notebook used to do by hand.
-
-It deliberately does NOT own any objective constants -- it reads them from YAML.
+``cfg/cost/<name>.yaml`` is the single source of truth for
+the cost: ``type`` selects the module class, ``kwargs`` are its constructor
+arguments (weights, connectivity mode, disabled components, adjustment penalty).
 """
 from __future__ import annotations
+
+from functools import lru_cache
 
 from pathlib import Path
 
@@ -21,73 +15,53 @@ from omegaconf import DictConfig, OmegaConf
 from ..transit_time_estimator import get_cost_module_from_cfg
 
 CFG_DIR = Path(__file__).resolve().parents[1] / "cfg"
-OBJECTIVE_DIR = CFG_DIR / "objective"
-COST_BASE_DIR = CFG_DIR / "experiment" / "cost_function"
+COST_DIR = CFG_DIR / "cost"
+ADJUSTMENT_DIR = CFG_DIR / "adjustment"
+
+DEFAULT_COST = "rtt_wmc"
+DEFAULT_ADJUSTMENT = "cap"
 
 
 class CostFactory:
-    """Construct / configure cost modules from objective configs."""
+    """Construct cost modules from cost configs."""
 
     @staticmethod
-    def load_objective(name: str) -> DictConfig:
-        """Load ``cfg/objective/<name>.yaml`` as an OmegaConf node."""
-        path = OBJECTIVE_DIR / (name if name.endswith(".yaml") else f"{name}.yaml")
+    def load_cost_config(name: str = DEFAULT_COST,
+                         adjustment: str = DEFAULT_ADJUSTMENT) -> DictConfig:
+        """Load a cost and merge one adjustment preset into ``kwargs``."""
+        path = COST_DIR / (name if name.endswith(".yaml") else f"{name}.yaml")
         if not path.exists():
-            raise FileNotFoundError(f"objective config not found: {path}")
-        return OmegaConf.load(path)
-
-    @staticmethod
-    def build_unified(objective_name: str = "rtt_wmc_no_demand", *,
-                      cost_base: str = "mine", for_training: bool = False,
-                      symmetric_routes: bool = True, low_memory_mode: bool = False):
-        """Build + configure a cost module config-first (no OmegaConf.create).
-
-        Loads the cost base from ``cfg/experiment/cost_function/<cost_base>.yaml``
-        and applies the named objective. Used by the search / evaluation runs so
-        they do not assemble a cost config in Python.
-        """
-        cost_cfg = OmegaConf.load(COST_BASE_DIR / f"{cost_base}.yaml")
-        cost = CostFactory.build(cost_cfg, low_memory_mode, symmetric_routes)
-        CostFactory.apply_objective(cost, objective_name, for_training=for_training)
-        return cost
+            raise FileNotFoundError(f"cost config not found: {path}")
+        cfg = OmegaConf.load(path)
+        adj_path = ADJUSTMENT_DIR / (
+            adjustment if adjustment.endswith(".yaml") else f"{adjustment}.yaml")
+        if not adj_path.exists():
+            raise FileNotFoundError(f"adjustment config not found: {adj_path}")
+        return OmegaConf.merge(cfg, {"kwargs": OmegaConf.load(adj_path)})
 
     @staticmethod
     def build(cost_cfg, low_memory_mode: bool = False, symmetric_routes: bool = True):
-        """Build a cost module from an ``experiment.cost_function`` node.
-
-        Thin delegate over the existing construction path; kept so callers depend
-        on ``CostFactory`` rather than reaching into ``transit_time_estimator``.
-        """
+        """Build a cost module from an ``experiment.cost_function`` node."""
         return get_cost_module_from_cfg(cost_cfg, low_memory_mode, symmetric_routes)
 
     @staticmethod
-    def apply_objective(cost_obj, objective, *, for_training: bool = False):
-        """Configure ``cost_obj`` in place from an objective config.
+    def build_cost(name: str = DEFAULT_COST, *, adjustment: str = DEFAULT_ADJUSTMENT,
+                   symmetric_routes: bool = True, low_memory_mode: bool = False):
+        """Load the cost config by name and build the module from it."""
+        return CostFactory.build(CostFactory.load_cost_config(name, adjustment),
+                                 low_memory_mode, symmetric_routes)
 
-        ``objective`` is either an objective name (str) or a loaded objective
-        node. Sets the cost weights, connectivity mode, disabled components and
-        the adjustment-degree penalty. ``for_training`` selects the one-sided
-        ``cap`` adjustment objective used for PPO reward shaping; otherwise the
-        two-sided ``target`` objective used for search/eval acceptance is used.
-        """
-        if isinstance(objective, str):
-            objective = CostFactory.load_objective(objective)
 
-        weights = objective.weights
-        cost_obj.demand_time_weight = float(weights.demand_time_weight)
-        cost_obj.route_time_weight = float(weights.route_time_weight)
-        cost_obj.median_connectivity_weight = float(weights.median_connectivity_weight)
-        cost_obj.connectivity_mode = str(objective.connectivity_mode)
+@lru_cache(maxsize=None)
+def cost_kwargs(name: str = DEFAULT_COST, adjustment: str = DEFAULT_ADJUSTMENT):
+    """The cost config's ``kwargs`` node -- the single source for the weights,
+    the connectivity mode and the adjustment-degree penalty. Read-only: it is
+    cached, so callers copy before mutating."""
+    return CostFactory.load_cost_config(name, adjustment).kwargs
 
-        disabled = list(objective.get("disabled_components", []) or [])
-        cost_obj.set_enabled_components(disabled_components=disabled)
 
-        adj = objective.adjustment
-        cost_obj.adjustment_degree_weight = float(adj.weight)
-        cost_obj.adjustment_degree_target = float(adj.target)
-        cost_obj.adjustment_degree_objective = str(
-            adj.train_objective if for_training else adj.objective
-        )
-        cost_obj.adjustment_degree_gap = float(adj.gap)
-        cost_obj.adjustment_degree_mode = str(adj.mode)
-        return cost_obj
+def adjustment_kwargs(name: str = DEFAULT_COST,
+                      adjustment: str = DEFAULT_ADJUSTMENT) -> dict:
+    """The ``adjustment_degree_*`` block, as kwargs for the BCO loop."""
+    return {k: v for k, v in cost_kwargs(name, adjustment).items()
+            if k.startswith("adjustment_degree_")}
