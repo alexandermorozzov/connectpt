@@ -1,18 +1,12 @@
-"""Train an edit / trim model from a composed config -- CLI, no Jupyter.
+"""Train the edit policy.
 
-The config name selects what is trained; everything else (dataset, objective,
-model, PPO budget) lives in that YAML, so a new training run is a new config,
-not a new flag. The output flags say where the checkpoint and the log land.
+    python scripts/prepare_data.py      # once: build the dataset
+    python scripts/run_training.py      # train
 
-    python scripts/run_training.py                                  # cfg/training/edit
-    python scripts/run_training.py --config-name training/edit_scratch
-    python scripts/run_training.py --weights-dir artifacts/model_weights_v2
-    python scripts/run_training.py --dry-run                        # build only, no PPO loop
-    python scripts/run_training.py run.seed=3                       # Hydra-style override
-
-``--dry-run`` builds the data/model/cost/trainer and validates the wiring
-WITHOUT loading the generated dataset or entering the long PPO loop -- the fast
-check that the config still composes.
+Everything (dataset, cost, model, curriculum, trainer) is composed by
+``cfg/runs/train.yaml``.
+``--dry-run`` builds data/model/cost/trainer without loading the dataset or
+entering the PPO loop.
 """
 from __future__ import annotations
 
@@ -25,9 +19,9 @@ from pathlib import Path
 from hydra import compose, initialize_config_dir
 from omegaconf import open_dict
 
+from connectpt.routes_generator.core import ExperimentRunFactory
 from connectpt.routes_generator.core.paths import (CFG_DIR, LOGS_DIR, RUNS_DIR,
                                                    resolve_under_root)
-from connectpt.routes_generator.training import EditTrainingRun
 
 
 def setup_logging(log_path: Path) -> logging.Logger:
@@ -48,8 +42,8 @@ def setup_logging(log_path: Path) -> logging.Logger:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config-name", default="training/edit",
-                        help="config under cfg/ (default: training/edit)")
+    parser.add_argument("--config-name", default="runs/train",
+                        help="config under cfg/ (default: train)")
     parser.add_argument("--dry-run", action="store_true",
                         help="build + validate the wiring, skip dataset load and PPO loop")
     parser.add_argument("--weights-dir", default=None,
@@ -88,7 +82,7 @@ def main() -> None:
     log.info("weights -> %s | run outputs -> %s",
              cfg.paths.get("weights_dir"), cfg.paths.output_dir)
 
-    artifact = EditTrainingRun(cfg).run(dry_run=args.dry_run)
+    artifact = ExperimentRunFactory.from_cfg(cfg).run(dry_run=args.dry_run)
     if args.dry_run:
         log.info("dry-run OK: %s", artifact.metadata)
     else:

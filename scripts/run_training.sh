@@ -3,7 +3,7 @@
 #
 # Every argument is passed straight through to scripts/run_training.py:
 #   scripts/run_training.sh
-#   scripts/run_training.sh --config-name training/edit_scratch
+#   scripts/run_training.sh --config-name train
 #   scripts/run_training.sh --dry-run
 #   scripts/run_training.sh run.seed=3
 #

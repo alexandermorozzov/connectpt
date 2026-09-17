@@ -2,7 +2,7 @@
 Launch edit-model training DETACHED on Windows. Windows twin of run_training.sh.
 
 Every token is passed straight through to scripts/run_training.py, so there is
-no param() block on purpose -- `--config-name training/edit_scratch` and Hydra
+no param() block on purpose -- `--config-name train` and Hydra
 overrides such as `run.seed=3` must reach $args untouched.
 
 Logging is done by run_training.py itself (`--log`), which is added only when
@@ -10,7 +10,7 @@ the caller did not supply one: Start-Process cannot send stdout and stderr to a
 single file, so PowerShell-side redirection is deliberately NOT used.
 
   .\scripts\run_training.ps1
-  .\scripts\run_training.ps1 --config-name training/edit_scratch
+  .\scripts\run_training.ps1 --config-name train
   .\scripts\run_training.ps1 --dry-run
   .\scripts\run_training.ps1 run.seed=3
 
