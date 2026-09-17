@@ -1,9 +1,0 @@
-csv: true
-n_routes: 79
-min_route_len: 5
-max_route_len: 106
-dataset:
-  type: mumford
-  path: /home/ahollid/scratch/datasets/laval/
-  city: LavalDA
-  scale_dynamically: false

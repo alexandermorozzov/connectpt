@@ -1,8 +1,0 @@
-csv: true
-n_routes: 56
-min_route_len: 10
-max_route_len: 22
-dataset:
-  type: mumford
-  path: /root/connectpt/datasets/benchmark
-  city: Mumford2

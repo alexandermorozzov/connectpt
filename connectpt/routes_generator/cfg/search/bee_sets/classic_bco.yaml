@@ -1,8 +1,0 @@
-# @package _global_
-bees:
-  - name: random_mutation
-    count: 20
-    operator: heuristic_mutation
-    mutation_kind: classic_bco
-    route_selection: uniform
-    acceptance: greedy
