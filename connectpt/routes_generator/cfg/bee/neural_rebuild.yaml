@@ -1,0 +1,5 @@
+count: 5
+operator: neural_rebuild
+model_ref: construction
+route_selection: uniform
+acceptance: greedy

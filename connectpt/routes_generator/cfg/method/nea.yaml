@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - /bee_set: neural_rebuild
+  - /model_profile@models.construction: construction_v1
+  - _self_
+
+run:
+  label: NEA

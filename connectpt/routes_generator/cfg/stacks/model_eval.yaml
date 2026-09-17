@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /cost: rtt_wmc
+  - /adjustment: cap
+  - /experiment: standard
+  - /model: construction
+  - _self_
+
+batch_size: 1
+experiment:
+  logdir: null

@@ -1,0 +1,4 @@
+# @package _global_
+defaults:
+  - /bee@bees.shortest_path_rebuild: shortest_path_rebuild
+  - /bee@bees.local_edit: local_edit

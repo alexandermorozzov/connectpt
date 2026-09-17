@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - /bee_set: neural_edit
+  - /model_profile@models.edit: edit_v1
+  - _self_
+
+run:
+  label: NEA-Edit

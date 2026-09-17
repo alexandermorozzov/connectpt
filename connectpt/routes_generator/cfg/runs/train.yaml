@@ -1,0 +1,35 @@
+# @package _global_
+defaults:
+  - /cost: rtt_wmc
+  - /adjustment: cap
+  - /dataset: lc_copytiers
+  - /experiment: standard
+  - /model: edit_trim_seeded
+  - /trainer: ppo_edit
+  - /curriculum: copytiers
+  - _self_
+
+run:
+  type: edit_training
+  name: edit_training_v1
+  seed: 0
+  cpu: false
+
+paths:
+  weights_dir: artifacts/model_weights
+  output_dir: artifacts/runs/edit_training_v1
+  checkpoint_path: improvement/edit_training_v1.pt
+  init_checkpoint_path: null
+
+checkpoint:
+  strict_load: true
+
+experiment:
+  logdir: null
+
+model:
+  route_generator:
+    kwargs:
+      serial_halting: true
+      allow_trim_below_min: true
+      n_adjustment_cond_feats: 0

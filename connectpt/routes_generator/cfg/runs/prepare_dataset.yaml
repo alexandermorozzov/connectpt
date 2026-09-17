@@ -1,0 +1,11 @@
+# @package _global_
+defaults:
+  - /cost: rtt_wmc
+  - /adjustment: cap
+  - /dataset: lc_copytiers
+  - /dataset_build: copytiers
+  - _self_
+
+run:
+  type: dataset_prepare
+  name: prepare_dataset

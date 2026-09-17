@@ -4,6 +4,8 @@ cpu: False
 seed: 0
 symmetric_routes: True
 
+# cost_function -- алиас на cfg.cost для legacy-читателей utils.py.
+cost_function: ${cost}
+
 defaults:
   - _self_
-  - cost_function: mine

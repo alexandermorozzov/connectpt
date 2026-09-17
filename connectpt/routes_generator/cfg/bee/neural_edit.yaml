@@ -1,0 +1,6 @@
+count: 5
+operator: neural_route_action
+model_ref: edit
+allowed_actions: [extend, trim_start, trim_end]
+route_selection: uniform
+acceptance: greedy

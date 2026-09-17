@@ -1,0 +1,28 @@
+# @package _global_
+defaults:
+  - /cost: rtt_wmc
+  - /adjustment: cap
+  - /instance: mandl
+  - /method: nea_combined
+  - /sweep: single
+  - _self_
+
+run:
+  type: bee_colony_search
+  name: search
+  seed: 0
+  cpu: false
+
+paths:
+  weights_dir: artifacts/model_weights
+  runs_dir: artifacts/runs
+  output_dir: ${paths.runs_dir}/${run.name}
+
+models: {}
+search:
+  process_neural_bees_sequentially: false
+
+metrics: [RTT, WMC, ATT, adj_vs_seed, d0, d1, d2, d_un, cost]
+
+logging:
+  tensorboard: true

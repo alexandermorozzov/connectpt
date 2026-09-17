@@ -1,0 +1,4 @@
+# @package _global_
+defaults:
+  - /bee@bees.neural_rebuild: neural_rebuild
+  - /bee@bees.neural_edit: neural_edit

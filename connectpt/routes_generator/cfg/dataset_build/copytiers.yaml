@@ -1,0 +1,13 @@
+n_graphs: 1000
+raw_n_nodes: 50
+raw_graph_type: mixed
+raw_graph_seed: 0
+lc_n_samples: 1
+lc_combos:
+  - [1.0, 0.0, 0.0, demand]
+  - [0.0, 1.0, 0.0, route]
+  - [0.0, 0.0, 1.0, conn]
+tiers: [copy_full, copy_boundary, copy_mixed, covered_dup, lc_clean]
+corrupt_all_routes: false
+n_routes_to_corrupt: null
+force_regen: false

@@ -13,7 +13,7 @@ preserved by construction:
   engine (``materialize()``) where the legacy code built it.
 
 Builder: :meth:`ExecutablePlan.from_specs` builds a plan from declarative
-BeeSpecs (``cfg/search/bee_sets``) -- the only way bee sets are written.
+BeeSpecs (``cfg/bee`` + ``cfg/bee_set``).
 """
 from __future__ import annotations
 
@@ -397,7 +397,7 @@ class ExecutablePlan:
     @classmethod
     def from_specs(cls, specs, policies: dict, *, models: dict | None = None,
                    algo_cfg=None):
-        """Build a plan from declarative BeeSpecs (``cfg/search/bee_sets``).
+        """Build a plan from declarative BeeSpecs (``cfg/method``).
 
         Specs mapping to the same canonical operator slot are MERGED into one
         group (the legacy engine executes each slot as one vectorized block;
@@ -415,7 +415,7 @@ class ExecutablePlan:
         if algo_cfg is not None:
             for i in (4, 5, 6, 7):
                 ignore[i] = bool(
-                    getattr(algo_cfg, f"ignore_type{i}_max_route_len"))
+                    algo_cfg.get(f"ignore_type{i}_max_route_len", False))
 
         slots: dict[int, dict] = {}
 
@@ -432,10 +432,10 @@ class ExecutablePlan:
             slot = _canonical_slot(spec, policies)
             # fail fast: the policy's model must support every requested action
             if spec.operator == "neural_route_action":
-                policies[spec.policy].validate_actions(spec.allowed_actions or [])
+                policies[spec.model_ref].validate_actions(spec.allowed_actions or [])
             elif spec.operator == "compound":
                 for step in spec.steps or []:
-                    policies[step["policy"]].validate_actions(
+                    policies[step["model_ref"]].validate_actions(
                         step.get("allowed_actions", []))
             halt = None
             if 4 <= slot <= 7:
@@ -496,7 +496,7 @@ def _canonical_slot(spec, policies: dict) -> int:
             return 3
         return 1
     if spec.operator == "neural_route_action":
-        if policies[spec.policy].role == "construction":
+        if policies[spec.model_ref].role == "construction":
             return 4
         # edit role: the 5/6 split is EXTEND presence, not halt.
         actions = set(spec.allowed_actions or [])
