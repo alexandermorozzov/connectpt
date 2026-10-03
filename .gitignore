@@ -60,3 +60,5 @@ datasets/instances/*
 !datasets/instances/mandl/
 !datasets/instances/mumford*/
 graphify-out/
+training_figure_variants/
+curric_noadj_v1/

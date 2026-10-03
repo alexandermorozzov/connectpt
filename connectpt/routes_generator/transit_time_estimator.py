@@ -1770,6 +1770,31 @@ class CostModule(torch.nn.Module):
         return torch.where(den > eps, num / den.clamp(min=eps),
                            torch.full_like(num, float('nan')))
 
+    @staticmethod
+    def _demand_weighted_pair_times(values, weights, dim=-1, eps=1e-9):
+        """Per-pair terms of :meth:`_demand_weighted_node_times`:
+            c_ij = (D_ij / sum_j D_ij) * tau_ij
+        NaN where ``values`` is non-finite or the row demand is ~0."""
+        valid = torch.isfinite(values)
+        w = torch.where(valid, weights, torch.zeros_like(weights))
+        den = w.sum(dim=dim, keepdim=True)
+        return torch.where(valid & (den > eps), w * values / den.clamp(min=eps),
+                           torch.full_like(values, float('nan')))
+
+    def _connectivity_values(self, state):
+        all_pairs = self._compute_all_pairs_times_floyd(state)
+        N = all_pairs.shape[-1]
+        eye = torch.eye(N, device=all_pairs.device).bool().unsqueeze(0)
+        max_T = _finite_time_diameter(state.drive_times)
+        unreached_penalty = (2.0 * max_T).view(-1, 1, 1)
+        unreachable = (~state.has_path) | (~all_pairs.isfinite())
+        conn_vals = torch.where(unreachable, unreached_penalty.expand_as(all_pairs), all_pairs)
+        return conn_vals.masked_fill(eye, float('nan'))
+
+    def connectivity_pair_times(self, state):
+        return self._demand_weighted_pair_times(
+            self._connectivity_values(state), state.demand, dim=2)
+
 
     def _cost_helper(self, state, return_per_route_riders=False):
         """
@@ -1870,11 +1895,7 @@ class CostModule(torch.nn.Module):
         # -- the same matrix ATT / the passenger cost use. Unreachable pairs get
         # 2 * max_{k,l} T_kl (delta_ij = 0), matching the unserved-demand penalty.
         _conn_mode = getattr(self, 'connectivity_mode', 'median_weighted')
-        max_T = _finite_time_diameter(state.drive_times)                  # [B]
-        unreached_penalty = (2.0 * max_T).view(-1, 1, 1)                  # [B, 1, 1]
-        unreachable = nopath | (~all_pairs.isfinite())
-        conn_vals = torch.where(unreachable, unreached_penalty.expand_as(all_pairs), all_pairs)
-        conn_vals = conn_vals.masked_fill(eye, float('nan'))             # drop diagonal
+        conn_vals = self._connectivity_values(state)
         # Per-node demand-weighted travel time C_i (modified-Cp). Aggregate over
         # nodes by BOTH mean and median -- both are reported; the cost optimizes
         # the one selected by connectivity_mode (WMC = weighted_median by default).
