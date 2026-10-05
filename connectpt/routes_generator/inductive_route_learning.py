@@ -2,6 +2,7 @@ import copy
 import math
 import random
 import logging as log
+import time
 from pathlib import Path
 from itertools import product
 
@@ -105,8 +106,9 @@ class NNBaseline:
 
     def __init__(self, learning_rate=0.0005, decay=0.01, actor_model=None,
                  normalize_returns=False, huber=False, huber_delta=1.0,
-                 value_clip=None, return_norm_momentum=0.05):
+                 value_clip=None, return_norm_momentum=0.05, device=None):
         self.learning_rate = learning_rate
+        self.device = device if device is not None else globals().get('DEVICE', torch.device('cpu'))
         self.decay = decay
         self.optim = None
         self.model = None
@@ -128,9 +130,9 @@ class NNBaseline:
         self.huber_delta = float(huber_delta)
         self.value_clip = None if value_clip is None else float(value_clip)
         self._ret_momentum = float(return_norm_momentum)
-        self._ret_mean = torch.zeros((), device=DEVICE)
-        self._ret_var = torch.ones((), device=DEVICE)
-        self._ret_std = torch.ones((), device=DEVICE)
+        self._ret_mean = torch.zeros((), device=self.device)
+        self._ret_var = torch.ones((), device=self.device)
+        self._ret_std = torch.ones((), device=self.device)
         self._ret_initialized = False
         if not self._shared_critic:
             self._build_model(self.legacy_input_dim)
@@ -140,7 +142,7 @@ class NNBaseline:
             FeatureNorm(input_dim, 0.001),
             get_mlp(3, input_dim * 2, in_dim=input_dim, out_dim=1,
                     dropout=0.0)
-        ).to(DEVICE)
+        ).to(self.device)
         self.optim = torch.optim.Adam(self.model.parameters(),
                                       lr=self.learning_rate,
                                       weight_decay=self.decay)
@@ -324,7 +326,7 @@ class NNBaseline:
 
 def eval_model_over_nroutes(model, eval_dl, n_routes_range, eval_cfg, cost_obj, 
                             sumwriter=None, n_eps=0, n_samples=None, 
-                            silent=False):
+                            silent=False, device=None):
     # evaluate the model over a variety of n_routes, and take the mean
     eval_costs = []
     all_metrics = None
@@ -333,7 +335,7 @@ def eval_model_over_nroutes(model, eval_dl, n_routes_range, eval_cfg, cost_obj,
         eval_cfg.n_routes = n_routes
         mean_cost, metrics = \
             eval_model(model, eval_dl, eval_cfg, cost_obj, silent=silent, 
-                       n_samples=n_samples, device=DEVICE)
+                       n_samples=n_samples, device=device if device is not None else next(model.parameters()).device)
         eval_costs.append(mean_cost)
 
         if all_metrics is None:
@@ -403,10 +405,38 @@ class DummySummaryWriter:
         pass
 
 
-def train_ppo(model, min_n_routes, max_n_routes, cfg, optimizer, 
+def _collect_episode_statistics(rewards, dones, reward_sums, lengths):
+    """Collect finished episodes, retaining unfinished totals across rollouts."""
+    completed_rewards, completed_lengths = [], []
+    for step_rewards, step_dones in zip(rewards, dones):
+        reward_sums.add_(step_rewards)
+        lengths.add_(1)
+        completed_rewards.append(reward_sums[step_dones])
+        completed_lengths.append(lengths[step_dones])
+        reward_sums[step_dones] = 0
+        lengths[step_dones] = 0
+    return torch.cat(completed_rewards), torch.cat(completed_lengths)
+
+
+def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
               train_dataloader, val_dataloader, cost_obj, eval_fn, 
               return_scale=1, sumwriter=None, optuna_trial=None, device=None, 
-              checkpoint_dir=None):
+              checkpoint_dir=None, algorithm='ppo',
+              max_seconds=None, iteration_callback=None):
+    if algorithm not in ('ppo', 'decomposed_ppo', 'd3po'):
+        raise ValueError(f'Unknown construction algorithm: {algorithm}')
+    if device is None:
+        device = next(model.parameters()).device
+    if cfg.batch_size < 2 or min(cfg.ppo.horizon, cfg.ppo.n_epochs,
+                                 cfg.ppo.n_iterations, cfg.ppo.val_period) < 1:
+        raise ValueError('Construction training requires batch_size >= 2 and positive PPO budgets')
+    decomposed = algorithm != 'ppo'
+    from .improvement_learning import (
+        D3POValueModule, _compute_ppo_returns_and_advantages,
+        _update_lc_improvement_cfg_d3po_from_rollout,
+    )
+    # Keep the existing D3PO critic/component order, including disabled heads.
+    objective_indices = tuple(range(len(COST_WEIGHT_KEY_ORDER))) if decomposed else ()
     batch_size = train_dataloader.batch_size
     assert batch_size == cfg.ppo.minibatch_size, \
         "For now, minibatch size must be the same as the batch size, due to " \
@@ -421,7 +451,11 @@ def train_ppo(model, min_n_routes, max_n_routes, cfg, optimizer,
         sumwriter = DummySummaryWriter()
     
     # set up neural network baseline
-    val_module = NNBaseline(learning_rate=cfg.baseline_lr)
+    val_module = (D3POValueModule(learning_rate=cfg.baseline_lr,
+                                  n_objectives=len(objective_indices), device=device)
+                  if decomposed else NNBaseline(learning_rate=cfg.baseline_lr, device=device))
+    if cfg.get('action_seed') is not None:
+        torch.manual_seed(int(cfg.action_seed))
     # val_module.set_input_norm(train_dataloader.dataset)
 
     best_val_cost = float('inf')
@@ -439,12 +473,21 @@ def train_ppo(model, min_n_routes, max_n_routes, cfg, optimizer,
     train_gen = iter(train_dataloader)
     n_routes = None
     ep_finished = None
+    started = time.monotonic()
+    completed_iterations = 0
+    graph_instances_loaded = 0
+    graph_batches_loaded = 0
     for iteration in range(cfg.ppo.n_iterations):
+        if iteration > 0 and max_seconds is not None and time.monotonic() - started >= max_seconds:
+            break
+        iteration_started = time.monotonic()
         if iteration % cfg.ppo.val_period == 0:
-            # do a pass on the validation set
-            avg_val_cost = eval_fn(model, val_dataloader, sumwriter, pbar.n)
             if iteration == 0:
+                # Calibrate first, then score the frozen actor that is actually
+                # saved as best_model and used by subsequent validation.
+                eval_fn(model, val_dataloader, None, pbar.n)
                 model.update_and_freeze_feature_norms()
+            avg_val_cost = eval_fn(model, val_dataloader, sumwriter, pbar.n)
 
             if optuna_trial is not None:
                 optuna_trial.report(avg_val_cost, iteration)
@@ -476,30 +519,37 @@ def train_ppo(model, min_n_routes, max_n_routes, cfg, optimizer,
                 train_gen = iter(train_dataloader)
                 data = next(train_gen)
             data = data.to(device)
+            graph_instances_loaded += data.num_graphs
+            graph_batches_loaded += 1
 
             # sample cost weights
-            cost_weights = cost_obj.sample_variable_weights(data.num_graphs, 
-                                                            device)
+            cost_weights = cost_obj.sample_variable_weights(data.num_graphs, device)
             state = RouteGenBatchState(data, cost_obj, n_routes, 
                                        cfg.eval.min_route_len,
                                        cfg.eval.max_route_len,
                                        cost_weights=cost_weights)
             state = model.setup_planning(state)
             ep_finished = state.is_done()
+            # A new graph batch starts new episodes; keep these across rollouts
+            # only while the current batch is retained.
+            episode_reward_sums = torch.zeros(state.batch_size, device=device)
+            episode_lengths = torch.zeros(state.batch_size, dtype=torch.long, device=device)
 
             # compute the cost of the scenarios with no transit
             if cfg.diff_reward:
                 with torch.no_grad():
                     base_result = cost_obj(state)
-                    base_cost = base_result.cost
+                    base_cost = (cost_obj.get_cost_components(state, base_result)[:, objective_indices]
+                                 if decomposed else base_result.cost)
                     prev_cost = base_cost
             
         # set up the buffers to hold the rollout
-        buf_rewards = torch.zeros((horizon, state.batch_size), 
+        reward_shape = (horizon, state.batch_size) + ((len(objective_indices),) if decomposed else ())
+        buf_rewards = torch.zeros(reward_shape,
                                   device=device)
         buf_val_ests = buf_rewards.clone()
-        buf_logits = buf_rewards.clone()
-        done_at_step_mask = buf_rewards.clone().bool()
+        buf_logits = torch.zeros((horizon, state.batch_size), device=device)
+        done_at_step_mask = torch.zeros_like(buf_logits, dtype=torch.bool)
         buf_actions = torch.zeros((horizon, state.batch_size, 2),
                                   device=device, dtype=torch.long)
 
@@ -513,7 +563,6 @@ def train_ppo(model, min_n_routes, max_n_routes, cfg, optimizer,
         # roll out the specified number of steps
         with torch.no_grad():    
             for tt in range(horizon):
-                done_at_step_mask[tt] = state.is_done()
                 val_ests = val_module.from_state(state)
                 buf_val_ests[tt] = val_ests
                 buf_states.append(state.clone().to_device('cpu'))
@@ -529,21 +578,25 @@ def train_ppo(model, min_n_routes, max_n_routes, cfg, optimizer,
                     state.apply_route_actions(action_kinds, actions)
                 else:
                     state.shortest_path_action(actions)
+                done = state.is_done().clone()
+                done_at_step_mask[tt] = done
     
                 buf_logits[tt] = logits
                 if cfg.diff_reward:
                     # reward is decrease in cost
                     result = cost_obj(state)
-                    rewards = (prev_cost - result.cost)  * return_scale
-                    # update the cost used to compute the differential. This 
-                     # should be the previous cost if the episode is not done,
-                     # and the cost with no transit otherwise.
-                    prev_cost = result.cost * ~state.is_done() + \
-                        base_cost * state.is_done()
-                elif state.is_done().any():                    
+                    reward_cost = (cost_obj.get_cost_components(state, result)[:, objective_indices]
+                                   if decomposed else result.cost)
+                    rewards = (prev_cost - reward_cost) * return_scale
+                    # Completed elements are rebased after reset/resampling.
+                    prev_cost = reward_cost.clone()
+                elif done.any():
                     # reward is the decrease in cost at last step, 0 otherwise
                     result = cost_obj(state)
-                    rewards = -result.cost * return_scale * state.is_done()
+                    reward_cost = (cost_obj.get_cost_components(state, result)[:, objective_indices]
+                                   if decomposed else result.cost)
+                    finished = done[:, None] if decomposed else done
+                    rewards = -reward_cost * return_scale * finished
                 else:
                     # rewards are all 0 since no episode is done
                     rewards = torch.zeros_like(buf_rewards[0])
@@ -551,104 +604,135 @@ def train_ppo(model, min_n_routes, max_n_routes, cfg, optimizer,
                 buf_rewards[tt] = rewards
                 
                 # mark which episodes have reached the end at least once
-                ep_finished |= state.is_done()
-
+                ep_finished |= done
                 state.reset_dones()
+                if decomposed and done.any():
+                    # D3PO changes preference at episode boundaries, using the
+                    # same cost sampler as PPO. PPO keeps Holliday's batch weights.
+                    sampled = cost_obj.sample_variable_weights(int(done.sum()), device)
+                    merged = {key: value.clone() for key, value in state.cost_weights.items()}
+                    for key, value in sampled.items():
+                        merged[key][done] = value
+                    state.set_cost_weights(merged)
+                if cfg.diff_reward and done.any():
+                    # New weights change the empty-network cost. Rebase only
+                    # reset elements, without changing the terminal reward.
+                    reset_result = cost_obj(state)
+                    reset_cost = (cost_obj.get_cost_components(state, reset_result)[:, objective_indices]
+                                  if decomposed else reset_result.cost)
+                    prev_cost[done] = reset_cost[done]
             
             # compute the returns and advantages
             final_val_ests = val_module.from_state(state)
-            if cfg.ppo.use_gae:
-                # use generalized advantage estimation
-                buf_advantages = torch.zeros_like(buf_rewards)
-                lastgaelam = 0
-                for tt in reversed(range(horizon)):
-                    if tt == horizon - 1:
-                        nextnonterminal = ~state.is_done()
-                        nextvalues = final_val_ests
-                    else:
-                        nextnonterminal = ~done_at_step_mask[tt + 1]
-                        nextvalues = buf_val_ests[tt + 1]
-                    delta = buf_rewards[tt] + \
-                        gamma * nextvalues * nextnonterminal - \
-                        buf_val_ests[tt]
-                    lambda_term = gamma * cfg.ppo.gae_lambda * \
-                        nextnonterminal * lastgaelam
-                    buf_advantages[tt] = lastgaelam = delta + lambda_term
-                buf_returns = buf_advantages + buf_val_ests
-            else:
-                # compute the returns and the advantages simply
-                buf_returns = torch.zeros_like(buf_rewards).to(device)
-                for tt in reversed(range(horizon)):
-                    if tt == horizon - 1:
-                        nextnonterminal = ~state.is_done()
-                        next_return = final_val_ests
-                    else:
-                        nextnonterminal = ~done_at_step_mask[tt + 1]
-                        next_return = buf_returns[tt + 1]
-                    nextnonterminal = nextnonterminal.to(torch.float32)
-                    buf_returns[tt] = buf_rewards[tt] + \
-                        gamma * nextnonterminal * next_return
-                buf_advantages = buf_returns - buf_val_ests
+            buf_returns, buf_advantages = _compute_ppo_returns_and_advantages(
+                buf_rewards, buf_val_ests, done_at_step_mask, final_val_ests,
+                gamma, cfg.ppo.use_gae, cfg.ppo.gae_lambda)
             
         # log the average return and baseline on the rolled-out episodes
-        sumwriter.add_scalar("avg return", buf_rewards.mean(), pbar.n)
-        sumwriter.add_scalar("baseline", buf_val_ests.mean(), pbar.n)
+        if decomposed:
+            weights = torch.stack([cost_obj.get_preference_weights(ss, normalize=True)[:, objective_indices]
+                                   for ss in buf_states]).to(device)
+            scalar_rewards = (buf_rewards * weights).sum(-1)
+            sumwriter.add_scalar("avg return", scalar_rewards.mean(), pbar.n)
+            sumwriter.add_scalar("baseline", (buf_val_ests * weights).sum(-1).mean(), pbar.n)
+            for oi, name in enumerate(('ATT', 'RTT', 'connectivity')):
+                sumwriter.add_scalar(f"avg return {name}", buf_rewards[..., oi].mean(), pbar.n)
+                sumwriter.add_scalar(f"baseline {name}", buf_val_ests[..., oi].mean(), pbar.n)
+        else:
+            scalar_rewards = buf_rewards
+            sumwriter.add_scalar("avg return", buf_rewards.mean(), pbar.n)
+            sumwriter.add_scalar("baseline", buf_val_ests.mean(), pbar.n)
+        completed_rewards, completed_lengths = _collect_episode_statistics(
+            scalar_rewards, done_at_step_mask, episode_reward_sums, episode_lengths)
+        update_metrics = []
 
-        # train on the rolled-out episodes
-        train_orders = [torch.randperm(len(buf_states), device=device)
-                        for _ in range(cfg.ppo.n_epochs)]
-        train_order = torch.cat(train_orders)
-        for idxs in torch.split(train_order, n_states_per_minibatch):
-            mb_states = [buf_states[ii] for ii in idxs]
-            if n_states_per_minibatch == 1:
-                mb_states = mb_states[0]
-            else:
-                mb_states = RouteGenBatchState.batch_from_list(mb_states)
-            # move states to chosen device
-            mb_states = mb_states.to_device(device)
-            mb_acts = buf_actions[idxs].flatten(0, 1)
-            if supports_route_actions:
-                mb_action_kinds = buf_action_kinds[idxs].flatten(0, 1)
-            mb_old_logits = buf_logits[idxs].flatten(0, 1)
-            mb_returns = buf_returns[idxs].flatten(0, 1)
-            mb_advs = buf_advantages[idxs].flatten(0, 1)
+        if decomposed:
+            rollout = dict(states=buf_states, rewards=buf_rewards, logits=buf_logits,
+                           actions=buf_actions, action_kinds=buf_action_kinds,
+                           preferences=weights,
+                           active_masks=torch.ones_like(done_at_step_mask),
+                           enabled_component_mask=cost_obj.enabled_component_mask)
+            dcfg = cfg.d3po
+            d3po_stats = _update_lc_improvement_cfg_d3po_from_rollout(
+                model, optimizer, val_module, rollout, buf_returns, buf_advantages,
+                cfg.ppo.n_epochs, cfg.ppo.minibatch_size, epsilon, cfg.entropy_weight, device,
+                diversity_weight=float(dcfg.diversity_weight) if algorithm == 'd3po' else 0.0,
+                diversity_alpha=float(dcfg.diversity_alpha),
+                preference_noise_sigma=float(dcfg.preference_noise_sigma),
+                normalize_advantages_per_objective=bool(dcfg.normalize_advantages_per_objective))
+            stats = {'objective': d3po_stats['objective'],
+                     'value loss': d3po_stats['critic_mse_mean'],
+                     'clip fraction': d3po_stats['clipped_count'] / max(d3po_stats['ratio_count'], 1),
+                     'diversity loss': d3po_stats['diversity_loss']}
+            for oi, value in enumerate(d3po_stats['critic_explained_variance_per_obj'] or []):
+                sumwriter.add_scalar(f'critic explained variance {oi}', value, iteration)
+        else:
+            # train on the rolled-out episodes
+            train_orders = [torch.randperm(len(buf_states), device=device)
+                            for _ in range(cfg.ppo.n_epochs)]
+            train_order = torch.cat(train_orders)
+            for idxs in torch.split(train_order, n_states_per_minibatch):
+                mb_states = [buf_states[ii] for ii in idxs]
+                if n_states_per_minibatch == 1:
+                    mb_states = mb_states[0]
+                else:
+                    mb_states = RouteGenBatchState.batch_from_list(mb_states)
+                # move states to chosen device
+                mb_states = mb_states.to_device(device)
+                mb_acts = buf_actions[idxs].flatten(0, 1)
+                if supports_route_actions:
+                    mb_action_kinds = buf_action_kinds[idxs].flatten(0, 1)
+                mb_old_logits = buf_logits[idxs].flatten(0, 1)
+                mb_returns = buf_returns[idxs].flatten(0, 1)
+                mb_advs = buf_advantages[idxs].flatten(0, 1)
 
-            # compute V(s) loss and update the value estimator
-            val_module.from_state(mb_states)                
-            val_module.update(mb_returns)
+                # compute V(s) loss and update the value estimator
+                val_module.from_state(mb_states)
+                value_stats = val_module.update(mb_returns)
 
-            # step model forward
-            if supports_route_actions:
-                _, _, logits, entropy = model.step_route_action(
-                    mb_states, actions=mb_acts, action_kinds=mb_action_kinds)
-            else:
-                _, logits, entropy = model.step(mb_states, actions=mb_acts)
+                # step model forward
+                if supports_route_actions:
+                    _, _, logits, entropy = model.step_route_action(
+                        mb_states, actions=mb_acts, action_kinds=mb_action_kinds)
+                else:
+                    _, logits, entropy = model.step(mb_states, actions=mb_acts)
             
-            # normalize advantages by the minibatch statistics
-            mb_advs = (mb_advs - mb_advs.mean()) / (mb_advs.std() + 1e-8)
+                # normalize advantages by the minibatch statistics
+                mb_advs = (mb_advs - mb_advs.mean()) / (mb_advs.std() + 1e-8)
 
-            # compute clip loss
-            ratios = (logits - mb_old_logits).exp()
-            if (ratios == 0).any():
-                log.warning(f"Some ratios are zero: {ratios}")
-            if ratios.isinf().any():
-                log.warning(f"Some ratios are very extreme: {ratios}")
+                # compute clip loss
+                ratios = (logits - mb_old_logits).exp()
+                if (ratios == 0).any():
+                    log.warning(f"Some ratios are zero: {ratios}")
+                if ratios.isinf().any():
+                    log.warning(f"Some ratios are very extreme: {ratios}")
 
-            assert ratios.isfinite().all()
+                assert ratios.isfinite().all()
                 
-            clipped_ratios = ratios.clamp(1 - epsilon, 1 + epsilon)
-            clip_obj = torch.minimum(ratios * mb_advs,
-                                     clipped_ratios * mb_advs)
-            objective = clip_obj.mean()
-            objective += entropy.mean() * cfg.entropy_weight
+                clipped_ratios = ratios.clamp(1 - epsilon, 1 + epsilon)
+                ratio_error = float((ratios.detach() - 1).abs().max())
+                if not update_metrics and ratio_error > 2e-4:
+                    raise RuntimeError(f'Initial PPO replay ratio differs from 1: {ratio_error}')
+                clip_obj = torch.minimum(ratios * mb_advs,
+                                         clipped_ratios * mb_advs)
+                objective = clip_obj.mean()
+                objective += entropy.mean() * cfg.entropy_weight
+                # do backprop and weight updates
+                optimizer.zero_grad()
+                objective.backward()
+                # based on Andrychowicz et al. 2021, we clip the gradient
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5,
+                                               error_if_nonfinite=True)
+                optimizer.step()
+                update_metrics.append([float(clip_obj.detach().mean()), float(objective.detach()),
+                    float(entropy.detach().mean()), value_stats['loss'],
+                    float(((ratios.detach() - 1).abs() > epsilon).float().mean()),
+                    ratio_error])
 
-            # do backprop and weight updates
-            optimizer.zero_grad()
-            objective.backward()
-            # based on Andrychowicz et al. 2021, we clip the gradient
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5,
-                                           error_if_nonfinite=True)
-            optimizer.step()
+            means = np.mean(update_metrics, axis=0)
+            stats = dict(zip(('route obj', 'objective', 'entropy', 'value loss',
+                              'clip fraction'), means[:5].tolist()))
+            stats['initial ratio error'] = update_metrics[0][-1]
 
         # save a checkpoint every val period
         if checkpoint_dir is not None and iteration % cfg.ppo.val_period == 0:
@@ -656,15 +740,47 @@ def train_ppo(model, min_n_routes, max_n_routes, cfg, optimizer,
             torch.save(model.state_dict(), ckpt_filename)
 
         pbar.update(1)
+        completed_iterations = iteration + 1
+        stats['train seconds'] = time.monotonic() - iteration_started
+        stats['elapsed seconds'] = time.monotonic() - started
+        stats['env transitions'] = completed_iterations * horizon * batch_size
+        stats['graph instances loaded'] = graph_instances_loaded
+        stats['graph batches loaded'] = graph_batches_loaded
+        stats['completed networks'] = int(done_at_step_mask.sum())
+        # No finished episodes means no measured mean, rather than zero or a
+        # stale value carried forward by MetricWriter into the CSV.
+        stats['mean episode reward'] = float(completed_rewards.mean()) if completed_rewards.numel() else float('nan')
+        stats['mean episode length'] = float(completed_lengths.float().mean()) if completed_lengths.numel() else float('nan')
+        stats['return target mean'] = float(buf_returns.mean())
+        for key, value in stats.items():
+            sumwriter.add_scalar(key, value, iteration)
+        if iteration_callback is not None:
+            iteration_callback(completed_iterations, stats, model, val_module, optimizer)
 
     # final eval
     avg_val_cost = eval_fn(model, val_dataloader, sumwriter, pbar.n)
     if avg_val_cost < best_val_cost:
         # update the best model and the baseline
         best_model = copy.deepcopy(model)
+        best_val_cost = avg_val_cost
     pbar.close()
 
     return best_model, best_val_cost
+
+
+def train_ppo(*args, **kwargs):
+    """Holliday construction PPO, sharing its rollout with construction D3PO."""
+    return _train_construction(*args, algorithm='ppo', **kwargs)
+
+
+def train_d3po(*args, **kwargs):
+    """Construction rollout with the existing improvement D3PO critic/update."""
+    return _train_construction(*args, algorithm='d3po', **kwargs)
+
+
+def train_decomposed_ppo(*args, **kwargs):
+    """D3PO ablation using the same update with diversity disabled."""
+    return _train_construction(*args, algorithm='decomposed_ppo', **kwargs)
 
 
 def train(model, min_n_routes, max_n_routes, cfg, optimizer, train_dataloader, 
@@ -695,19 +811,18 @@ def train(model, min_n_routes, max_n_routes, cfg, optimizer, train_dataloader,
     pbar = tqdm(total=graphs_per_epoch * cfg.reinforce.n_epochs)
 
     bl_module = None
+    if device is None:
+        device = next(model.parameters()).device
     if cfg.baseline_mode == BLMODE_NONE:
         baseline = 0
     elif cfg.baseline_mode == BLMODE_ROLL:
         bl_module = RollingBaseline(cfg.bl_alpha)
     elif cfg.baseline_mode == BLMODE_NN:
-        bl_module = NNBaseline()
+        bl_module = NNBaseline(device=device)
         bl_module.set_input_norm(train_dataloader.dataset)
     elif cfg.baseline_mode == BLMODE_GREEDY:
         bl_module = FixedBaseline()
     
-    if device is None:
-        device = DEVICE
-
     log.info(f"discount rate is {cfg.discount_rate}")
     supports_route_actions = getattr(model, 'supports_trim_actions', False)
 
@@ -883,10 +998,13 @@ def train(model, min_n_routes, max_n_routes, cfg, optimizer, train_dataloader,
     return best_model, best_cost
 
 
-def setup_and_train(cfg: DictConfig, trial: optuna.trial.Trial = None):
-    global DEVICE
-    DEVICE, run_name, sum_writer, cost_obj, model = \
-        lrnu.process_standard_experiment_cfg(cfg, 'inductive_')
+def setup_and_train(cfg: DictConfig, trial: optuna.trial.Trial = None, *,
+                    model=None, cost_obj=None, device=None, run_name=None,
+                    sum_writer=None, output_dir=None, iteration_callback=None,
+                    return_training_result=False):
+    if model is None:
+        device, run_name, sum_writer, cost_obj, model = \
+            lrnu.process_standard_experiment_cfg(cfg, 'inductive_')
     # model always has legal route lengths by construction, so we don't need
      # to penalize it for illegal routes
     cost_obj.ignore_stops_oob = True
@@ -900,8 +1018,10 @@ def setup_and_train(cfg: DictConfig, trial: optuna.trial.Trial = None):
     if cfg.dataset.type == 'pickle':
         train_ds, val_ds = get_default_train_and_eval_split(
             **cfg.dataset.kwargs)
+        if len(train_ds) < cfg.batch_size or len(val_ds) == 0:
+            raise ValueError('Construction dataset needs a full training batch and nonempty validation split')
         train_dl = DataLoader(train_ds, batch_size=cfg.batch_size, 
-                              shuffle=True)
+                              shuffle=True, drop_last=True)
     elif cfg.dataset.type == 'dynamic':
         train_ds = get_dynamic_training_set(**cfg.dataset.kwargs)
         train_dl = DataLoader(train_ds, batch_size=cfg.batch_size)
@@ -914,14 +1034,20 @@ def setup_and_train(cfg: DictConfig, trial: optuna.trial.Trial = None):
         train_ds = [data] * cfg.batch_size
         train_dl = DataLoader(train_ds, batch_size=cfg.batch_size)
         val_ds = [data] * val_batch_size
+    else:
+        raise ValueError(f'Unknown construction dataset type: {cfg.dataset.type}')
 
     val_dl = DataLoader(val_ds, batch_size=val_batch_size)
+    if sum_writer is not None:
+        if cfg.dataset.type != 'dynamic':
+            sum_writer.add_scalar('training graph count', len(train_ds), 0)
+        sum_writer.add_scalar('validation graph count', len(val_ds), 0)
 
     # run training
-    model.to(DEVICE)
+    model.to(device)
     # set a range of random cost parameters to use during validation
     val_cost_obj = copy.deepcopy(cost_obj)
-    val_weights = val_cost_obj.sample_variable_weights(val_batch_size, DEVICE)
+    val_weights = val_cost_obj.sample_variable_weights(val_batch_size, device)
     val_cost_obj.set_weights(**val_weights)
     
     eval_n_routes = cfg.eval.n_routes
@@ -931,9 +1057,11 @@ def setup_and_train(cfg: DictConfig, trial: optuna.trial.Trial = None):
     # define evaluation function
     eval_fn = lambda mm, dd, sw, ne: \
         eval_model_over_nroutes(mm, dd, eval_n_routes, cfg.eval, val_cost_obj, 
-                                sw, ne, n_samples=1, silent=True)
+                                sw, ne, n_samples=1, silent=True, device=device)
 
-    if 'outdir' in cfg:
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+    elif 'outdir' in cfg:
         output_dir = Path(cfg.outdir)
     else:
         output_dir = Path('output')
@@ -947,13 +1075,19 @@ def setup_and_train(cfg: DictConfig, trial: optuna.trial.Trial = None):
     if not checkpoint_dir.exists():
         checkpoint_dir.mkdir(parents=True)
 
-    train_fn = train_ppo if 'ppo' in cfg else train
+    trainer = cfg.get('trainer', 'ppo' if 'ppo' in cfg else 'reinforce')
+    train_fn = {'ppo': train_ppo, 'd3po': train_d3po,
+                'decomposed_ppo': train_decomposed_ppo, 'reinforce': train}[trainer]
+    extra = {} if trainer == 'reinforce' else dict(
+        max_seconds=cfg.get('train_loop', {}).get('max_seconds'),
+        return_scale=float(cfg.get('reward_scale', 1.0)),
+        iteration_callback=iteration_callback)
     best_model, best_cost = train_fn(
-        model, min_n_routes, max_n_routes, cfg, optimizer, train_dl, 
-        val_dl, cost_obj, eval_fn, sumwriter=sum_writer, device=DEVICE, 
-        optuna_trial=trial, checkpoint_dir=checkpoint_dir)
+        model, min_n_routes, max_n_routes, cfg, optimizer, train_dl,
+        val_dl, cost_obj, eval_fn, sumwriter=sum_writer, device=device,
+        optuna_trial=trial, checkpoint_dir=checkpoint_dir, **extra)
 
-    # save the new trained model
+    if return_training_result:
+        return best_model, best_cost
     torch.save(best_model.state_dict(), output_dir / (run_name + '.pt'))
-    
     return best_cost

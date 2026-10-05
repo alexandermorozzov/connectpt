@@ -1,4 +1,4 @@
-"""Train the edit policy.
+"""Train an edit or construction route policy.
 
     python scripts/prepare_data.py      # once: build the dataset
     python scripts/run_training.py      # train
@@ -20,7 +20,7 @@ from hydra import compose, initialize_config_dir
 from omegaconf import open_dict
 
 from connectpt.routes_generator.core import ExperimentRunFactory
-from connectpt.routes_generator.core.paths import (CFG_DIR, LOGS_DIR, RUNS_DIR,
+from connectpt.routes_generator.core.paths import (CFG_DIR, LOGS_DIR,
                                                    resolve_under_root)
 
 
@@ -58,7 +58,7 @@ def main() -> None:
                         help="explicit log file path (overrides --log-dir)")
     parser.add_argument("overrides", nargs="*",
                         help="Hydra-style cfg overrides, e.g. run.seed=3")
-    args = parser.parse_args()
+    args = parser.parse_intermixed_args()
 
     stem = args.config_name.replace("/", "_")
     if args.log:
@@ -82,13 +82,16 @@ def main() -> None:
     log.info("weights -> %s | run outputs -> %s",
              cfg.paths.get("weights_dir"), cfg.paths.output_dir)
 
-    artifact = ExperimentRunFactory.from_cfg(cfg).run(dry_run=args.dry_run)
+    try:
+        artifact = ExperimentRunFactory.from_cfg(cfg).run(dry_run=args.dry_run)
+    except Exception:
+        log.exception("training failed")
+        raise
     if args.dry_run:
         log.info("dry-run OK: %s", artifact.metadata)
     else:
         log.info("training done: checkpoint -> %s", artifact.checkpoint_path)
-        log.info("TensorBoard: tensorboard --logdir %s",
-                 Path(args.runs_dir) if args.runs_dir else RUNS_DIR)
+        log.info("TensorBoard: tensorboard --logdir %s", artifact.output_dir)
 
 
 if __name__ == "__main__":

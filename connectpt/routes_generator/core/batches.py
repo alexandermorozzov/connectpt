@@ -11,6 +11,9 @@ class ExperimentRunFactory:
     @staticmethod
     def from_cfg(cfg):
         run_type = cfg.run.type
+        if run_type == "construction_training":
+            from ..training.construction_run import ConstructionTrainingRun
+            return ConstructionTrainingRun(cfg)
         if run_type == "bee_colony_search":
             from ..search import BeeColonySearchRun
             return BeeColonySearchRun(cfg)

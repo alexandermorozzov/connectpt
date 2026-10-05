@@ -1,0 +1,5 @@
+# @package _global_
+defaults:
+  - d3po_construction
+  - _self_
+trainer: decomposed_ppo

@@ -1,0 +1,7 @@
+type: pickle
+kwargs:
+  path: datasets/construction/20_nodes/mixed
+  split: 0.9
+  space_scale: 0.6
+  demand_scale: 0.2
+test_path: datasets/construction/20_nodes/test

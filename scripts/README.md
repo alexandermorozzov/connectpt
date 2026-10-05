@@ -345,3 +345,88 @@ tensorboard --logdir artifacts/runs
 | Веса | `--weights-dir` | `artifacts/model_weights` |
 
 TensorBoard: `tensorboard --logdir artifacts/runs`.
+
+## Construction PPO / decomposed PPO / D3PO
+
+`runs/train_construction` uses the existing `ConstructionTrainingRun` and
+`inductive_route_learning.setup_and_train` for every algorithm. The setup owns
+dataset loading, training augmentation, optimizer creation and stochastic
+validation. Algorithm selection is a trainer config group:
+
+```powershell
+.venv/Scripts/python.exe scripts/run_training.py --config-name runs/train_construction trainer=ppo_construction
+.venv/Scripts/python.exe scripts/run_training.py --config-name runs/train_construction trainer=d3po_construction
+.venv/Scripts/python.exe scripts/run_training.py --config-name runs/train_construction trainer=decomposed_construction
+```
+
+The shared construction rollout calls `train_ppo`, `train_d3po` or
+`train_decomposed_ppo`. D3PO reuses the existing `D3POValueModule`, terminal-aware
+GAE, preference perturbation and D3PO updater from `improvement_learning`.
+Its rewards, critic targets and clipped advantages have separate objective
+components, weighted only in the actor loss. `decomposed_construction` uses
+the same updater with diversity weight zero. The existing diversity loss uses
+the sampled-action k3 KL estimate; it does not enumerate the full action distribution.
+
+All algorithms use `MyCostModule.sample_variable_weights`. For ATT/RTT this is
+Holliday's mixture: 0.33 passenger-only, 0.33 operator-only, otherwise uniform
+alpha with weights `(alpha, 1-alpha)`. PPO retains preferences while reusing
+a graph batch, as Holliday does. D3PO and its decomposition ablation resample
+completed episodes through the same sampler. RTT remains bidirectional for
+symmetric routes. Actor architecture and checkpoint keys are unchanged.
+
+Prepare shared raw data once using the existing generator, or override
+`dataset.kwargs.path` and `dataset.test_path` with existing pickle datasets:
+
+```powershell
+.venv/Scripts/python.exe -m connectpt.routes_generator.citygraph_dataset datasets/construction/20_nodes/mixed mixed --min 20 --max 20 -n 32768
+.venv/Scripts/python.exe -m connectpt.routes_generator.citygraph_dataset datasets/construction/20_nodes/test mixed --min 20 --max 20 -n 128
+```
+
+The existing loader splits the training file 90/10 and augments only training
+graphs (positions, space scale 0.6 and demand scale 0.2). Test graphs come from
+the independent test file. All runs in a comparison must use the same files.
+These are current generated datasets; historical data and results are not reproduced.
+
+Defaults: batch/minibatch 256, horizon 120, 200 iterations, one PPO epoch,
+gamma/lambda 0.95, actor LR 0.0016134816080499328, weight decay
+0.0008404361781997002, no entropy bonus, validation every ten iterations,
+ten routes of 2–12 stops. A batch contains graph instances; a rollout has
+`horizon * batch_size` transitions. The same graphs can host multiple completed
+episodes within a rollout. Training advances to the next shuffled graph batch
+after every batch element has completed at least once.
+History records dataset sizes, loaded graph batches and graph instances separately
+from environment transitions. Loaded instances include repeated visits to graphs.
+`mean episode reward` is the mean undiscounted sum of scaled rewards over episodes
+completed in the current rollout; `mean episode length` is their mean step count.
+Both appear in TensorBoard and CSV. Totals persist across rollout boundaries while
+the graph batch is retained, and reset at each terminal or graph-batch replacement.
+D3PO rewards are weighted with each episode's preference before accumulation.
+When no episode completes, both means are NaN; `completed networks` is zero.
+The existing `avg return` remains mean step reward, and `return target mean` remains
+the mean critic target. Checkpoint selection uses `val cost`.
+
+Checkpoint selection uses the existing stochastic validation with weights
+sampled once and retained across validations. Initial FeatureNorm calibration
+precedes scoring the frozen actor. Final testing evaluates `last.pt` and
+`best.pt` on 21 preferences, greedily and with four independent stochastic
+draws per preference. Evaluation RNG is isolated from training.
+
+The optional PowerShell queue only calls the same `run_training` CLI sequentially.
+It defaults to 6144000 transitions per algorithm (200 iterations at 256×120).
+It saves weights separately and verifies hashes of pre-existing weights.
+
+```powershell
+.\scripts\run_construction_comparison.ps1 `
+  -ComparisonRoot artifacts/comparisons/construction_seed0 -Seed 0
+```
+
+Use a new comparison folder for each seed. `-Algorithms 'ppo,d3po'` selects two
+algorithms. `-MaxSecondsPerAlgorithm` switches to a common time limit;
+`-Overrides` passes shared Hydra overrides, for example dataset paths.
+
+Each run saves `history.csv`, `status.json`, `config.yaml`, iteration checkpoints,
+`last.pt`, `best.pt` and test JSON files. The queue computes HV, conditioned EU,
+archive EU, coverage, feasibility and unserved demand per test graph for both
+checkpoints and both evaluation modes. Stochastic results are averaged across
+draws without best-of-N selection. Full experiments are launched by the user;
+quick checks use small budgets and separate output folders.

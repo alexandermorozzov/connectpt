@@ -1,0 +1,30 @@
+# @package _global_
+defaults:
+  - /model: construction
+  - /experiment: standard
+  - /cost: att_rtt
+  - /dataset: construction
+  - /trainer: ppo_construction
+  - _self_
+run:
+  type: construction_training
+  name: construction_${trainer}_seed${run.seed}
+  seed: 0
+  cpu: false
+paths:
+  output_dir: artifacts/runs/${run.name}
+  weights_dir: artifacts/model_weights
+  checkpoint_path: construction/${run.name}/last.pt
+  init_checkpoint_path: null
+experiment:
+  logdir: null
+eval:
+  n_routes: 10
+  min_route_len: 2
+  max_route_len: 12
+  csv: false
+evaluation:
+  preference_count: 21
+  stochastic_samples: 4
+  seed: 9001
+  final_test: true

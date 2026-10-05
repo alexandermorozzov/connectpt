@@ -1,0 +1,25 @@
+# @package _global_
+trainer: ppo
+batch_size: 256
+baseline_lr: 0.0005
+lr: 0.0016134816080499328
+decay: 0.0008404361781997002
+optimizer: Adam
+discount_rate: 0.95
+diff_reward: true
+reward_scale: 1.0
+entropy_weight: 0.0
+action_seed: null
+train_loop:
+  n_iterations: 200
+  max_seconds: null
+  cpu_threads: 2
+ppo:
+  n_iterations: ${train_loop.n_iterations}
+  val_period: 10
+  n_epochs: 1
+  minibatch_size: ${batch_size}
+  horizon: 120
+  epsilon: 0.2
+  use_gae: true
+  gae_lambda: 0.95

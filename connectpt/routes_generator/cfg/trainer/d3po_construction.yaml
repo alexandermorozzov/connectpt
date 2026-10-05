@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - ppo_construction
+  - _self_
+trainer: d3po
+d3po:
+  diversity_weight: 0.01
+  diversity_alpha: 1.0
+  preference_noise_sigma: 0.15
+  normalize_advantages_per_objective: true

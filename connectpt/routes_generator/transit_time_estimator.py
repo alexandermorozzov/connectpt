@@ -2106,17 +2106,17 @@ class MyCostModule(CostModule):
             n_intermediate = is_intermediate.sum()
             
             if n_intermediate > 0:
-                # Uniform on the simplex over the ENABLED cost components only,
-                # so disabled components (e.g. demand) never receive weight and
-                # the variation is restricted to the remaining objectives (e.g.
-                # RTT/WMC). With all three enabled this is the original
-                # 3-component simplex.
+                # Two objectives use Holliday's uniform alpha. Other component
+                # counts retain the existing normalized-uniform distribution.
                 enabled_idx = [i for i, on in enumerate(self._enabled_components)
                                if on]
                 cols = [dtw, rtw, mcw]
-                weights = torch.rand(int(n_intermediate), len(enabled_idx),
-                                     device=device)
-                weights = weights / weights.sum(dim=1, keepdim=True)
+                if len(enabled_idx) == 2:
+                    alpha = torch.rand(int(n_intermediate), device=device)
+                    weights = torch.stack((alpha, 1 - alpha), dim=-1)
+                else:
+                    weights = torch.rand(int(n_intermediate), len(enabled_idx), device=device)
+                    weights = weights / weights.sum(dim=1, keepdim=True)
                 for _j, _ci in enumerate(enabled_idx):
                     cols[_ci][is_intermediate] = weights[:, _j]
 
