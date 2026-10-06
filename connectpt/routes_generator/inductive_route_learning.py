@@ -106,8 +106,15 @@ class NNBaseline:
 
     def __init__(self, learning_rate=0.0005, decay=0.01, actor_model=None,
                  normalize_returns=False, huber=False, huber_delta=1.0,
-                 value_clip=None, return_norm_momentum=0.05, device=None):
+                 value_clip=None, return_norm_momentum=0.05, device=None,
+                 weight_feature_keys=None, holliday_features=False):
         self.learning_rate = learning_rate
+        self._explicit_weight_features = weight_feature_keys is not None
+        if weight_feature_keys is not None:
+            self.weight_feature_keys = tuple(weight_feature_keys)
+            self.weight_input_keys = tuple(k for k in COST_WEIGHT_KEY_ORDER
+                                           if k in self.weight_feature_keys)
+        self.holliday_features = holliday_features
         self.device = device if device is not None else globals().get('DEVICE', torch.device('cpu'))
         self.decay = decay
         self.optim = None
@@ -139,7 +146,7 @@ class NNBaseline:
 
     def _build_model(self, input_dim):
         self.model = torch.nn.Sequential(
-            FeatureNorm(input_dim, 0.001),
+            FeatureNorm(input_dim, 0.001, unbiased=self.holliday_features),
             get_mlp(3, input_dim * 2, in_dim=input_dim, out_dim=1,
                     dropout=0.0)
         ).to(self.device)
@@ -153,7 +160,7 @@ class NNBaseline:
          # mean and std edge time weighted by demand on edge,
          # max num of mean stop features, # routes so far and # routes left,
          # weights of the two cost components
-        return 1 + 1 + 2 + 2 + 4 + 11
+        return 10 + 9 + len(self.weight_feature_keys) if self._explicit_weight_features else 21
 
     @property
     def input_dim(self):
@@ -250,7 +257,10 @@ class NNBaseline:
             dmd_weighted_times = dmd_graph.edge_attr[:, 0] * \
                 dmd_graph.edge_attr[:, 1]
             input_data[bi, 4] = dmd_weighted_times.mean()
-            if dmd_graph.num_edges > 1:
+            if self.holliday_features:
+                # Match the preserved upstream NNBaseline statistic exactly.
+                input_data[bi, 5] = dmd_weighted_times.mean()
+            elif dmd_graph.num_edges > 1:
                 input_data[bi, 5] = dmd_weighted_times.std()
             else:
                 input_data[bi, 5] = 0
@@ -351,10 +361,13 @@ def eval_model_over_nroutes(model, eval_dl, n_routes_range, eval_cfg, cost_obj,
     mean_eval_cost = sum(eval_costs) / len(eval_costs)
     if sumwriter is not None:
         sumwriter.add_scalar("val cost", mean_eval_cost, n_eps)
+        sumwriter.add_scalar('validation/cost', mean_eval_cost, n_eps)
         for metric_name in ['ATT', 'RTT', '$d_{un}$', 
                             '# disconnected node pairs', 'median_connectivity', 'median_connectivity_weighted']:
             mean_value = all_metrics[metric_name].mean()
             sumwriter.add_scalar(f"val {metric_name}", mean_value, n_eps)
+            if metric_name in ('ATT', 'RTT'):
+                sumwriter.add_scalar(f'validation/{metric_name.lower()}_minutes', mean_value, n_eps)
 
     return mean_eval_cost
 
@@ -422,7 +435,7 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
               train_dataloader, val_dataloader, cost_obj, eval_fn, 
               return_scale=1, sumwriter=None, optuna_trial=None, device=None, 
               checkpoint_dir=None, algorithm='ppo',
-              max_seconds=None, iteration_callback=None):
+              max_seconds=None, iteration_callback=None, evaluation_callback=None):
     if algorithm not in ('ppo', 'decomposed_ppo', 'd3po'):
         raise ValueError(f'Unknown construction algorithm: {algorithm}')
     if device is None:
@@ -431,12 +444,14 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
                                  cfg.ppo.n_iterations, cfg.ppo.val_period) < 1:
         raise ValueError('Construction training requires batch_size >= 2 and positive PPO budgets')
     decomposed = algorithm != 'ppo'
+    if cfg.ppo.get('advantage_normalization', 'minibatch') != 'minibatch':
+        raise ValueError('Construction uses Holliday minibatch advantage normalization')
     from .improvement_learning import (
         D3POValueModule, _compute_ppo_returns_and_advantages,
-        _update_lc_improvement_cfg_d3po_from_rollout,
+        _update_lc_improvement_cfg_d3po_from_rollout, _normalize_minibatch_advantages,
     )
-    # Keep the existing D3PO critic/component order, including disabled heads.
-    objective_indices = tuple(range(len(COST_WEIGHT_KEY_ORDER))) if decomposed else ()
+    objective_indices = tuple(i for i, enabled in enumerate(cost_obj.enabled_component_mask)
+                              if enabled) if decomposed else ()
     batch_size = train_dataloader.batch_size
     assert batch_size == cfg.ppo.minibatch_size, \
         "For now, minibatch size must be the same as the batch size, due to " \
@@ -451,9 +466,11 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
         sumwriter = DummySummaryWriter()
     
     # set up neural network baseline
-    val_module = (D3POValueModule(learning_rate=cfg.baseline_lr,
-                                  n_objectives=len(objective_indices), device=device)
-                  if decomposed else NNBaseline(learning_rate=cfg.baseline_lr, device=device))
+    critic_kwargs = dict(learning_rate=cfg.baseline_lr, device=device,
+                         weight_feature_keys=model.weight_feature_keys,
+                         holliday_features=bool(cfg.ppo.get('holliday_critic_features', False)))
+    val_module = (D3POValueModule(n_objectives=len(objective_indices), **critic_kwargs)
+                  if decomposed else NNBaseline(**critic_kwargs))
     if cfg.get('action_seed') is not None:
         torch.manual_seed(int(cfg.action_seed))
     # val_module.set_input_norm(train_dataloader.dataset)
@@ -482,12 +499,18 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
             break
         iteration_started = time.monotonic()
         if iteration % cfg.ppo.val_period == 0:
-            if iteration == 0:
+            calibrate_first = bool(cfg.ppo.get('calibrate_before_validation', True))
+            if iteration == 0 and calibrate_first:
                 # Calibrate first, then score the frozen actor that is actually
                 # saved as best_model and used by subsequent validation.
                 eval_fn(model, val_dataloader, None, pbar.n)
                 model.update_and_freeze_feature_norms()
             avg_val_cost = eval_fn(model, val_dataloader, sumwriter, pbar.n)
+            if iteration == 0 and not calibrate_first:
+                # Original order: one validation pass, then freeze its norms.
+                model.update_and_freeze_feature_norms()
+            if evaluation_callback is not None:
+                evaluation_callback(model, val_dataloader, pbar.n)
 
             if optuna_trial is not None:
                 optuna_trial.report(avg_val_cost, iteration)
@@ -559,6 +582,8 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
                                       ROUTE_ACTION_EXTEND,
                                       device=device, dtype=torch.long)
         buf_states = []
+        terminal_metrics = {key: [] for key in ('cost', 'att_minutes', 'rtt_minutes',
+                                                'feasible_fraction', 'unserved_fraction', 'alpha')}
 
         # roll out the specified number of steps
         with torch.no_grad():    
@@ -602,11 +627,18 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
                     rewards = torch.zeros_like(buf_rewards[0])
 
                 buf_rewards[tt] = rewards
+                if done.any():
+                    terminal_metrics['cost'].append(result.cost[done])
+                    terminal_metrics['att_minutes'].append(result.mean_demand_time[done] / 60)
+                    terminal_metrics['rtt_minutes'].append(result.total_route_time[done] / 60)
+                    terminal_metrics['feasible_fraction'].append((~result.are_constraints_violated())[done].float())
+                    terminal_metrics['unserved_fraction'].append((result.unserved_demand / result.total_demand)[done])
+                    terminal_metrics['alpha'].append(state.cost_weights['demand_time_weight'][done])
                 
                 # mark which episodes have reached the end at least once
                 ep_finished |= done
                 state.reset_dones()
-                if decomposed and done.any():
+                if cfg.ppo.get('resample_preferences_on_terminal', decomposed) and done.any():
                     # D3PO changes preference at episode boundaries, using the
                     # same cost sampler as PPO. PPO keeps Holliday's batch weights.
                     sampled = cost_obj.sample_variable_weights(int(done.sum()), device)
@@ -635,7 +667,8 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
             scalar_rewards = (buf_rewards * weights).sum(-1)
             sumwriter.add_scalar("avg return", scalar_rewards.mean(), pbar.n)
             sumwriter.add_scalar("baseline", (buf_val_ests * weights).sum(-1).mean(), pbar.n)
-            for oi, name in enumerate(('ATT', 'RTT', 'connectivity')):
+            for oi, ci in enumerate(objective_indices):
+                name = ('ATT', 'RTT', 'connectivity')[ci]
                 sumwriter.add_scalar(f"avg return {name}", buf_rewards[..., oi].mean(), pbar.n)
                 sumwriter.add_scalar(f"baseline {name}", buf_val_ests[..., oi].mean(), pbar.n)
         else:
@@ -645,12 +678,16 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
         completed_rewards, completed_lengths = _collect_episode_statistics(
             scalar_rewards, done_at_step_mask, episode_reward_sums, episode_lengths)
         update_metrics = []
+        critic_values, critic_targets = [], []
 
         if decomposed:
             rollout = dict(states=buf_states, rewards=buf_rewards, logits=buf_logits,
                            actions=buf_actions, action_kinds=buf_action_kinds,
                            preferences=weights,
+                           diversity_preferences=torch.stack([
+                               cost_obj.get_preference_weights(ss, normalize=True) for ss in buf_states]).to(device),
                            active_masks=torch.ones_like(done_at_step_mask),
+                           check_initial_replay=True,
                            enabled_component_mask=cost_obj.enabled_component_mask)
             dcfg = cfg.d3po
             d3po_stats = _update_lc_improvement_cfg_d3po_from_rollout(
@@ -661,11 +698,14 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
                 preference_noise_sigma=float(dcfg.preference_noise_sigma),
                 normalize_advantages_per_objective=bool(dcfg.normalize_advantages_per_objective))
             stats = {'objective': d3po_stats['objective'],
+                     'entropy': d3po_stats['entropy'],
+                     'initial ratio error': d3po_stats['initial_ratio_error'],
                      'value loss': d3po_stats['critic_mse_mean'],
                      'clip fraction': d3po_stats['clipped_count'] / max(d3po_stats['ratio_count'], 1),
                      'diversity loss': d3po_stats['diversity_loss']}
             for oi, value in enumerate(d3po_stats['critic_explained_variance_per_obj'] or []):
                 sumwriter.add_scalar(f'critic explained variance {oi}', value, iteration)
+                stats[f'critic/explained_variance_{("att", "rtt", "connectivity")[objective_indices[oi]]}'] = value
         else:
             # train on the rolled-out episodes
             train_orders = [torch.randperm(len(buf_states), device=device)
@@ -689,6 +729,8 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
                 # compute V(s) loss and update the value estimator
                 val_module.from_state(mb_states)
                 value_stats = val_module.update(mb_returns)
+                critic_values.append(value_stats['values'])
+                critic_targets.append(value_stats['targets'])
 
                 # step model forward
                 if supports_route_actions:
@@ -698,7 +740,7 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
                     _, logits, entropy = model.step(mb_states, actions=mb_acts)
             
                 # normalize advantages by the minibatch statistics
-                mb_advs = (mb_advs - mb_advs.mean()) / (mb_advs.std() + 1e-8)
+                mb_advs = _normalize_minibatch_advantages(mb_advs)
 
                 # compute clip loss
                 ratios = (logits - mb_old_logits).exp()
@@ -733,6 +775,10 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
             stats = dict(zip(('route obj', 'objective', 'entropy', 'value loss',
                               'clip fraction'), means[:5].tolist()))
             stats['initial ratio error'] = update_metrics[0][-1]
+            targets = torch.cat(critic_targets)
+            residuals = targets - torch.cat(critic_values)
+            variance = targets.var(unbiased=False)
+            stats['critic/explained_variance'] = float(1-residuals.var(unbiased=False)/variance) if variance > 0 else float('nan')
 
         # save a checkpoint every val period
         if checkpoint_dir is not None and iteration % cfg.ppo.val_period == 0:
@@ -752,6 +798,24 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
         stats['mean episode reward'] = float(completed_rewards.mean()) if completed_rewards.numel() else float('nan')
         stats['mean episode length'] = float(completed_lengths.float().mean()) if completed_lengths.numel() else float('nan')
         stats['return target mean'] = float(buf_returns.mean())
+        stats['train/reward'] = stats['mean episode reward']
+        stats['train/episode_length'] = stats['mean episode length']
+        stats['train/step_reward'] = float(scalar_rewards.mean())
+        stats['train/completed_networks'] = stats['completed networks']
+        for key, values in terminal_metrics.items():
+            if key != 'alpha':
+                stats[f'train/{key}'] = float(torch.cat(values).mean()) if values else float('nan')
+        alpha = torch.cat(terminal_metrics['alpha']) if terminal_metrics['alpha'] else None
+        stats['train/completed_alpha_mean'] = float(alpha.mean()) if alpha is not None else float('nan')
+        for name, condition in (('alpha_0', lambda a: a == 0), ('alpha_1', lambda a: a == 1),
+                                ('alpha_intermediate', lambda a: (a > 0) & (a < 1))):
+            stats[f'train/completed_{name}_fraction'] = float(condition(alpha).float().mean()) if alpha is not None else float('nan')
+        stats['ppo/clip_fraction'] = stats['clip fraction']
+        stats['critic/value_loss'] = stats['value loss']
+        stats['performance/iteration_seconds'] = stats['train seconds']
+        stats['performance/env_transitions'] = stats['env transitions']
+        if 'entropy' in stats:
+            stats['ppo/entropy'] = stats['entropy']
         for key, value in stats.items():
             sumwriter.add_scalar(key, value, iteration)
         if iteration_callback is not None:
@@ -759,6 +823,8 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
 
     # final eval
     avg_val_cost = eval_fn(model, val_dataloader, sumwriter, pbar.n)
+    if evaluation_callback is not None:
+        evaluation_callback(model, val_dataloader, pbar.n, final=True)
     if avg_val_cost < best_val_cost:
         # update the best model and the baseline
         best_model = copy.deepcopy(model)
@@ -1037,6 +1103,16 @@ def setup_and_train(cfg: DictConfig, trial: optuna.trial.Trial = None, *,
     else:
         raise ValueError(f'Unknown construction dataset type: {cfg.dataset.type}')
 
+    evaluation_cfg = cfg.get('evaluation', {})
+    evaluation_count = evaluation_cfg.get('graph_count')
+    validation_indices = list(range(len(val_ds)))
+    if evaluation_count is not None:
+        if int(evaluation_count) < 1:
+            raise ValueError('evaluation.graph_count must be positive or null')
+        generator = torch.Generator().manual_seed(int(evaluation_cfg.get('seed', 9001)))
+        validation_indices = torch.randperm(len(val_ds), generator=generator)[:int(evaluation_count)].sort().values.tolist()
+        val_ds = [val_ds[i] for i in validation_indices]
+        val_batch_size = min(val_batch_size, len(val_ds))
     val_dl = DataLoader(val_ds, batch_size=val_batch_size)
     if sum_writer is not None:
         if cfg.dataset.type != 'dynamic':
@@ -1069,6 +1145,24 @@ def setup_and_train(cfg: DictConfig, trial: optuna.trial.Trial = None, *,
     if not output_dir.exists():
         output_dir.mkdir(parents=True)
 
+    evaluation_callback = None
+    if evaluation_cfg.get('pareto_enabled', False):
+        from .training.construction_experiment import evaluate_pareto
+        from .core.artifacts import ArtifactStore
+        if sum_writer is None:
+            raise ValueError('Pareto monitoring requires a TensorBoard writer')
+        if int(evaluation_cfg.pareto_period) < 1:
+            raise ValueError('evaluation.pareto_period must be positive')
+        ArtifactStore(output_dir).save_json(dict(indices=validation_indices,
+            seed=int(evaluation_cfg.seed), reference=list(evaluation_cfg.hv_reference),
+            split='held-out validation; independent test reserved for final evaluation'),
+            'pareto/validation_protocol.json')
+
+        def evaluation_callback(actor, loader, step, final=False):
+            if final or step % int(evaluation_cfg.pareto_period) == 0:
+                evaluate_pareto(actor, loader.dataset, cfg, cost_obj, output_dir,
+                                device, sum_writer, step)
+
     min_n_routes = min(eval_n_routes)
     max_n_routes = max(eval_n_routes)
     checkpoint_dir = output_dir / f'{run_name}_checkpoints'
@@ -1081,7 +1175,7 @@ def setup_and_train(cfg: DictConfig, trial: optuna.trial.Trial = None, *,
     extra = {} if trainer == 'reinforce' else dict(
         max_seconds=cfg.get('train_loop', {}).get('max_seconds'),
         return_scale=float(cfg.get('reward_scale', 1.0)),
-        iteration_callback=iteration_callback)
+        iteration_callback=iteration_callback, evaluation_callback=evaluation_callback)
     best_model, best_cost = train_fn(
         model, min_n_routes, max_n_routes, cfg, optimizer, train_dl,
         val_dl, cost_obj, eval_fn, sumwriter=sum_writer, device=device,

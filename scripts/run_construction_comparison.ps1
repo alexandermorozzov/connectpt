@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$ComparisonRoot,
-    [int]$TransitionBudget = 6144000,
-    [int]$BatchSize = 256,
+    [int]$TransitionBudget = 1536000,
+    [int]$BatchSize = 64,
     [int]$Horizon = 120,
     [string]$ConfigName = 'runs/train_construction',
     [string]$Algorithms = 'ppo,decomposed_ppo,d3po',

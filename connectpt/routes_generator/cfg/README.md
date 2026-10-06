@@ -1,44 +1,45 @@
-# Configuration layout
+# Устройство конфигов
 
-The configuration is assembled from small Hydra presets. Files under `runs/`
-are the public entry points; they select reusable pieces and contain only
-run-level settings.
+Конфиг собирается Hydra из небольших пресетов. Точки входа — файлы в `runs/`.
+Они выбирают пресеты и задают только настройки прогона.
 
 ```text
 cfg/
-├── runs/            # search, train, prepare_dataset
-├── instance/        # benchmark path and route constraints
-├── method/          # named bee-colony variants
-├── bee/             # one atomic bee/operator type
-├── bee_set/         # mixtures of bee presets and their counts
-├── cost/            # base objective
-├── adjustment/      # cap, target, or disabled adjustment term
-├── model/           # model architecture
-├── model_profile/   # model version: architecture preset + checkpoint
-├── dataset/         # dataset identity and split
-├── dataset_build/   # dataset generation parameters
-├── curriculum/      # training schedule
-├── trainer/         # optimizer/PPO loop
-├── sweep/           # search grid
-└── stacks/          # internal compatibility composition
+├── runs/            # точки входа: search, train, train_construction, train_construction_overnight, prepare_dataset
+├── instance/        # путь к бенчмарку и ограничения маршрутов
+├── method/          # методы поиска: ea, nea, nea_edit, nea_combined
+├── bee_set/         # набор пчёл метода и их число
+├── bee/             # один тип пчелы (оператор)
+├── cost/            # цель: rtt_wmc (поиск, edit), att_rtt (construction)
+├── adjustment/      # штраф за изменение сети: cap, target, disabled
+├── model/           # архитектура сети
+├── model_profile/   # версия модели: архитектура + чекпоинт
+├── dataset/         # датасет и его разбиение
+├── dataset_build/   # параметры генерации датасета
+├── curriculum/      # расписание тиров edit-обучения
+├── trainer/         # оптимизатор и цикл PPO / D3PO
+├── experiment/      # общие настройки: seed, symmetric_routes
+├── sweep/           # сетка поиска: α, число итераций
+└── stacks/          # внутренняя сборка для оценки моделей
 ```
 
-`model/` answers *what architecture is built*. `model_profile/` answers *which
-version of that architecture is used*, including its checkpoint. A method
-selects profiles by semantic role (`construction` or `edit`); policy adapters
-are derived from those roles in code, so there are no separate `model_set` or
-`policy_set` layers.
+- `model/` отвечает, **какая архитектура** строится.
+- `model_profile/` отвечает, **какая версия** архитектуры используется, вместе
+  с чекпоинтом.
+- Метод выбирает профили по роли: `construction` или `edit`.
 
-Examples:
+Примеры:
 
 ```powershell
 python scripts/run_search.py --dry-run --methods ea
 python scripts/run_search.py --methods nea_edit --instances mandl
 python scripts/run_training.py --dry-run
+python scripts/run_training.py --config-name runs/train_construction trainer=d3po_construction --dry-run
 python scripts/prepare_data.py
 ```
 
-Both search and training compose the same `cost=rtt_wmc` preset. Adjustment
-behaviour is orthogonal: use `adjustment=cap`, `adjustment=target`, or
-`adjustment=disabled`. Current public runs select `cap`; `target` is available
-for an explicit override.
+Поиск и edit-обучение используют одну цель `cost=rtt_wmc`. Штраф за изменение
+сети задаётся отдельно: `adjustment=cap`, `adjustment=target` или
+`adjustment=disabled`. Прогоны по умолчанию берут `cap`.
+
+YAML содержит только значения. Комментарии в конфигах не пишутся.

@@ -85,8 +85,11 @@ def get_default_train_and_eval_split(path, split=0.9, space_scale=0.01,
         RandomRotate(180)]
     train_ds = CityGraphDataset(path, transforms=transforms)
     train_size = int(len(train_ds) * split)
+    # PyG subsets share the immutable collated tensors. Keep validation's
+    # transform separate instead of loading a second full dataset into RAM.
+    eval_ds = train_ds[train_size:]
+    eval_ds.transform = Compose([InsertPosFeatures()])
     train_ds = train_ds[:train_size]
-    eval_ds = CityGraphDataset(path)[train_size:]
     return train_ds, eval_ds
 
 

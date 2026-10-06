@@ -613,8 +613,9 @@ class FrequencySelector(nn.Module):
 
 
 class FeatureNorm(nn.Module):
-    def __init__(self, dim, momentum=FEAT_NORM_MOMENTUM):
+    def __init__(self, dim, momentum=FEAT_NORM_MOMENTUM, unbiased=False):
         super().__init__()
+        self.unbiased = unbiased
         self.momentum = momentum
         self.register_buffer('running_mean', torch.zeros(dim))
         self.register_buffer('running_var', torch.zeros(dim))
@@ -646,10 +647,9 @@ class FeatureNorm(nn.Module):
             old_shape = xx.shape
             xx = xx.reshape(-1, xx.shape[-1])
             x_mean = xx.mean(0).detach()
-            # Feature normalization uses population statistics. With the
-            # default unbiased estimator a singleton input produces NaNs that
-            # can leak into the running variance during warmup.
-            x_var = xx.var(0, unbiased=False).detach()
+            # Legacy profiles use population variance; Holliday uses sample
+            # variance. A singleton always uses the finite population fallback.
+            x_var = xx.var(0, unbiased=self.unbiased and xx.shape[0] > 1).detach()
             # we're done with the need for flattened x, so reshape it
             xx = xx.reshape(old_shape)
 
@@ -778,8 +778,10 @@ class RouteScorer(nn.Module):
     weight_feature_keys = WEIGHT_FEATURE_KEYS
 
     def __init__(self, embed_dim, nonlin_type, dropout, n_mlp_layers=2,
-                 mlp_width=None, n_extra_feats=14):
+                 mlp_width=None, n_extra_feats=14, weight_feature_keys=None):
         super().__init__()
+        if weight_feature_keys is not None:
+            self.weight_feature_keys = tuple(weight_feature_keys)
         self.embed_dim = embed_dim
         # route_feats (2) + global_state_features. Default 14 = 2 + 12; the edit
         # model with adjustment conditioning passes 16 = 2 + 14.
@@ -958,10 +960,12 @@ class RouteGeneratorBase(nn.Module):
                  dropout=MLP_DEFAULT_DROPOUT, symmetric_routes=True, 
                  temperature=1, fixed_frequency_Hz=0.00074,
                  only_routes_with_demand_are_valid=False, 
-                 low_memory_mode=False):
+                 low_memory_mode=False, weight_feature_keys=None):
         """nonlin_type: a nonlin, or the string name of a nonlin, like 'ReLU' 
             or 'LeakyReLU' or 'Tanh'"""
         super().__init__()
+        if weight_feature_keys is not None:
+            self.weight_feature_keys = tuple(weight_feature_keys)
         # make this a parameter of the model so it will be kept in state_dict
         # mst = torch.tensor(mean_stop_time_s, dtype=torch.float32)
         self.mean_stop_time_s = mean_stop_time_s
@@ -1285,7 +1289,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
                  force_linking_unlinked=False, logit_clip=None,
                  serial_halting=True, max_act_len=None,
                  n_adjustment_cond_feats=0,
-                 use_redundancy_features=False, **kwargs):
+                 use_redundancy_features=False, feature_norm_unbiased=False, **kwargs):
         """Generates routes by combining shortest paths.
 
         n_pathscorer_layers -- number of layers in the MLP that updates path
@@ -1332,10 +1336,10 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         # scorers that consume global features must widen by the same amount.
         # Default 0 keeps the construction-model dims (and frozen weights) intact.
         self.n_adjustment_cond_feats = n_adjustment_cond_feats
-        _halt_n_extra = 14 + n_adjustment_cond_feats + \
+        _halt_n_extra = 11 + len(self.weight_feature_keys) + n_adjustment_cond_feats + \
             self.n_redundancy_global_feats
 
-        path_scorer_indim = 17 + n_adjustment_cond_feats + \
+        path_scorer_indim = 14 + len(self.weight_feature_keys) + n_adjustment_cond_feats + \
             self.n_redundancy_global_feats + self.n_redundancy_path_feats
         # self.path_input_norm = FeatureNorm(FEAT_NORM_MOMENTUM,
         #                                    path_scorer_indim - 1)
@@ -1350,27 +1354,37 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
                                                     self.nonlin_type,
                                                     self.dropout,
                                                     n_halt_layers,
-                                                    n_extra_feats=_halt_n_extra)
+                                                    n_extra_feats=_halt_n_extra,
+                                                    weight_feature_keys=self.weight_feature_keys)
         elif halt_scorer_type == "mean":
             self.halt_scorer = RouteMeanScorer(self.embed_dim,
                                                self.nonlin_type,
                                                self.dropout,
-                                               n_extra_feats=_halt_n_extra)
+                                               n_extra_feats=_halt_n_extra,
+                                               weight_feature_keys=self.weight_feature_keys)
         elif halt_scorer_type == "transformer":
             self.halt_scorer = RouteTransformerScorer(n_halt_heads,
                                                       n_halt_layers,
                                                       self.embed_dim,
                                                       self.nonlin_type,
                                                       self.dropout,
-                                                      n_extra_feats=_halt_n_extra)
+                                                      n_extra_feats=_halt_n_extra,
+                                                      weight_feature_keys=self.weight_feature_keys)
         elif halt_scorer_type == "latent":
             self.halt_scorer = RouteLatentScorer(n_halt_heads, n_halt_layers,
                                                  self.embed_dim,
                                                  self.nonlin_type,
                                                  self.dropout,
-                                                 n_extra_feats=_halt_n_extra)
+                                                 n_extra_feats=_halt_n_extra,
+                                                 weight_feature_keys=self.weight_feature_keys)
         elif halt_scorer_type == "alpha":
             self.halt_scorer = RouteAlphaScorer()
+
+        # The upstream construction profile uses sample variance. Preserve
+        # legacy checkpoint profiles' population variance by default.
+        for module in self.modules():
+            if isinstance(module, FeatureNorm):
+                module.unbiased = feature_norm_unbiased
 
         # self.value_net = ValueNetScorer(self.embed_dim, self.nonlin_type, 
         #                                 self.dropout, n_halt_layers)
@@ -1489,7 +1503,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         return actions, all_logits, all_entropy
 
     def step(self, state: RouteGenBatchState, greedy=False, actions=None,
-             precalc_data=None, allow_halt=True):
+             precalc_data=None, allow_halt=True, return_distribution=False):
         """Take an action for the given state.
         actions -- a batch_size x 2 tensor of predetermined actions to take. If
             None, the actions will be chosen by the model.  If the value is 
@@ -1580,6 +1594,22 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             halt_scores = halt_scores.clone()
             halt_scores[~old_route_is_done] = TORCH_FMIN
 
+        ext_scores = prev_scores * prev_valid + next_scores * next_valid + \
+            TORCH_FMIN * ~ext_valid
+        start_scores = self._update_path_scores(state, path_scores, path_lens,
+                                                state.drive_times,
+                                                candidate_paths=path_seqs)
+        if return_distribution:
+            # The conditional continue branch must not depend on the replayed
+            # action: a sampled halt still needs every extension in its KL.
+            continuing = (~starting & ~old_route_is_done)[:, None, None]
+            all_scores = torch.where(continuing, ext_scores, start_scores)
+            all_valid = torch.where(continuing, ext_valid, ~paths_are_invalid)
+            action_log_probs = _joint_route_action_log_probs(
+                all_scores.flatten(1), all_valid.flatten(1), halt_scores,
+                self.serial_halting, self.temperature, old_route_is_done)
+
+        route_is_done = old_route_is_done
         if self.serial_halting:
             # decide whether to halt
             continue_scores = -halt_scores
@@ -1600,14 +1630,9 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             # update doneness
             route_is_done = old_route_is_done | chose_halt
 
-        ext_scores = prev_scores * prev_valid + next_scores * next_valid + \
-            TORCH_FMIN * ~ext_valid
         # for extending, we care whether we chose to halt
         extending = ~starting & ~route_is_done
         xtnding_exp = extending[:, None, None]
-        start_scores = self._update_path_scores(state, path_scores, path_lens,
-                                                state.drive_times,
-                                                candidate_paths=path_seqs)
         ppe_scores = start_scores * ~xtnding_exp + ext_scores * xtnding_exp
 
         # select an option
@@ -1664,6 +1689,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         # if (is_halt & badlen).any():
         #     log.warning("Halting a route that's too short!")
 
+        if return_distribution:
+            return folded_idxs, logits, entropy, action_log_probs
         return folded_idxs, logits, entropy
 
     def _encode_graph(self, state: RouteGenBatchState):
@@ -1838,7 +1865,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
         # apply final transformer of lengths
         new_path_lens = path_lens[batch_idxs, terminal_nodes]
-        new_lens = new_path_lens + route_lens[:, None]
+        # The shortest path contains the shared route endpoint.
+        new_lens = new_path_lens + route_lens[:, None] - 1
         # max over the stops already on the route, and drop the dummy row
         added_drive_times = times_from_end[..., :-1]
 
@@ -2245,7 +2273,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                           actions=None, precalc_data=None,
                           action_kinds=None, allow_halt=True,
                           allow_extend=True, allow_trim_start=True,
-                          allow_trim_end=True):
+                          allow_trim_end=True, return_distribution=False):
         """Take one typed route action for the given state."""
         log.debug("stepping with trim actions")
 
@@ -2379,6 +2407,11 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             halt_scores = halt_scores.clone()
             halt_scores[~old_route_is_done] = TORCH_FMIN
 
+        if return_distribution:
+            action_log_probs = _joint_route_action_log_probs(
+                flat_route_scores, flat_route_valid, halt_scores,
+                self.serial_halting, self.temperature, old_route_is_done)
+
         if self.serial_halting:
             continue_scores = -halt_scores
             cont_or_halt = torch.cat((continue_scores, halt_scores), dim=-1)
@@ -2447,6 +2480,8 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             logits = route_logit
             entropy = route_ent
 
+        if return_distribution:
+            return action_kinds, folded_idxs, logits, entropy, action_log_probs
         return action_kinds, folded_idxs, logits, entropy
 
     def _coerce_action_kinds(self, actions, action_kinds, device):
@@ -3834,6 +3869,35 @@ def assemble_batch_routes_from_tensors(tensors):
         out[:, routes_so_far:end_idx, :tt.shape[-1]] = tt
         routes_so_far = end_idx
     return out
+
+
+def _joint_route_action_log_probs(scores, valid, halt_scores, serial_halting,
+                                 temperature, force_halt):
+    """Log probabilities of all route actions, with halt in the last column.
+
+    Serial halting is a joint distribution: P(action) = P(continue) *
+    P(action | continue). Rows without route options are deterministic halts.
+    This adds no parameters and leaves the action sampler/checkpoints intact.
+    """
+    scores = scores.masked_fill(~valid, -torch.inf)
+    no_options = ~valid.any(-1)
+    forced = force_halt | no_options | (halt_scores.squeeze(-1) == TORCH_FMAX)
+    # Avoid log-softmax over an all-masked row, even when it is later replaced.
+    safe_scores = torch.where(no_options[:, None], torch.zeros_like(scores), scores)
+    if serial_halting:
+        route_log_probs = logsoftmax(safe_scores, temperature).to(torch.float64)
+        decision = logsoftmax(torch.cat((-halt_scores, halt_scores), -1),
+                              temperature).to(torch.float64)
+        log_probs = torch.cat((route_log_probs + decision[:, :1],
+                               decision[:, 1:]), -1)
+    else:
+        log_probs = logsoftmax(torch.cat((safe_scores, halt_scores), -1),
+                               temperature).to(torch.float64)
+    log_probs = log_probs.masked_fill(
+        torch.cat((~valid, halt_scores <= TORCH_FMIN), -1), -torch.inf)
+    deterministic = torch.full_like(log_probs, -torch.inf)
+    deterministic[:, -1] = 0.
+    return torch.where(forced[:, None], deterministic, log_probs)
 
 
 def select(scores, scores_as_logits=False, softmax_temp=1,

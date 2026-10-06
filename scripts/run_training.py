@@ -11,6 +11,7 @@ entering the PPO loop.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from datetime import datetime
@@ -42,10 +43,11 @@ def setup_logging(log_path: Path) -> logging.Logger:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config-name", default="runs/train",
+    parser.add_argument("--config-name", default=None,
                         help="config under cfg/ (default: train)")
     parser.add_argument("--dry-run", action="store_true",
                         help="build + validate the wiring, skip dataset load and PPO loop")
+    parser.add_argument("--launch-request", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--weights-dir", default=None,
                         help="root the checkpoint paths resolve against "
                              "(default: artifacts/model_weights)")
@@ -59,6 +61,10 @@ def main() -> None:
     parser.add_argument("overrides", nargs="*",
                         help="Hydra-style cfg overrides, e.g. run.seed=3")
     args = parser.parse_intermixed_args()
+    if args.launch_request:
+        tokens = json.loads(Path(args.launch_request).read_text(encoding='utf-8-sig'))
+        args = parser.parse_intermixed_args(tokens)
+    args.config_name = args.config_name or 'runs/train'
 
     stem = args.config_name.replace("/", "_")
     if args.log:
@@ -91,7 +97,8 @@ def main() -> None:
         log.info("dry-run OK: %s", artifact.metadata)
     else:
         log.info("training done: checkpoint -> %s", artifact.checkpoint_path)
-        log.info("TensorBoard: tensorboard --logdir %s", artifact.output_dir)
+        log.info("TensorBoard events -> %s; use the existing server (--logdir artifacts)",
+                 artifact.output_dir / 'tensorboard')
 
 
 if __name__ == "__main__":

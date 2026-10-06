@@ -45,7 +45,9 @@ def _write_history_checkpoint(history, checkpoint_path):
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
     with temp_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=list(history[0]))
+        # Periodic evaluation can introduce new tags after the first iteration.
+        fields = list(dict.fromkeys(key for row in history for key in row))
+        writer = csv.DictWriter(file, fieldnames=fields)
         writer.writeheader()
         writer.writerows(history)
     temp_path.replace(checkpoint_path)
@@ -713,8 +715,15 @@ class D3POValueModule:
     weight_input_keys = COST_WEIGHT_KEY_ORDER
 
     def __init__(self, learning_rate=0.0005, n_objectives=3, decay=0.01,
-                 device=None, actor_model=None):
+                 device=None, actor_model=None, weight_feature_keys=None,
+                 holliday_features=False):
         self.learning_rate = learning_rate
+        self._explicit_weight_features = weight_feature_keys is not None
+        if weight_feature_keys is not None:
+            self.weight_feature_keys = tuple(weight_feature_keys)
+            self.weight_input_keys = tuple(k for k in COST_WEIGHT_KEY_ORDER
+                                           if k in self.weight_feature_keys)
+        self.holliday_features = holliday_features
         self.decay = decay
         self.n_objectives = int(n_objectives)
         self._curr_estimate = None
@@ -735,11 +744,11 @@ class D3POValueModule:
 
     @property
     def legacy_input_dim(self):
-        return 1 + 1 + 2 + 2 + 4 + 11
+        return 10 + 9 + len(self.weight_feature_keys) if self._explicit_weight_features else 21
 
     def _build_model(self, input_dim):
         self.model = torch.nn.Sequential(
-            FeatureNorm(input_dim, 0.001),
+            FeatureNorm(input_dim, 0.001, unbiased=self.holliday_features),
             get_mlp(3, input_dim * 2, in_dim=input_dim,
                     out_dim=self.n_objectives, dropout=0.0)
         ).to(self.device)
@@ -766,7 +775,9 @@ class D3POValueModule:
             dmd_weighted_times = dmd_graph.edge_attr[:, 0] * \
                 dmd_graph.edge_attr[:, 1]
             input_data[bi, 4] = dmd_weighted_times.mean()
-            if dmd_graph.num_edges > 1:
+            if self.holliday_features:
+                input_data[bi, 5] = dmd_weighted_times.mean()
+            elif dmd_graph.num_edges > 1:
                 input_data[bi, 5] = dmd_weighted_times.std()
             else:
                 input_data[bi, 5] = 0
@@ -910,6 +921,16 @@ def _get_reward_delta_diagnostics(rewards, active_masks, start_costs,
         "reward_per_episode": reward_sum / max(episode_count, 1),
         "episode_count": episode_count,
     }
+
+
+def _normalize_minibatch_advantages(advantages, *, per_objective=False):
+    """Holliday's minibatch mean/sample-std, with a safe singleton fallback."""
+    dim = 0 if per_objective else None
+    centered = advantages - advantages.mean(dim=dim, keepdim=per_objective)
+    count = advantages.shape[0] if per_objective else advantages.numel()
+    if count < 2:
+        return centered
+    return centered / (advantages.std(dim=dim, keepdim=per_objective) + 1e-8)
 
 
 def _compute_ppo_returns_and_advantages(rewards, value_estimates, dones,
@@ -1670,13 +1691,33 @@ def _sample_neighbor_preferences(preferences, sigma, enabled_mask=None):
     return _normalize_preference_weights(neighbor)
 
 
+def _categorical_kl(log_probs, neighbor_log_probs):
+    """Exact KL over the common valid action set, without 0 * -inf NaNs."""
+    supported = torch.isfinite(log_probs)
+    safe_log_probs = torch.where(supported, log_probs, 0.)
+    safe_neighbor = torch.where(supported, neighbor_log_probs, 0.)
+    return (log_probs.exp() * (safe_log_probs - safe_neighbor)).sum(-1)
+
+
 def _estimate_d3po_diversity_loss(
         model, states, actions, action_kinds, trim_allowed, new_logits,
         preferences, supports_route_actions, sigma, alpha,
-        enabled_mask=None):
+        enabled_mask=None, action_log_probs=None):
     neighbor_preferences = _sample_neighbor_preferences(
         preferences, sigma, enabled_mask=enabled_mask)
     target = alpha * (preferences - neighbor_preferences).abs().sum(dim=-1)
+
+    step_kwargs = dict(actions=actions, return_distribution=True)
+    if supports_route_actions:
+        step_kwargs.update(
+            action_kinds=action_kinds,
+            allow_trim_start=trim_allowed if trim_allowed is not None else True,
+            allow_trim_end=trim_allowed if trim_allowed is not None else True)
+        step = model.step_route_action
+    else:
+        step = model.step
+    if action_log_probs is None:
+        action_log_probs = step(states, **step_kwargs)[-1]
 
     # In-place cost_weights swap instead of states.clone() to avoid
     # a full RouteGenBatchState deepcopy on GPU. cost_weights tensors
@@ -1687,25 +1728,15 @@ def _estimate_d3po_diversity_loss(
     states.set_cost_weights(
         _preference_dict_from_tensor(neighbor_preferences))
     try:
-        if supports_route_actions:
-            _, _, neighbor_logits, _ = model.step_route_action(
-                states, actions=actions, action_kinds=action_kinds,
-                allow_trim_start=(
-                    trim_allowed if trim_allowed is not None else True),
-                allow_trim_end=(
-                    trim_allowed if trim_allowed is not None else True))
-        else:
-            _, neighbor_logits, _ = model.step(states, actions=actions)
+        neighbor_log_probs = step(states, **step_kwargs)[-1]
     finally:
         states.set_cost_weights(saved_weights)
 
-    # Schulman's k3 estimator of D_KL(pi(.|omega) || pi(.|omega')) for the
-    # sampled action: (r - 1) - log r, with r = pi(a|omega') / pi(a|omega).
-    # Unlike the previous abs(log-ratio) heuristic, k3 is unbiased for the
-    # KL, always >= 0 (matching the paper's D_KL >= 0), and lower variance.
-    log_ratio = (neighbor_logits - new_logits).clamp(-10.0, 10.0)
-    sampled_kl = log_ratio.exp() - 1.0 - log_ratio
-    return (sampled_kl - target).pow(2).mean()
+    # Paper Eq. 2 squares the full state-wise KL, not a sampled estimator.
+    # Squaring a one-action estimate adds its variance to the loss and can
+    # produce enormous spikes from a single rare replayed action.
+    kl = _categorical_kl(action_log_probs, neighbor_log_probs)
+    return (kl - target).pow(2).mean()
 
 
 def _update_lc_improvement_cfg_d3po_from_rollout(
@@ -1720,6 +1751,9 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
     actions = rollout["actions"]
     action_kinds = rollout["action_kinds"]
     preferences = rollout["preferences"]
+    # Construction can learn only active objective heads while diversity still
+    # needs the full named cost-weight vector for neighborhood sampling.
+    diversity_preferences = rollout.get("diversity_preferences", preferences)
     score_masks = rollout.get("score_masks", rollout["active_masks"])
     trim_allowed_masks = rollout.get("trim_allowed_masks")
     enabled_component_mask = rollout.get(
@@ -1733,6 +1767,8 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
     clipped_count = 0
     objectives = []
     diversity_losses = []
+    entropy_values = []
+    initial_ratio_error = None
     critic_per_obj_mse_list = []
     critic_loss_list = []
     critic_value_buffer = []
@@ -1768,6 +1804,7 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
             mb_returns = returns[idxs].flatten(0, 1)
             mb_advantages = advantages[idxs].flatten(0, 1)
             mb_preferences = preferences[idxs].flatten(0, 1)
+            mb_diversity_preferences = diversity_preferences[idxs].flatten(0, 1)
             mb_score = score_masks[idxs].flatten(0, 1)
             mb_trim_allowed = None
             if trim_allowed_masks is not None:
@@ -1783,6 +1820,7 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
             mb_returns = mb_returns[mb_score]
             mb_advantages = mb_advantages[mb_score]
             mb_preferences = mb_preferences[mb_score]
+            mb_diversity_preferences = mb_diversity_preferences[mb_score]
             if mb_trim_allowed is not None:
                 mb_trim_allowed = mb_trim_allowed[mb_score]
 
@@ -1812,7 +1850,7 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
                 last_critic_targets = ct
 
             if supports_route_actions:
-                _, _, new_logits, entropy = model.step_route_action(
+                step_output = model.step_route_action(
                     mb_states, actions=mb_actions,
                     action_kinds=mb_action_kinds,
                     allow_trim_start=(
@@ -1822,21 +1860,23 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
                     allow_trim_end=(
                         mb_trim_allowed if mb_trim_allowed is not None
                         else True
-                    ))
+                    ), return_distribution=diversity_weight > 0)
+                _, _, new_logits, entropy = step_output[:4]
             else:
-                _, new_logits, entropy = model.step(
-                    mb_states, actions=mb_actions)
+                step_output = model.step(
+                    mb_states, actions=mb_actions,
+                    return_distribution=diversity_weight > 0)
+                _, new_logits, entropy = step_output[:3]
 
             if normalize_advantages_per_objective:
-                if mb_advantages.shape[0] > 1:
-                    mb_advantages = \
-                        (mb_advantages - mb_advantages.mean(dim=0)) / \
-                        (mb_advantages.std(dim=0) + 1e-8)
-                else:
-                    mb_advantages = mb_advantages - \
-                        mb_advantages.mean(dim=0)
+                mb_advantages = _normalize_minibatch_advantages(
+                    mb_advantages, per_objective=True)
 
             ratios = (new_logits - mb_old_logits).exp()
+            if initial_ratio_error is None:
+                initial_ratio_error = float((ratios.detach()-1).abs().max())
+                if rollout.get('check_initial_replay', False) and initial_ratio_error > 2e-4:
+                    raise RuntimeError(f'Initial D3PO replay ratio differs from 1: {initial_ratio_error}')
             clipped_ratios = ratios.clamp(1 - clip_epsilon,
                                           1 + clip_epsilon)
             clip_obj = torch.minimum(
@@ -1847,10 +1887,11 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
             if diversity_weight > 0:
                 diversity_loss = _estimate_d3po_diversity_loss(
                     model, mb_states, mb_actions, mb_action_kinds,
-                    mb_trim_allowed, new_logits, mb_preferences,
+                    mb_trim_allowed, new_logits, mb_diversity_preferences,
                     supports_route_actions, preference_noise_sigma,
                     diversity_alpha,
-                    enabled_mask=enabled_component_mask)
+                    enabled_mask=enabled_component_mask,
+                    action_log_probs=step_output[-1])
             objective = weighted_clip_obj.mean() + \
                 entropy.mean() * entropy_weight - \
                 diversity_weight * diversity_loss
@@ -1862,6 +1903,7 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
             optimizer.step()
 
             objectives.append(float(objective.detach().item()))
+            entropy_values.append(float(entropy.detach().mean()))
             diversity_losses.append(float(diversity_loss.detach().item()))
             ratio_sum += float(ratios.detach().sum().item())
             ratio_count += int(ratios.numel())
@@ -1899,6 +1941,8 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
 
     stats = {
         "objective": float(np.mean(objectives)) if objectives else 0.0,
+        "entropy": float(np.mean(entropy_values)) if entropy_values else float('nan'),
+        "initial_ratio_error": initial_ratio_error,
         "diversity_loss": float(np.mean(diversity_losses))
         if diversity_losses else 0.0,
         "ratio_sum": ratio_sum,

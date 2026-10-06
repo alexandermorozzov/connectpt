@@ -1,0 +1,17 @@
+# @package _global_
+defaults:
+  - train_construction
+  - _self_
+run:
+  cpu: true
+batch_size: 32
+ppo:
+  horizon: 64
+evaluation:
+  test_graph_count: 64
+  pareto_period: 50
+  preference_count: 11
+  stochastic_samples: 1
+train_loop:
+  n_iterations: 100000
+  max_seconds: 25200

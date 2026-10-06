@@ -173,8 +173,13 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
             phases.update(state.current_route_n_stops.tolist())
             active = ~state.is_done()
             actions, logp, entropy = model.step(state)
-            _, replay, _ = model.step(state, actions=actions)
+            _, replay, _, distribution = model.step(
+                state, actions=actions, return_distribution=True)
             assert torch.allclose((replay - logp).exp(), torch.ones_like(logp), atol=1e-6)
+            selected = actions[:, 0] * state.max_n_nodes + actions[:, 1]
+            selected[actions[:, 0] < 0] = distribution.shape[-1] - 1
+            assert torch.allclose(distribution.exp().sum(-1), torch.ones_like(logp), atol=1e-6)
+            assert torch.allclose(distribution.gather(1, selected[:, None]).squeeze(1), replay, atol=1e-6)
             original = {k: v.clone() for k, v in state.cost_weights.items()}
             preferences = cost.get_preference_weights(state, normalize=True)
             loss = _estimate_d3po_diversity_loss(
@@ -221,6 +226,8 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer):
             'train_loop.n_iterations=2', 'ppo.horizon=8', 'ppo.val_period=1',
             'eval.n_routes=1', 'eval.max_route_len=5',
             'evaluation.preference_count=3', 'evaluation.stochastic_samples=1',
+            'evaluation.test_graph_count=1',
+            'evaluation.pareto_preference_count=3', 'evaluation.pareto_period=1',
             f'dataset.kwargs.path={data_dir.as_posix()}', 'dataset.kwargs.split=0.75',
             f'dataset.test_path={test_dir.as_posix()}',
             f'paths.output_dir={(folder / "run").as_posix()}',
@@ -234,10 +241,23 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer):
     assert state_dict_hash(run.model) != status['initial_actor_sha256']
     assert artifact.checkpoint_path.exists()
     assert artifact.checkpoint_path.with_name('best.pt').exists()
+    test_protocol = json.loads((artifact.output_dir / 'test_protocol.json').read_text())
+    assert test_protocol['split'] == 'independent test' and len(test_protocol['indices']) == 1
     assert (artifact.output_dir / 'test_evaluation_best_stochastic.json').exists()
     from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
     import csv
     events = EventAccumulator(str(artifact.output_dir / 'tensorboard')).Reload()
+    required_tags = ('train/reward', 'train/att_minutes', 'train/rtt_minutes',
+                     'validation/cost', 'pareto/greedy/hv_feasible',
+                     'pareto/stochastic/eu_archive_penalized',
+                     'pareto/greedy/distinct_networks', 'pareto/greedy/distinct_pareto_networks')
+    assert all(tag in events.Tags()['scalars'] for tag in required_tags)
+    assert 'pareto/greedy/front_city_0' in events.Tags()['images']
+    assert status['preference_reset_policy'] == 'batch'
+    assert status['advantage_normalization'] == 'minibatch'
+    protocol = json.loads((artifact.output_dir / 'pareto/validation_protocol.json').read_text())
+    assert len(protocol['indices']) == 3
+    assert protocol['reference'] == [3., 3.]
     with (artifact.output_dir / 'history.csv').open(newline='') as stream:
         csv_history = list(csv.DictReader(stream))
     for tag in ('mean episode reward', 'mean episode length'):
@@ -253,9 +273,126 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer):
                 assert math.isnan(value) and math.isnan(entry.value) and math.isnan(float(csv_row[tag]))
     assert any(row['completed networks'] for row in artifact.history)
     assert all(row['mean episode length'] >= 1 for row in artifact.history if row['completed networks'])
+    for row in artifact.history:
+        if row['completed networks']:
+            assert math.isfinite(row['train/att_minutes']) and math.isfinite(row['train/rtt_minutes'])
+            # Diff rewards telescope from the empty network to its final cost.
+            expected_reward = 5.5 + 2*row['train/completed_alpha_mean'] - row['train/cost']
+            assert row['train/reward'] == pytest.approx(expected_reward, abs=1e-5)
     if trainer == 'ppo_construction':
         assert artifact.history[-1]['initial ratio error'] < 2e-4
     elif trainer == 'd3po_construction':
         assert artifact.history[-1]['diversity loss'] > 0
     else:
         assert artifact.history[-1]['diversity loss'] == 0
+
+
+def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
+    from connectpt.routes_generator.inductive_route_learning import NNBaseline
+    from connectpt.routes_generator.improvement_learning import D3POValueModule
+    from connectpt.routes_generator.core.checkpoints import CheckpointStore
+    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
+        cfg = compose(config_name='runs/train_construction')
+        legacy = compose(config_name='runs/train_construction', overrides=['model=construction'])
+    model = RouteModelFactory.build_construction_model(cfg.model, cfg.experiment)
+    assert cfg.batch_size == cfg.ppo.minibatch_size == cfg.evaluation.graph_count == 64
+    assert cfg.discount_rate == 1. and cfg.diff_reward
+    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
+        d3po = compose(config_name='runs/train_construction', overrides=['trainer=d3po_construction'])
+    assert d3po.discount_rate == .95 and d3po.diff_reward
+    assert model.weight_feature_keys == ('demand_time_weight', 'route_time_weight')
+    assert model.edge_feat_dim == 13
+    assert model.path_scorer[0].running_mean.numel() == 16
+    assert model.halt_scorer.n_extra_feats == 13
+    assert model.halt_scorer.weight_feature_keys == model.weight_feature_keys
+    scalar = NNBaseline(weight_feature_keys=model.weight_feature_keys, holliday_features=True)
+    vector = D3POValueModule(n_objectives=2, weight_feature_keys=model.weight_feature_keys, holliday_features=True)
+    assert scalar.input_dim == vector.legacy_input_dim == 21
+    dataset = DynamicCityGraphDataset(9, 9, data_type='voronoi')
+    graphs = [dataset.transform(dataset.generate_graph()) for _ in range(2)]
+    cost = CostFactory.build(cfg.cost, symmetric_routes=True)
+    state = RouteGenBatchState(graphs, cost, 1, 2, 5)
+    globals_ = state.get_global_state_features(weight_feature_keys=model.weight_feature_keys)
+    assert globals_.shape[-1] == 11
+    features = scalar.inputs_from_data(state.graph_data, state.cost_weights)
+    degree = features[:, 9].clone()
+    features[:, -globals_.shape[-1]:] = globals_
+    assert torch.equal(features[:, 9], degree)
+    assert torch.equal(vector._features_from_state(state)[:, 9], degree)
+    legacy_model = RouteModelFactory.build_construction_model(legacy.model, legacy.experiment)
+    assert legacy_model.edge_feat_dim == 14
+    CheckpointStore.assert_state_dict_compatible(legacy_model,
+        'artifacts/model_weights/inductive_random_graphs_weighted_connectivity.pt')
+
+
+def test_advantages_use_holliday_minibatch_sample_std_not_rollout():
+    from connectpt.routes_generator.improvement_learning import _normalize_minibatch_advantages
+    # These minibatches have different locations/scales; each normalizes to [-1,0,1].
+    a, b = torch.tensor([1., 2., 3.]), torch.tensor([100., 200., 300.])
+    expected = torch.tensor([-1., 0., 1.])
+    assert torch.allclose(_normalize_minibatch_advantages(a), expected)
+    assert torch.allclose(_normalize_minibatch_advantages(b), expected)
+    rollout = _normalize_minibatch_advantages(torch.cat((a, b)))
+    assert not torch.allclose(rollout[:3], expected)
+    vector = _normalize_minibatch_advantages(torch.stack((a, b), -1), per_objective=True)
+    assert torch.allclose(vector, expected[:, None].expand(3, 2))
+    assert torch.equal(_normalize_minibatch_advantages(torch.tensor([7.])), torch.zeros(1))
+
+
+def test_holliday_feature_norm_sample_variance_and_singleton_safety():
+    from connectpt.routes_generator.models import FeatureNorm
+    layer = FeatureNorm(1, unbiased=True)
+    output = layer(torch.tensor([[1.], [2.], [3.]]))
+    assert torch.allclose(output, torch.tensor([[-1.], [0.], [1.]]), atol=1e-5)
+    assert torch.equal(layer.new_var, torch.ones(1))
+    singleton = FeatureNorm(1, unbiased=True)
+    assert singleton(torch.tensor([[9.]])).isfinite().all()
+    singleton.update()
+    assert singleton.running_var.isfinite().all()
+
+
+def test_pareto_network_identity_and_per_city_fronts():
+    from connectpt.routes_generator.training.construction_metrics import canonical_network, summarize_evaluation
+    original = canonical_network([[0, 1, 2], [2, 3]])
+    assert original == canonical_network([[3, 2], [2, 1, 0, -1]])
+    assert original != canonical_network([[0, 1, 2], [2, 3], [2, 3]])
+    assert canonical_network([[0, 1]], False) != canonical_network([[1, 0]], False)
+    rows = []
+    for graph, pairs in [(0, [(1., 2.), (2., 1.)]), (1, [(2., 2.), (2., 2.)])]:
+        for alpha, (x, y) in zip((0., 1.), pairs):
+            rows.append(dict(graph=graph, sample=0, preference=alpha,
+                att_norm=x, rtt_norm=y, penalized_att=x, penalized_rtt=y,
+                feasible=True, unserved_fraction=0, network_signature=original))
+    report = summarize_evaluation(rows, [3., 3.])
+    # Average of city HVs (3 and 1), not the HV of the pooled front (3).
+    assert report['summary']['hv_feasible'] == 2.
+    assert report['summary']['distinct_networks'] == 1.
+    assert report['summary']['pareto_points_feasible'] == 1.5
+    assert report['summary']['distinct_pareto_networks'] == 1.
+    assert report['summary']['distinct_networks_total'] == 2
+    assert report['reference'] == [3., 3.]
+
+
+def test_fixed_preference_evaluation_does_not_consume_training_rng():
+    from connectpt.routes_generator.training.construction_experiment import evaluate_test, evaluation_graph_hash
+    torch.set_num_threads(2)
+    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
+        cfg = compose(config_name='runs/train_construction', overrides=[
+            'batch_size=2', 'eval.n_routes=1', 'eval.max_route_len=5',
+            'evaluation.preference_count=3', 'evaluation.stochastic_samples=2'])
+    model = RouteModelFactory.build_construction_model(cfg.model, cfg.experiment)
+    model.freeze_feature_norms()
+    cost = CostFactory.build(cfg.cost, symmetric_routes=True)
+    dataset = DynamicCityGraphDataset(9, 9, data_type='voronoi')
+    graphs = [dataset.transform(dataset.generate_graph()) for _ in range(2)]
+    output = Path('artifacts/audits/construction_holliday_64_20261005') / f'rng_{uuid4().hex}'
+    before = torch.random.get_rng_state().clone()
+    rows = evaluate_test(model, graphs, cfg, cost, output, torch.device('cpu'),
+                         mode='stochastic', save_artifacts=False)
+    assert torch.equal(torch.random.get_rng_state(), before)
+    repeated = evaluate_test(model, graphs, cfg, cost, output, torch.device('cpu'),
+                             mode='stochastic', save_artifacts=False)
+    assert rows == repeated
+    assert len(rows) == 12
+    assert all('network_signature' in row for row in rows)
+    assert evaluation_graph_hash(graphs) == evaluation_graph_hash(list(graphs))

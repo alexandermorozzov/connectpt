@@ -3,6 +3,7 @@ defaults:
   - ppo_construction
   - _self_
 trainer: d3po
+discount_rate: 0.95
 d3po:
   diversity_weight: 0.01
   diversity_alpha: 1.0

@@ -5,48 +5,27 @@ import numpy as np
 from itertools import combinations, permutations
 
 from ..core.artifacts import ArtifactStore
-
-
-def nondominated(points):
-    points = np.unique(np.asarray(points, dtype=float).reshape(-1, 2), axis=0)
-    keep = [not np.any(np.all(points <= p, axis=1) & np.any(points < p, axis=1))
-            for p in points]
-    return points[keep]
-
-
-def hypervolume_2d(points, reference):
-    front = nondominated(points)
-    front = front[np.all(front < reference, axis=1)]
-    front = front[np.argsort(front[:, 0])]
-    volume, y = 0.0, float(reference[1])
-    for x, new_y in front:
-        volume += (float(reference[0]) - x) * max(y - new_y, 0)
-        y = min(y, new_y)
-    return float(volume)
-
-
-def coverage(a, b):
-    """Fraction of unique B points weakly dominated by an A point (minimization)."""
-    b = np.unique(np.asarray(b).reshape(-1, 2), axis=0)
-    a = np.asarray(a).reshape(-1, 2)
-    if not len(b):
-        return None
-    return float(np.mean([np.any(np.all(a <= p, axis=1)) for p in b]))
+from .construction_metrics import nondominated, hypervolume_2d, coverage, front_metrics
 
 
 def compare_runs(root, names=('ppo', 'decomposed_ppo', 'd3po'), *,
                  checkpoint='last', mode='greedy', budget_mode='transitions'):
     root = Path(root)
-    evaluations, statuses = {}, {}
+    evaluations, statuses, metadata = {}, {}, {}
     for name in names:
         run = root / 'runs' / name
         suffix = '' if checkpoint == 'last' and mode == 'greedy' else f'_{checkpoint}_{mode}'
-        evaluations[name] = json.loads((run / f'test_evaluation{suffix}.json').read_text())['rows']
+        metadata[name] = json.loads((run / f'test_evaluation{suffix}.json').read_text())
+        evaluations[name] = metadata[name]['rows']
         statuses[name] = json.loads((run / 'status.json').read_text())
     keys = [{(r['graph'], r['preference'], r.get('sample', 0)) for r in rows}
             for rows in evaluations.values()]
     if any(k != keys[0] for k in keys[1:]):
         raise ValueError('Evaluation graph/preference grids differ')
+    for field in ('graph_sha256', 'protocol'):
+        values = [m.get(field) for m in metadata.values()]
+        if any(v != values[0] for v in values):
+            raise ValueError(f'Evaluation {field} differs')
     if len({s['initial_actor_sha256'] for s in statuses.values()}) != 1:
         raise ValueError('Initial actors differ')
     if any(s['state'] != 'completed' for s in statuses.values()):
@@ -64,15 +43,26 @@ def compare_runs(root, names=('ppo', 'decomposed_ppo', 'd3po'), *,
         raise ValueError(f'Unknown budget mode: {budget_mode}')
     if len({s.get('seed') for s in statuses.values()}) != 1:
         raise ValueError('Training seeds differ')
-    # Shared deterministic bounds, selected from the pooled evaluation outcomes.
+    reset_policies = {s.get('preference_reset_policy') for s in statuses.values()}
+    if len(reset_policies) != 1:
+        raise ValueError('Preference reset policies differ')
+    # New runs store fixed bounds. Keep pooled bounds only for legacy artifacts.
     pooled = np.array([[r['penalized_att'], r['penalized_rtt']]
                       for rows in evaluations.values() for r in rows])
     reference = (pooled.max(0) * 1.1 + .01).tolist()
     pure_pool = np.array([[r['att_norm'], r['rtt_norm']]
                          for rows in evaluations.values() for r in rows])
     pure_reference = (pure_pool.max(0) * 1.1 + .01).tolist()
-    prefs = np.linspace(0, 1, 101)
-    query_weights = np.stack((prefs, 1 - prefs), -1)
+    references = [m.get('hv_reference') for m in metadata.values()]
+    fixed_reference = any(r is not None for r in references)
+    if fixed_reference:
+        if any(r != references[0] for r in references):
+            raise ValueError('HV references differ')
+        reference = pure_reference = references[0]
+    query_counts = {m.get('eu_preference_count', 101) for m in metadata.values()}
+    if len(query_counts) != 1:
+        raise ValueError('EU query preference counts differ')
+    query_count = query_counts.pop()
     per_graph = []
     for graph, sample in sorted({(r['graph'], r.get('sample', 0))
                                  for r in evaluations[names[0]]}):
@@ -84,17 +74,9 @@ def compare_runs(root, names=('ppo', 'decomposed_ppo', 'd3po'), *,
             feasible_points[name] = np.array([[r['att_norm'], r['rtt_norm']]
                                               for r in rows if r['feasible']]).reshape(-1, 2)
             feasible = feasible_points[name]
-            metrics[name] = dict(hv_penalized=hypervolume_2d(points[name], reference),
-                eu_conditioned_penalized=float(np.mean([
-                    -r['preference'] * r['penalized_att']
-                    - (1 - r['preference']) * r['penalized_rtt'] for r in rows])),
-                eu_archive_penalized=float((-np.min(query_weights @ points[name].T, axis=1)).mean()),
-                hv_feasible=hypervolume_2d(feasible, pure_reference),
-                eu_archive_feasible=float((-np.min(query_weights @ feasible.T, axis=1)).mean()) if len(feasible) else None,
-                feasible_fraction=float(np.mean([r['feasible'] for r in rows])),
-                pareto_points_penalized=len(nondominated(points[name])),
-                pareto_points_feasible=len(nondominated(feasible)),
-                mean_unserved_fraction=float(np.mean([r['unserved_fraction'] for r in rows])))
+            metrics[name] = front_metrics(rows, reference, query_count)
+            if not fixed_reference:
+                metrics[name]['hv_feasible'] = hypervolume_2d(feasible, pure_reference)
         per_graph.append(dict(graph=graph, sample=sample, metrics=metrics,
             coverage_penalized={f'{a}_dominates_{b}': coverage(points[a], points[b])
                                 for a, b in permutations(names, 2)},
@@ -127,15 +109,17 @@ def compare_runs(root, names=('ppo', 'decomposed_ppo', 'd3po'), *,
     report = dict(summary=summary, per_graph=per_graph, paired_differences=paired,
         reference_penalized=reference, reference_feasible=pure_reference,
         direction='minimize costs; maximize HV and EU (EU is negative cost)',
-        hv_reference_rule='1.1 * pooled coordinate maximum + 0.01; same reference for both runs',
+        hv_reference_rule='Fixed normalized reference from evaluation config; shared across iterations/runs'
+                          if fixed_reference else 'Legacy: 1.1 * pooled coordinate maximum + 0.01',
         eu_conditioned_rule='Mean utility of the network generated with the requested preference',
-        eu_archive_rule='Best linear utility among evaluated preferences, 101 uniform query weights',
+        eu_archive_rule=f'Best linear utility among evaluated preferences, {query_count} uniform query weights',
         coverage_rule='Weak domination of unique points, computed within each graph',
         checkpoint=checkpoint, evaluation_mode=mode,
         budget='equal environment transitions' if budget_mode == 'transitions' else 'equal training wall time',
         time_limit_seconds=statuses[names[0]].get('max_seconds') if budget_mode == 'wall_time' else None,
         stochastic_rule='Mean metrics of independent preference-grid draws; no pooling or best-of-N',
         n_training_seeds=1)
+    report['preference_reset_policy'] = next(iter(reset_policies))
     suffix = '' if checkpoint == 'last' and mode == 'greedy' else f'_{checkpoint}_{mode}'
     ArtifactStore(root).save_json(report, f'comparison{suffix}.json')
     return report

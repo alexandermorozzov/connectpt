@@ -47,8 +47,7 @@ artifacts/
 
 # Local task-tracking / agent files (not part of the published repo)
 CLAUDE.md
-BOARD.md
-board/
+docs/
 artifacts (2).zip
 artifacts.zip
 artifacts do not delete.zip
@@ -62,3 +61,4 @@ datasets/instances/*
 graphify-out/
 training_figure_variants/
 curric_noadj_v1/
+tmp/
