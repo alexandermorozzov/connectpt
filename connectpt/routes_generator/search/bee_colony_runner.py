@@ -48,14 +48,15 @@ class BeeColonyRunner:
         from ..run.context import seed_everything
         from ..utils import test_method
 
-        if alpha is not None:
-            self.cost_obj.route_time_weight = float(alpha)
-            self.cost_obj.median_connectivity_weight = float(1.0 - alpha)
         adjustment = dict(self.adjustment)
         if adj_weight is not None:
             adjustment["adjustment_degree_weight"] = float(adj_weight)
         if adj_target is not None:
             adjustment["adjustment_degree_target"] = float(adj_target)
+        overrides = dict(adjustment)
+        if alpha is not None:
+            overrides.update(route_time_weight=float(alpha), median_connectivity_weight=float(1-alpha))
+        cost = self.cost_obj.with_params(**overrides)
 
         dataloader = DataLoader(
             to_batch(tensors).to_data_list(),
@@ -66,7 +67,7 @@ class BeeColonyRunner:
         seed_everything(self.seed)
         _mean, _std, unserved, metrics, routes = test_method(
             run_bee_colony_plan, dataloader, eval_cfg,
-            OmegaConf.create({"method": "tensor"}), self.cost_obj,
+            OmegaConf.create({"method": "tensor"}), cost,
             logger_list=logger_list, silent=self.silent,
             device=self.device, return_routes=True, routes_tensor=init_routes,
             n_bees=self.plan.total_bees, n_iterations=int(n_iterations), plan=self.plan,

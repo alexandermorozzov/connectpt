@@ -12,7 +12,7 @@ from omegaconf import DictConfig
 from torch_geometric.loader import DataLoader
 from .city.graph import to_batch
 from .city.instances import load_instance
-from .transit_time_estimator import RouteGenBatchState
+from .env.state import RouteGenBatchState
 from . import utils as lrnu
 from .network.routes import to_routes
 from .run.artifacts import save_routes
@@ -63,9 +63,9 @@ def sample_from_model(model, state, cost_obj, n_samples=20,
              # batch.
             min_route_len = state.min_route_len[ii:ii+sample_batch_size]
             max_route_len = state.max_route_len[ii:ii+sample_batch_size]
-        batch_state = RouteGenBatchState(chunk, cost_obj, 
+        batch_state = RouteGenBatchState(chunk, cost_obj.constants,
                                          state.n_routes_to_plan,
-                                         min_route_len, max_route_len)
+                                         min_route_len, max_route_len, preferences=cost_obj.get_weights())
         if sampled_init_network is not None:
             init_chunk = (
                 to_routes(

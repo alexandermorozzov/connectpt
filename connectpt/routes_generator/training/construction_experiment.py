@@ -12,8 +12,8 @@ from torch_geometric.loader import DataLoader
 from ..run.artifacts import ArtifactStore
 from ..run.logger import flush, log
 from ..eval_route_generator import eval_model
-from ..transit_time_estimator import RouteGenBatchState
-from .construction_metrics import canonical_network, summarize_evaluation
+from ..env.state import RouteGenBatchState
+from ..objectives.pareto import canonical_network, summarize_evaluation
 from .records import ParetoRecord
 
 
@@ -28,8 +28,7 @@ def evaluate_test(model, data, cfg, cost, output, device, *, checkpoint='last',
     if mode not in ('greedy', 'stochastic') or count < 2 or samples < 1 or not len(data):
         raise ValueError('Evaluation needs data, >=2 preferences and >=1 sample in a supported mode')
     for pref_idx, preference in enumerate(np.linspace(0, 1, count)):
-        fixed_cost = copy.deepcopy(cost)
-        fixed_cost.set_weights(demand_time_weight=float(preference),
+        fixed_cost = cost.with_params(demand_time_weight=float(preference),
                                route_time_weight=float(1 - preference), median_connectivity_weight=0.)
         for sample in range(samples):
             devices = [device.index or 0] if device.type == 'cuda' else []
@@ -44,8 +43,8 @@ def evaluate_test(model, data, cfg, cost, output, device, *, checkpoint='last',
                     _, _, _, routes = eval_model(model, loader, cfg.eval, fixed_cost,
                         n_samples=None if mode == 'greedy' else 1,
                         return_routes=True, silent=True, device=device)
-                    state = RouteGenBatchState(Batch.from_data_list(chunk).to(device), fixed_cost,
-                        int(cfg.eval.n_routes), int(cfg.eval.min_route_len), int(cfg.eval.max_route_len))
+                    state = RouteGenBatchState(Batch.from_data_list(chunk).to(device), fixed_cost.constants,
+                        int(cfg.eval.n_routes), int(cfg.eval.min_route_len), int(cfg.eval.max_route_len), preferences=fixed_cost.get_weights())
                     state.add_new_routes(routes.to(device))
                     result = fixed_cost(state)
                     pure = fixed_cost.get_cost_components(state, result, include_constraint=False)[:, :2]
@@ -107,7 +106,7 @@ def evaluate_pareto(model, data, cfg, cost, output, device, logger_list, step):
         report['example_front'] = example
         artifacts.save_json(report, f'pareto/iter{step:05d}_{mode}.json')
         if cfg.evaluation.get('log_pareto_front', True):
-            from .construction_metrics import nondominated
+            from ..objectives.pareto import nondominated
             fig = Figure(figsize=(5, 4))
             FigureCanvasAgg(fig)
             ax = fig.subplots()

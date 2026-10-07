@@ -10,7 +10,7 @@ from ..run.context import resolve_weights_path, resolve_under_root
 from ..run.context import RunContext
 from ..run.schemas import ConstructionDatasetParams, TrainingPaths, TrainingRunParams, params
 from ..model_factory import RouteModelFactory
-from ..objectives import CostFactory
+from ..objectives.cost import build_cost
 from .runs import ExperimentRun, TrainingArtifact
 
 
@@ -35,7 +35,7 @@ class ConstructionTrainingRun(ExperimentRun):
                 resolve_weights_path(self.paths.init_checkpoint_path, self.paths.weights_dir),
                 strict=True, map_location=device)
 
-        self.cost_obj = CostFactory.build(
+        self.cost_obj = build_cost(
             cfg.cost,
             symmetric_routes=bool(cfg.experiment.symmetric_routes),
         )

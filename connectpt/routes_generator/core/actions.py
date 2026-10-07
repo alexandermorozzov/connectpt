@@ -7,12 +7,7 @@ here keeps callers decoupled from where the constants physically live.
 """
 from __future__ import annotations
 
-from ..transit_time_estimator import (
-    ROUTE_ACTION_EXTEND,
-    ROUTE_ACTION_TRIM_START,
-    ROUTE_ACTION_TRIM_END,
-    ROUTE_ACTION_HALT,
-)
+from ..env.state import ROUTE_ACTION_EXTEND, ROUTE_ACTION_TRIM_START, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_HALT
 
 # action name (search vocabulary) -> integer action kind
 ACTION_NAME_TO_KIND: dict[str, int] = {

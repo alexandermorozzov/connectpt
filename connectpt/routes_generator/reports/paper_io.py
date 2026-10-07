@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 from ..run.artifacts import ArtifactStore
-from ..evaluation import full_metric_row
+from ..objectives.metrics import full_metric_row
 
 
 def ravel_hist(h):
@@ -23,12 +23,12 @@ def ravel_hist(h):
     return [float(v) for v in arr]
 
 
-def paper_row(city, method, source, m, rt, seed, duration_s=None):
+def paper_row(city, method, source, m, rt, seed, duration_s=None, *, adjustment):
     """One results-table row: identity columns + the full metric set."""
     return {"city": city, "method": method, "source": source,
             "duration_s": (round(float(duration_s), 1)
                            if duration_s is not None else None),
-            **full_metric_row(m, rt, seed)}
+            **full_metric_row(m, rt, seed, adjustment)}
 
 
 def save_paper_table(df, name, *, out_dir):

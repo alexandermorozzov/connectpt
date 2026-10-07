@@ -7,7 +7,7 @@ from itertools import combinations, permutations
 from omegaconf import OmegaConf
 
 from ..run.artifacts import ArtifactStore
-from .construction_metrics import nondominated, hypervolume_2d, coverage, front_metrics
+from ..objectives.pareto import nondominated, hypervolume_2d, coverage, front_metrics
 
 
 def _run_summary(run):

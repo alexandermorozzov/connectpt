@@ -19,7 +19,7 @@ import pandas as pd
 from connectpt.routes_generator.run.factory import ExperimentRunFactory
 from connectpt.routes_generator.run.config import build_experiment
 from connectpt.routes_generator.run.context import LOGS_DIR, RESULTS_DIR, resolve_under_root
-from connectpt.routes_generator.evaluation import initial_row
+from connectpt.routes_generator.objectives.metrics import initial_row
 from connectpt.routes_generator.run.artifacts import save_routes
 
 CONFIG = "search"

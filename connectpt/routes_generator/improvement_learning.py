@@ -9,17 +9,12 @@ from tqdm import tqdm
 from .run.logger import flush, log as log_metrics
 from .training.records import EditTrainRecord, EditValRecord
 from .city.graph import DEMAND_KEY, STOP_KEY, DemandScaleTransform, SpaceScaleTransform
-from .transit_time_estimator import (
-    COST_WEIGHT_KEY_ORDER,
-    ROUTE_ACTION_EXTEND,
-    ROUTE_ACTION_HALT,
-    ROUTE_ACTION_TRIM_END,
-    ROUTE_ACTION_TRIM_START,
-    RouteGenBatchState,
-)
+from .objectives.preferences import COST_WEIGHT_KEY_ORDER
+from .env.state import ROUTE_ACTION_EXTEND, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_TRIM_START, RouteGenBatchState
 from .models import FeatureNorm, get_mlp, WEIGHT_FEATURE_KEYS
 from .network.routes import to_routes
 from .city.graph import to_batch
+from .objectives.penalties import edit_step_penalty as step_penalty, forced_halt_penalty as halt_penalty
 
 ROUTE_ACTION_NAMES = {
     ROUTE_ACTION_EXTEND: "extend",
@@ -68,8 +63,8 @@ def _make_route_context_state(cost_obj, graph_batch, route_batch, route_idx,
         width=min(route_batch.shape[-1], _get_graph_batch_max_n_nodes(graph_batch)))
     n_routes = route_batch.shape[1]
     state = RouteGenBatchState(
-        graph_batch, cost_obj, n_routes, min_route_len, max_route_len,
-        cost_weights=_clone_cost_weights(cost_weights))
+        graph_batch, cost_obj.constants, n_routes, min_route_len, max_route_len,
+        preferences=_clone_cost_weights(cost_weights))
 
     # The route being improved is active, while every other seeded route is
     # already visible in the transit network context.
@@ -168,8 +163,8 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
 
     n_routes = route_batch.shape[1]
     seed_state = RouteGenBatchState(
-        graph_batch, cost_obj, n_routes, min_route_len, max_route_len,
-        cost_weights=_clone_cost_weights(cost_weights))
+        graph_batch, cost_obj.constants, n_routes, min_route_len, max_route_len,
+        preferences=_clone_cost_weights(cost_weights))
     seed_state.add_new_routes(route_batch)
     seed_result = cost_obj(seed_state)
 
@@ -257,8 +252,8 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
     final_routes = _assemble_routes_by_original_order(
         routes_by_route, graph_batch[STOP_KEY].x.device)
     state = RouteGenBatchState(
-        graph_batch, cost_obj, n_routes, min_route_len, max_route_len,
-        cost_weights=_clone_cost_weights(cost_weights))
+        graph_batch, cost_obj.constants, n_routes, min_route_len, max_route_len,
+        preferences=_clone_cost_weights(cost_weights))
     state.add_new_routes(final_routes)
     final_result = cost_obj(state)
     output = (
@@ -275,30 +270,7 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
     return output
 
 
-def network_adjustment_penalty(route_degrees, weight, target, objective):
-    """Network-level adjustment penalty: ``weight * penalty(mean_i adj_i)``.
 
-    This is the same form as MyCostModule._adjustment_penalty (the eval / BCO
-    objective): the per-route degrees are averaged into one network degree
-    FIRST, and the cap / target / cap_sq transform is applied to that mean.
-    ``weight`` and ``target`` may be scalars or per-batch tensors (adjustment
-    conditioning).
-    """
-    network_degree = route_degrees.mean(dim=-1)
-    tgt = torch.as_tensor(target, dtype=network_degree.dtype,
-                          device=network_degree.device)
-    if objective == "cap":
-        pen = (network_degree - tgt).clamp(min=0.0)
-    elif objective == "cap_sq":
-        pen = (network_degree - tgt).clamp(min=0.0) ** 2
-    elif objective == "target":
-        pen = (network_degree - tgt).abs()
-    elif objective == "raw":
-        pen = network_degree
-    else:
-        raise ValueError(
-            f"Unknown adjustment degree objective '{objective}'.")
-    return weight * pen
 
 
 def _route_change_mask(seed_routes, generated_routes):
@@ -851,7 +823,7 @@ def _collect_lc_improvement_cfg_ppo_rollout(
             if adjustment_penalty_fn is not None:
                 _adj_pen = adjustment_penalty_fn(state)
                 if _adj_pen is not None:
-                    result.cost = result.cost + _adj_pen.detach()
+                    result.add_penalty(_adj_pen.detach())
             if diff_reward:
                 step_rewards = (prev_cost - result.cost) * reward_scale
             else:
@@ -860,12 +832,9 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                 step_rewards[just_done] = -result.cost[just_done] * \
                     reward_scale
             if edit_step_penalty > 0:
-                edit_action = (step_kinds != ROUTE_ACTION_HALT) & active
-                step_rewards = step_rewards - \
-                    edit_action.to(step_rewards.dtype) * edit_step_penalty
+                step_rewards = step_rewards - step_penalty(step_kinds, active, edit_step_penalty).to(step_rewards.dtype)
             if forced_halt_penalty > 0 and force_halt:
-                step_rewards = step_rewards - \
-                    active.to(step_rewards.dtype) * forced_halt_penalty
+                step_rewards = step_rewards - halt_penalty(active, force_halt, forced_halt_penalty).to(step_rewards.dtype)
             step_rewards = step_rewards * active.to(step_rewards.dtype)
 
             prev_cost = _update_reward_baseline_cost(prev_cost, result.cost, active)
@@ -1224,14 +1193,9 @@ def _collect_lc_improvement_cfg_d3po_rollout(
                 step_rewards[just_done] = \
                     -result_components[just_done] * reward_scale
             if edit_step_penalty > 0:
-                edit_action = (step_kinds != ROUTE_ACTION_HALT) & active
-                step_rewards = step_rewards - \
-                    edit_action.to(step_rewards.dtype)[:, None] * \
-                    edit_step_penalty
+                step_rewards = step_rewards - step_penalty(step_kinds, active, edit_step_penalty).to(step_rewards.dtype)[:, None]
             if forced_halt_penalty > 0 and force_halt:
-                step_rewards = step_rewards - \
-                    active.to(step_rewards.dtype)[:, None] * \
-                    forced_halt_penalty
+                step_rewards = step_rewards - halt_penalty(active, force_halt, forced_halt_penalty).to(step_rewards.dtype)[:, None]
             step_rewards = step_rewards * active.to(step_rewards.dtype)[:, None]
 
             prev_components = _update_reward_baseline_cost(
@@ -1647,9 +1611,9 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
         # internally but only returns its cho, not the state object.
         seed_n_routes = route_batch.shape[1]
         seed_state = RouteGenBatchState(
-            graph_batch, cost_obj, seed_n_routes,
+            graph_batch, cost_obj.constants, seed_n_routes,
             min_route_len, max_route_len,
-            cost_weights=_clone_cost_weights(eval_weights))
+            preferences=_clone_cost_weights(eval_weights))
         seed_state.add_new_routes(route_batch)
         if adjustment_target is not None:
             seed_state.set_adjustment_conditioning(
@@ -1845,7 +1809,7 @@ def train_lc_improvement_cfg_ppo(
     use_adjustment_penalty = adjustment_conditioning or \
         adjustment_degree_weight > 0
     if use_adjustment_penalty:
-        from .bee_colony import get_adjustment_degrees
+        from .objectives.penalties import adjustment_degree, adjustment_penalty
     # When conditioning, the model is built with conditioning feats, so EVERY
     # forward (warmup feature-norm, validation) must feed conditioning too.
     # Use a fixed representative point: midpoint target, geometric-mean W.
@@ -1993,7 +1957,7 @@ def train_lc_improvement_cfg_ppo(
         if not use_adjustment_penalty or cur_seed_routes is None \
                 or cur_working_routes is None:
             return
-        episode_route_adj_holder[0] = get_adjustment_degrees(
+        episode_route_adj_holder[0] = adjustment_degree(
             cur_working_routes, cur_seed_routes, cost_obj.symmetric_routes,
             gap=adjustment_degree_gap, mode=adjustment_degree_mode)
 
@@ -2021,15 +1985,15 @@ def train_lc_improvement_cfg_ppo(
         cur_tensor = to_routes(
             [[cur_list[b]] for b in range(len(cur_list))],
             width=cur_working_routes.shape[-1]).to(cur_working_routes.device)
-        adj_cur = get_adjustment_degrees(
+        adj_cur = adjustment_degree(
             cur_tensor,
             cur_seed_routes[:, route_idx:route_idx + 1, :],
             cost_obj.symmetric_routes,
             gap=adjustment_degree_gap, mode=adjustment_degree_mode)
         degrees = base_adj.clone()
         degrees[:, route_idx] = adj_cur[:, 0]
-        return network_adjustment_penalty(
-            degrees, _net_weight(), _net_target(), adjustment_degree_objective)
+        return _net_weight() * adjustment_penalty(
+            degrees.mean(dim=-1), adjustment_degree_objective, _net_target())
 
     def make_next_state(prev_state=None):
         nonlocal epoch_indices, index_cursor, route_cursor

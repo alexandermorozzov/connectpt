@@ -33,6 +33,8 @@ db.sqlite3
 .venv2/
 venv/
 ENV/
+!connectpt/routes_generator/env/
+!connectpt/routes_generator/env/*.py
 
 # Editors
 .idea

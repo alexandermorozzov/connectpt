@@ -29,9 +29,9 @@ from ..run.context import RunContext
 from ..run.schemas import (AdjustmentParams, InstanceParams, SearchPaths, SearchRunParams,
                            SweepParams, params)
 from ..city.instances import load_instance
-from ..evaluation import full_metric_row, select_metrics
+from ..objectives.metrics import full_metric_row, select_metrics
 from ..model_factory import RouteModelFactory
-from ..objectives import CostFactory
+from ..objectives.cost import build_cost
 from .bee_colony_runner import BeeColonyRunner
 from .bee_specs import parse_bee_specs
 from .executable_plan import ExecutablePlan
@@ -66,7 +66,7 @@ class BeeColonySearchRun(ExperimentRun):
         device = self.context.device
 
         # cost: the /cost group this run composed (single source).
-        self.cost_obj = CostFactory.build(cfg.cost)
+        self.cost_obj = build_cost(cfg.cost)
         self.cost_obj.to(device)
 
         # models: build (role-checked) + strict-load the checkpoint into the class

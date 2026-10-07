@@ -15,8 +15,8 @@ import networkx as nx
 from . import models
 from .initialization import john_init, nikolic_init
 from .network.routes import to_routes
-from .transit_time_estimator import RouteGenBatchState, \
-    get_cost_module_from_cfg
+from .env.state import RouteGenBatchState
+from .objectives.cost import build_cost
 from .city.graph import STOP_KEY
 from .run.artifacts import load_routes
 
@@ -139,8 +139,8 @@ def process_standard_experiment_cfg(cfg, run_name_prefix='',
 
     # setup the cost function
     low_mem_mode = exp_cfg.get('low_memory_mode', False)
-    cost_obj = get_cost_module_from_cfg(exp_cfg.cost_function, low_mem_mode,
-                                        exp_cfg.symmetric_routes)
+    cost_obj = build_cost(exp_cfg.cost_function, low_memory_mode=low_mem_mode,
+                                        symmetric_routes=exp_cfg.symmetric_routes)
 
     # move torch objects to the device
     cost_obj.to(device)
@@ -187,9 +187,9 @@ def test_method(method_fn, dataloader, eval_cfg, init_cfg, cost_obj,
         
         start_time = time.time()
 
-        state = RouteGenBatchState(data, cost_obj, eval_cfg.n_routes, 
+        state = RouteGenBatchState(data, cost_obj.constants, eval_cfg.n_routes,
                                    eval_cfg.min_route_len, 
-                                   eval_cfg.max_route_len)
+                                   eval_cfg.max_route_len, preferences=cost_obj.get_weights())
 
         init_network = init_from_cfg(state, init_cfg, routes_tensor)
         assert init_network is None or init_network.shape[1] <= eval_cfg.n_routes, \
@@ -442,9 +442,7 @@ def get_eval_cfg(cfg_dir: str, base_cfg_name: str = "stacks/model_eval", params:
         "demand_time_weight": "++cost.kwargs.demand_time_weight",
         "route_time_weight": "++cost.kwargs.route_time_weight",
         "median_connectivity_weight": "++cost.kwargs.median_connectivity_weight",
-        "connectivity_mode": "++cost.kwargs.connectivity_mode",
-        "constraint_violation_weight": "++cost.kwargs.constraint_violation_weight",
-        "use_weighted_connectivity": "++cost.kwargs.use_weighted_connectivity",
+        "constraint_violation_weight": "++cost.kwargs.penalties.constraints",
         "variable_weights": "++cost.kwargs.variable_weights",
         "pp_fraction": "++cost.kwargs.pp_fraction",
         "op_fraction": "++cost.kwargs.op_fraction",

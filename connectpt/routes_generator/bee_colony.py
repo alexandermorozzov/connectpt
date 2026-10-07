@@ -17,218 +17,12 @@ from .models import check_extensions_add_connections
 from .city.shortest_paths import reconstruct_all_paths
 from .common.tensors import get_update_at_mask
 from .network.routes import to_routes
-from .transit_time_estimator import (
-    ROUTE_ACTION_HALT,
-    RouteGenBatchState,
-)
+from .env.state import ROUTE_ACTION_HALT, RouteGenBatchState
 from .import utils as lrnu
 from .initialization import get_direct_sat_dmd
 
 
-def _reverse_padded_routes(routes):
-    """Reverse the valid part of each padded route and keep -1 padding at end."""
-    route_lens = (routes > -1).sum(dim=-1)
-    max_n_nodes = routes.shape[-1]
-    positions = torch.arange(max_n_nodes, device=routes.device)
-    gather_pos = (route_lens[..., None] - 1 - positions).clamp(min=0)
-    reversed_routes = routes.gather(-1, gather_pos)
-    reversed_routes[positions >= route_lens[..., None]] = -1
-    return reversed_routes
-
-
-def needleman_wunsch(scores, gap=0.1):
-    """Compute batched Needleman-Wunsch alignment scores."""
-    if scores.ndim != 3:
-        raise ValueError(f"Expected scores to have shape (B, N, M), got {scores.shape}")
-    if not 0 <= gap < 1:
-        raise ValueError(f"gap must be in [0, 1), got {gap}")
-
-    batch_size, n_rows, n_cols = scores.shape
-    dp = torch.zeros(batch_size, n_rows + 1, n_cols + 1, device=scores.device,
-                     dtype=scores.dtype)
-    shifted_scores = scores - gap
-
-    for diag_idx in range(2, n_rows + n_cols + 1):
-        row_min = max(1, diag_idx - n_cols)
-        row_max = min(n_rows, diag_idx - 1)
-        row_idxs = torch.arange(row_min, row_max + 1, device=scores.device)
-        col_idxs = diag_idx - row_idxs
-        up = dp[:, row_idxs - 1, col_idxs]
-        left = dp[:, row_idxs, col_idxs - 1]
-        diag = dp[:, row_idxs - 1, col_idxs - 1] + \
-            shifted_scores[:, row_idxs - 1, col_idxs - 1]
-        dp[:, row_idxs, col_idxs] = torch.maximum(torch.maximum(up, left), diag)
-
-    return dp[:, -1, -1]
-
-
-def _get_alignment_scores(candidate_routes, reference_routes, symmetric_routes,
-                          gap):
-    """Return best alignment scores and route lengths for each route pair."""
-    if candidate_routes.shape != reference_routes.shape:
-        raise ValueError(
-            "candidate_routes and reference_routes must have the same shape, "
-            f"got {candidate_routes.shape} and {reference_routes.shape}"
-        )
-
-    max_n_nodes = candidate_routes.shape[-1]
-    flat_candidates = candidate_routes.reshape(-1, max_n_nodes)
-    flat_references = reference_routes.reshape(-1, max_n_nodes)
-
-    cand_valid = flat_candidates > -1
-    ref_valid = flat_references > -1
-    cand_lens = cand_valid.sum(dim=-1)
-    ref_lens = ref_valid.sum(dim=-1)
-
-    # Fast path for identical route pairs (the common case: a mutation step
-    # changes one route per network, the rest still equal the reference).
-    # With gap == 0 the NW score of an identical pair is exactly its length
-    # (a sum of 1.0 match scores -- exact in fp32), and the reversed
-    # alignment can never exceed it, so the maximum is the length itself.
-    # Only the non-identical pairs go through the expensive DP; NW rows are
-    # independent, so subsetting yields bit-identical scores for them.
-    if gap == 0.0:
-        identical = (flat_candidates == flat_references).all(dim=-1)
-        if identical.any():
-            alignment_scores = cand_lens.to(torch.float32)
-            differing = ~identical
-            if differing.any():
-                diff_scores, _, _ = _get_alignment_scores(
-                    flat_candidates[differing], flat_references[differing],
-                    symmetric_routes, gap)
-                alignment_scores = alignment_scores.clone()
-                alignment_scores[differing] = diff_scores
-            return alignment_scores, cand_lens, ref_lens
-
-    pairwise_matches = flat_candidates[:, :, None] == flat_references[:, None, :]
-    valid_pairwise_matches = pairwise_matches & cand_valid[:, :, None] & ref_valid[:, None, :]
-    alignment_scores = needleman_wunsch(valid_pairwise_matches.to(torch.float32),
-                                        gap=gap)
-
-    if symmetric_routes:
-        reversed_refs = _reverse_padded_routes(flat_references)
-        reversed_valid = reversed_refs > -1
-        reversed_matches = flat_candidates[:, :, None] == reversed_refs[:, None, :]
-        valid_reversed_matches = reversed_matches & cand_valid[:, :, None] & \
-            reversed_valid[:, None, :]
-        reversed_scores = needleman_wunsch(
-            valid_reversed_matches.to(torch.float32), gap=gap)
-        alignment_scores = torch.maximum(alignment_scores, reversed_scores)
-
-    cand_lens = cand_valid.sum(dim=-1)
-    ref_lens = ref_valid.sum(dim=-1)
-    return alignment_scores, cand_lens, ref_lens
-
-
-def get_current_adjustment_degrees(candidate_routes, reference_routes,
-                                   symmetric_routes, gap=0.1):
-    """Return the current normalized alignment-based adjustment degree."""
-    alignment_scores, cand_lens, ref_lens = _get_alignment_scores(
-        candidate_routes, reference_routes, symmetric_routes, gap=gap)
-    norm = torch.maximum(cand_lens, ref_lens).to(torch.float32)
-    match_score = max(1.0 - gap, 1e-6)
-    norm = norm * match_score
-    both_empty = (cand_lens == 0) & (ref_lens == 0)
-    norm[both_empty] = 1.0
-
-    similarities = alignment_scores / norm
-    similarities = similarities.clamp(min=0.0, max=1.0)
-    adjustment_degrees = 1.0 - similarities
-    adjustment_degrees[both_empty] = 0.0
-
-    return adjustment_degrees.reshape(candidate_routes.shape[:-1])
-
-
-def get_paper_adjustment_degrees(candidate_routes, reference_routes,
-                                 symmetric_routes):
-    """Return the paper-style adjustment degree based on LCS F-measure."""
-    lcs_lengths, cand_lens, ref_lens = _get_alignment_scores(
-        candidate_routes, reference_routes, symmetric_routes, gap=0.0)
-    both_empty = (cand_lens == 0) & (ref_lens == 0)
-    either_empty = (cand_lens == 0) | (ref_lens == 0)
-
-    cand_lens = cand_lens.to(torch.float32)
-    ref_lens = ref_lens.to(torch.float32)
-    s_candidate = lcs_lengths / cand_lens.clamp_min(1.0)
-    s_reference = lcs_lengths / ref_lens.clamp_min(1.0)
-
-    eps = 1e-8
-    valid = ~(either_empty | (s_candidate <= eps) | (s_reference <= eps))
-    similarities = torch.zeros_like(lcs_lengths)
-    theta = torch.zeros_like(lcs_lengths)
-    theta[valid] = s_reference[valid] / s_candidate[valid]
-    theta_sq = theta.square()
-    numer = (1.0 + theta_sq) * s_candidate * s_reference
-    denom = s_reference + theta_sq * s_candidate
-    similarities[valid] = numer[valid] / denom[valid].clamp_min(eps)
-    similarities = similarities.clamp(min=0.0, max=1.0)
-    similarities[both_empty] = 1.0
-
-    adjustment_degrees = 1.0 - similarities
-    adjustment_degrees[both_empty] = 0.0
-    return adjustment_degrees.reshape(candidate_routes.shape[:-1])
-
-
-def get_adjustment_degrees(candidate_routes, reference_routes, symmetric_routes,
-                           gap=0.1, mode='current'):
-    """Return route-wise adjustment degree in [0, 1], 0 means unchanged."""
-    if mode == 'current':
-        return get_current_adjustment_degrees(
-            candidate_routes,
-            reference_routes,
-            symmetric_routes,
-            gap=gap,
-        )
-    if mode == 'paper':
-        return get_paper_adjustment_degrees(
-            candidate_routes,
-            reference_routes,
-            symmetric_routes,
-        )
-    raise ValueError(
-        f"Unknown adjustment degree mode '{mode}'. Expected 'current' or 'paper'."
-    )
-
-
-def get_adjustment_penalties(adjustment_degrees, objective='raw', target=0.2):
-    """Convert raw adjustment degrees into the penalty used in the objective."""
-    if objective == 'raw':
-        return adjustment_degrees
-    if objective == 'target':
-        if not 0.0 <= target <= 1.0:
-            raise ValueError(
-                f"adjustment_degree_target must be in [0, 1], got {target}"
-            )
-        target_tensor = adjustment_degrees.new_tensor(target)
-        return (adjustment_degrees - target_tensor).abs()
-    if objective == 'cap':
-        # One-sided (hinge) penalty: penalize only EXCEEDING the target, i.e.
-        # treat `target` as an upper bound the routes should not pass. No
-        # penalty (and no pull) while adjustment <= target.
-        if not 0.0 <= target <= 1.0:
-            raise ValueError(
-                f"adjustment_degree_target must be in [0, 1], got {target}"
-            )
-        target_tensor = adjustment_degrees.new_tensor(target)
-        return (adjustment_degrees - target_tensor).clamp(min=0.0)
-    if objective == 'cap_sq':
-        # Quadratic one-sided penalty: max(0, adj - target)**2. Same upper-bound
-        # semantics as 'cap' (no penalty below target), but the gradient
-        # 2*(adj - target) GROWS with the overshoot -- gentle near the target
-        # (does not swamp the main objective / keeps return variance low) and
-        # firm on large excess. Unlike linear 'cap' (constant gradient = W),
-        # the optimal adjustment depends on the target, so target/W become real
-        # controllability levers under conditioning.
-        if not 0.0 <= target <= 1.0:
-            raise ValueError(
-                f"adjustment_degree_target must be in [0, 1], got {target}"
-            )
-        target_tensor = adjustment_degrees.new_tensor(target)
-        return (adjustment_degrees - target_tensor).clamp(min=0.0) ** 2
-    raise ValueError(
-        f"Unknown adjustment degree objective '{objective}'. "
-        "Expected 'raw', 'target', 'cap', or 'cap_sq'."
-    )
+from .objectives.penalties import (_reverse_padded_routes, needleman_wunsch, _get_alignment_scores, get_current_adjustment_degrees, get_paper_adjustment_degrees, adjustment_degree, adjustment_penalty)
 
 
 def _ensure_mutation_stats_bucket(mutation_counts_out, bucket_name, bee_names):
@@ -390,17 +184,8 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
     best_networks[:, :n_init_routes, :init_network.shape[-1]] = init_network
     reference_networks = best_networks.clone()
     use_adjustment_penalty = adjustment_degree_weight > 0
-    # Unified adjustment-degree penalty: the cost module owns the adj term
-    # (single source of truth). Configure it with this run's seed + params so
-    # cost_obj(...) already includes the penalty; bee_colony no longer adds it
-    # separately. Reset to disabled at the end so the cost_obj does not leak.
     if use_adjustment_penalty:
-        cost_obj.adjustment_degree_weight = adjustment_degree_weight
-        cost_obj.adjustment_degree_target = adjustment_degree_target
-        cost_obj.adjustment_degree_objective = adjustment_degree_objective
-        cost_obj.adjustment_degree_gap = adjustment_degree_gap
-        cost_obj.adjustment_degree_mode = adjustment_degree_mode
-        cost_obj.adjustment_seed = reference_networks
+        state.set_adjustment_seed(reference_networks)
     route_count = max(float(n_routes.item()), 1.0)
 
     # expand state to networks
@@ -455,7 +240,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
     # evaluate and record the reward of the initial network
     bee_raw_costs, bee_metrics = batched_cost_fn(bee_networks)
     bee_adjustment_degrees = torch.zeros_like(bee_raw_costs)
-    bee_adjustment_penalties = get_adjustment_penalties(
+    bee_adjustment_penalties = adjustment_penalty(
         bee_adjustment_degrees,
         objective=adjustment_degree_objective,
         target=adjustment_degree_target,
@@ -524,7 +309,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                 if use_adjustment_penalty:
                     reference_routes = reference_networks[:, None].expand(
                         -1, n_bees, -1, -1).gather(2, gather_idx).squeeze(2)
-                    old_route_adjustments = get_adjustment_degrees(
+                    old_route_adjustments = adjustment_degree(
                         old_modified_routes, reference_routes,
                         cost_obj.symmetric_routes,
                         gap=adjustment_degree_gap,
@@ -532,7 +317,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                     )
                     new_modified_routes = new_bee_networks.gather(
                         2, gather_idx).squeeze(2)
-                    new_route_adjustments = get_adjustment_degrees(
+                    new_route_adjustments = adjustment_degree(
                         new_modified_routes, reference_routes,
                         cost_obj.symmetric_routes,
                         gap=adjustment_degree_gap,
@@ -543,7 +328,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                 else:
                     new_bee_adjustment_degrees = bee_adjustment_degrees
 
-                new_bee_adjustment_penalties = get_adjustment_penalties(
+                new_bee_adjustment_penalties = adjustment_penalty(
                     new_bee_adjustment_degrees,
                     objective=adjustment_degree_objective,
                     target=adjustment_degree_target,
@@ -655,8 +440,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
     # reset the unified adjustment-degree penalty so the shared cost_obj does
     # not carry this run's seed into any later evaluation.
     if use_adjustment_penalty:
-        cost_obj.adjustment_seed = None
-        cost_obj.adjustment_degree_weight = 0.0
+        state.set_adjustment_seed(torch.full((state.batch_size, 0, 0), -1., device=dev))
     return state, cost_history
 
 

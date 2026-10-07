@@ -24,7 +24,6 @@ class SearchBestRecord:
     d_un: float | None = _tag("best $d_{un}$")
     disconnected_pairs: float | None = _tag("best # disconnected node pairs")
     stops_oob: float | None = _tag("best # stops out of bounds")
-    median_connectivity: float | None = _tag("best median_connectivity")
     wmc: float | None = _tag("best median_connectivity_weighted")
     adjustment_degree: float | None = _tag("best adjustment degree")
     adjustment_penalty: float | None = _tag("best adjustment penalty")
@@ -34,6 +33,6 @@ class SearchBestRecord:
 METRIC_FIELDS = {
     "cost": "cost", "ATT": "att", "RTT": "rtt", "$d_0$": "d0", "$d_1$": "d1", "$d_2$": "d2",
     "$d_{un}$": "d_un", "# disconnected node pairs": "disconnected_pairs",
-    "# stops out of bounds": "stops_oob", "median_connectivity": "median_connectivity",
+    "# stops out of bounds": "stops_oob",
     "median_connectivity_weighted": "wmc",
 }

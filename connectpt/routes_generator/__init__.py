@@ -17,7 +17,7 @@ This package provides tools for:
 
 Typical usage:
 ---------------
->>> from transit_learning import CityGraphData, RouteGenBatchState, get_cost_module_from_cfg
+>>> from transit_learning import CityGraphData, RouteGenBatchState, build_cost
 >>> from transit_learning import get_dynamic_training_set, init_from_cfg, bee_colony
 >>> from transit_learning import PathCombiningRouteGenerator, test_method
 
@@ -25,7 +25,7 @@ Typical usage:
 >>> dataset = get_dynamic_training_set(min_nodes=10, max_nodes=100)
 
 # Build a model and cost function
->>> cost_obj = get_cost_module_from_cfg(cfg.cost)
+>>> cost_obj = build_cost(cfg.cost)
 >>> model = build_model_from_cfg(cfg.model, cfg.experiment)
 
 # Run BCO with initialization
@@ -46,22 +46,9 @@ from .city.synthetic import CityGraphDataset, DynamicCityGraphDataset, get_defau
 from .city.graph import InsertPosFeatures, RandomFlipCity, SpaceScaleTransform, DemandScaleTransform, CityGraphData
 
 # === Transit Time & Cost Estimation ===
-from .transit_time_estimator import (
-    ExtraStateData,
-    RouteGenBatchState,
-    CostHelperOutput,
-    CostModule,
-    MyCostModule,
-    ROUTE_ACTION_EXTEND,
-    ROUTE_ACTION_HALT,
-    ROUTE_ACTION_TRIM_END,
-    ROUTE_ACTION_TRIM_START,
-    COST_WEIGHT_KEY_ORDER,
-    COST_COMPONENT_NAMES,
-    resolve_cost_component_index,
-    resolve_enabled_cost_components,
-    get_cost_module_from_cfg,
-)
+from .env.state import ExtraStateData, RouteGenBatchState, ROUTE_ACTION_EXTEND, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_TRIM_START
+from .objectives.cost import CostHelperOutput, CostModule, MyCostModule, build_cost
+from .objectives.preferences import COST_WEIGHT_KEY_ORDER, COST_COMPONENT_NAMES
 
 # === Initialization Methods ===
 from .initialization import (

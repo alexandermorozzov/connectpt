@@ -9,8 +9,8 @@ from hydra import compose, initialize_config_dir
 from connectpt.routes_generator.run.context import CFG_DIR
 from connectpt.routes_generator.city.synthetic import DynamicCityGraphDataset
 from connectpt.routes_generator.model_factory import RouteModelFactory
-from connectpt.routes_generator.objectives import CostFactory
-from connectpt.routes_generator.transit_time_estimator import RouteGenBatchState
+from connectpt.routes_generator.objectives.cost import build_cost
+from connectpt.routes_generator.env.state import RouteGenBatchState
 from connectpt.routes_generator.improvement_learning import (
     _preference_dict_from_tensor, _sample_neighbor_preferences,
     _compute_ppo_returns_and_advantages, _estimate_d3po_diversity_loss,
@@ -92,9 +92,9 @@ def test_returns_cut_terminal_and_bootstrap_only_truncated_episode(vector, use_g
 
 
 def test_common_sampler_matches_holliday_and_respects_fixed_weights():
-    from connectpt.routes_generator.transit_time_estimator import MyCostModule
+    from connectpt.routes_generator.objectives.cost import MyCostModule
     cost = MyCostModule(variable_weights=True, pp_fraction=.33, op_fraction=.33,
-                        mcw_fraction=0., disabled_components=['connectivity'])
+                        mcw_fraction=0., objectives=['ATT', 'RTT'])
     torch.manual_seed(41)
     selector = torch.rand(4096)
     expected = torch.zeros(4096)
@@ -106,8 +106,7 @@ def test_common_sampler_matches_holliday_and_respects_fixed_weights():
     assert torch.equal(sampled['demand_time_weight'], expected)
     assert torch.equal(sampled['route_time_weight'], 1 - expected)
     assert torch.equal(sampled['median_connectivity_weight'], torch.zeros(4096))
-    cost.variable_weights = False
-    cost.set_weights(demand_time_weight=.2, route_time_weight=.8)
+    cost = cost.with_params(variable_weights=False, demand_time_weight=.2, route_time_weight=.8)
     assert torch.allclose(cost.sample_variable_weights(5)['demand_time_weight'], torch.full((5,), .2))
 
 
@@ -168,12 +167,12 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
         cfg = compose(config_name='runs/train_construction')
     model = RouteModelFactory.build_construction_model(cfg.model, cfg.experiment)
     model.freeze_feature_norms()
-    cost = CostFactory.build(cfg.cost, symmetric_routes=True)
+    cost = build_cost(cfg.cost, symmetric_routes=True)
     data = DynamicCityGraphDataset(15, 15, data_type='voronoi')
     graphs = [data.transform(data.generate_graph()) for _ in range(2)]
     ws = torch.tensor([[.2, .8], [.8, .2]])
-    state = RouteGenBatchState(graphs, cost, 3, min_route_len=2, max_route_len=8,
-                              cost_weights=preference_dict(ws))
+    state = RouteGenBatchState(graphs, cost.constants, 3, min_route_len=2, max_route_len=8,
+                              preferences=preference_dict(ws))
     model.setup_planning(state)
     phases = set()
     with torch.no_grad():
@@ -312,8 +311,8 @@ def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     assert scalar.input_dim == vector.legacy_input_dim == 21
     dataset = DynamicCityGraphDataset(9, 9, data_type='voronoi')
     graphs = [dataset.transform(dataset.generate_graph()) for _ in range(2)]
-    cost = CostFactory.build(cfg.cost, symmetric_routes=True)
-    state = RouteGenBatchState(graphs, cost, 1, 2, 5)
+    cost = build_cost(cfg.cost, symmetric_routes=True)
+    state = RouteGenBatchState(graphs, cost.constants, 1, 2, 5, preferences=cost.get_weights())
     globals_ = state.get_global_state_features(weight_feature_keys=model.weight_feature_keys)
     assert globals_.shape[-1] == 11
     features = scalar.inputs_from_data(state.graph_data, state.cost_weights)
@@ -354,7 +353,7 @@ def test_holliday_feature_norm_sample_variance_and_singleton_safety():
 
 
 def test_pareto_network_identity_and_per_city_fronts():
-    from connectpt.routes_generator.training.construction_metrics import canonical_network, summarize_evaluation
+    from connectpt.routes_generator.objectives.pareto import canonical_network, summarize_evaluation
     original = canonical_network([[0, 1, 2], [2, 3]])
     assert original == canonical_network([[3, 2], [2, 1, 0, -1]])
     assert original != canonical_network([[0, 1, 2], [2, 3], [2, 3]])
@@ -384,7 +383,7 @@ def test_fixed_preference_evaluation_does_not_consume_training_rng():
             'evaluation.preference_count=3', 'evaluation.stochastic_samples=2'])
     model = RouteModelFactory.build_construction_model(cfg.model, cfg.experiment)
     model.freeze_feature_norms()
-    cost = CostFactory.build(cfg.cost, symmetric_routes=True)
+    cost = build_cost(cfg.cost, symmetric_routes=True)
     dataset = DynamicCityGraphDataset(9, 9, data_type='voronoi')
     graphs = [dataset.transform(dataset.generate_graph()) for _ in range(2)]
     output = Path('artifacts/audits/construction_holliday_64_20261005') / f'rng_{uuid4().hex}'

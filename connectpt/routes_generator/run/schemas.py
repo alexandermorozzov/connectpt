@@ -90,8 +90,9 @@ class AdjustmentParams:
 
     @classmethod
     def from_cost(cls, cost_kwargs):
-        return cls(**{k: v for k, v in OmegaConf.to_container(cost_kwargs, resolve=True).items()
-                      if k.startswith("adjustment_degree_")})
+        values = OmegaConf.to_container(cost_kwargs, resolve=True)
+        return cls(adjustment_degree_weight=values["penalties"]["adjustment"],
+                   **{k: v for k, v in values.items() if k.startswith("adjustment_degree_")})
 
 
 @dataclass(frozen=True)

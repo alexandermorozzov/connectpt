@@ -8,7 +8,7 @@ from typing import Any
 from ..run.runs import ExperimentRun, RunArtifact
 
 
-def copytier_config(dg, data, connectivity_mode) -> "CopyTierConfig":
+def copytier_config(dg, data) -> "CopyTierConfig":
     """The dataset-generation config from the ``dataset_build`` and ``dataset``
     parameters."""
     from connectpt.routes_generator.run.context import DATASETS_DIR
@@ -24,7 +24,6 @@ def copytier_config(dg, data, connectivity_mode) -> "CopyTierConfig":
         n_graphs=int(dg.n_graphs), tiers=tiers, lc_combos=combos,
         target_n_routes=int(data.target_n_routes), min_route_len=int(data.min_route_len),
         max_route_len=int(data.max_route_len),
-        connectivity_mode=str(connectivity_mode),
         lc_n_samples=int(dg.lc_n_samples), tier_cfg=COPY_TIER_CFG,
         force_regen=dg.force_regen)
 
@@ -57,7 +56,6 @@ class CopyTierConfig:
     target_n_routes: int
     min_route_len: int
     max_route_len: int
-    connectivity_mode: str
     lc_n_samples: int
     tier_cfg: dict
     force_regen: bool = False
@@ -116,8 +114,7 @@ def build_copytier_dataset(cfg: CopyTierConfig):
             c = build_lc_cfg(run_name=f"copy_cur_{ctag}", n_routes=cfg.target_n_routes,
                              min_route_len=cfg.min_route_len, max_route_len=cfg.max_route_len,
                              demand_time_weight=d, route_time_weight=rt,
-                             median_connectivity_weight=cn,
-                             connectivity_mode=cfg.connectivity_mode)
+                             median_connectivity_weight=cn)
             for _s in tqdm(range(0, len(combo_idxs), LC_GEN_BATCH),
                            desc=f"LC construct [{ctag}]"):
                 chunk = combo_idxs[_s:_s + LC_GEN_BATCH]
@@ -187,8 +184,7 @@ class DatasetPreparationRun(ExperimentRun):
         cfg = self.cfg
         self.run_params = params(RunParams, cfg.run)
         self.dataset = copytier_config(params(DatasetBuildParams, cfg.dataset_build),
-                                       params(EditDatasetParams, cfg.dataset),
-                                       cfg.cost.kwargs.connectivity_mode)
+                                       params(EditDatasetParams, cfg.dataset))
         self.run_dir = resolve_under_root(params(OutputPaths, cfg.paths).output_dir)
 
     def _artifact(self, seconds, dry_run):

@@ -21,15 +21,8 @@ from .network.routes import get_route_leg_times, to_routes
 from .trunc_normal import TruncatedNormal
 
 from .city.graph import DEMAND_KEY, STOP_KEY, STREET_KEY, ROUTE_KEY, CityGraphData
-from .transit_time_estimator import (
-    EPSILON,
-    ROUTE_ACTION_EXTEND,
-    ROUTE_ACTION_HALT,
-    ROUTE_ACTION_TRIM_END,
-    ROUTE_ACTION_TRIM_START,
-    RouteGenBatchState,
-    _finite_time_diameter,
-)
+from .objectives.cost import EPSILON, _finite_time_diameter
+from .env.state import ROUTE_ACTION_EXTEND, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_TRIM_START, RouteGenBatchState
 
 Q_FUNC_MODE = "q function"
 PLCY_MODE = "policy"

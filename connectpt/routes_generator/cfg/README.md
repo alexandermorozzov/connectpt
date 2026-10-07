@@ -39,7 +39,7 @@ python scripts/run.py --config-name runs/prepare_dataset
 ```
 
 Поиск и edit-обучение используют одну цель `cost=rtt_wmc`. Штраф за изменение
-сети задаёт `adjustment/cap.yaml`. Выключить штраф: `cost.kwargs.adjustment_degree_weight=0`
+сети задаёт `adjustment/cap.yaml`. Выключить штраф: `cost.kwargs.penalties.adjustment=0`
 (в поиске — `--adj-weight 0`). Режим «цель»: `cost.kwargs.adjustment_degree_objective=target`.
 
 YAML содержит только значения. Комментарии в конфигах не пишутся.

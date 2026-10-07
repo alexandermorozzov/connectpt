@@ -45,16 +45,17 @@ def _lc_construct(spec, tensors, *, device) -> torch.Tensor:
     from ..run.context import seed_everything
     from ..eval_route_generator import eval_model
     from ..model_factory import RouteModelFactory
-    from ..objectives import CostFactory, cost_kwargs
+    from ..objectives.cost import build_cost
     from ..utils import get_eval_cfg
 
-    kw = cost_kwargs()
+    from hydra import compose, initialize_config_dir
+    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
+        kw = compose(config_name="stacks/model_eval").cost.kwargs
     params = {
         "dataset_name": "tensor",
         "n_routes": spec["n_routes"],
         "min_route_len": spec["min_route_len"],
         "max_route_len": spec["max_route_len"],
-        "connectivity_mode": kw.connectivity_mode,
         "run_name": f"lc_init_{spec.get('city', 'inst')}",
         "model_weights": str(CONSTRUCTION_MODEL_WEIGHTS_PATH),
         "demand_time_weight": kw.demand_time_weight,
@@ -62,16 +63,10 @@ def _lc_construct(spec, tensors, *, device) -> torch.Tensor:
         "median_connectivity_weight": kw.median_connectivity_weight,
     }
     cfg = get_eval_cfg(str(CFG_DIR), "stacks/model_eval", params)
-    disabled = list(kw.disabled_components)
-    if disabled:
-        OmegaConf.set_struct(cfg, False)
-        cfg.cost.kwargs.disabled_components = disabled
-        OmegaConf.set_struct(cfg, True)
-
     seed_everything(cfg.experiment.get("seed"))
     dataloader = DataLoader(
         to_batch(tensors).to_data_list(), batch_size=1)
-    cost_obj = CostFactory.build(
+    cost_obj = build_cost(
         cfg.cost,
         symmetric_routes=bool(cfg.experiment.symmetric_routes))
     cost_obj.to(device)

@@ -19,23 +19,14 @@ from .city.instances import load_instance
 from .run.context import CFG_DIR, CONSTRUCTION_MODEL_WEIGHTS_PATH as MODEL_WEIGHTS_PATH, safe_run_name
 from .network.routes import to_routes
 from .eval_route_generator import eval_model
-from .evaluation.cost_breakdown import add_cost_breakdown_to_metrics
-from .objectives import cost_kwargs
+from .objectives.metrics import add_cost_breakdown_to_metrics
+
 from .utils import get_eval_cfg
 
 LC_SAMPLES = 100
 
 
-def _apply_disabled_components(cfg):
-    """Inject the objective's disabled cost components into the cost kwargs (so
-    the built cost drops them + renormalizes the survivors). Was compat."""
-    disabled = list(cfg.cost.kwargs.disabled_components)
-    if not disabled:
-        return cfg
-    OmegaConf.set_struct(cfg, False)
-    cfg.cost.kwargs.disabled_components = disabled
-    OmegaConf.set_struct(cfg, True)
-    return cfg
+
 
 
 
@@ -45,8 +36,10 @@ def _apply_disabled_components(cfg):
 def build_lc_cfg(run_name, n_routes, min_route_len, max_route_len,
                  demand_time_weight=None, route_time_weight=None,
                  median_connectivity_weight=None,
-                 connectivity_mode="median_weighted"):
-    defaults = cost_kwargs()
+                 ):
+    from hydra import compose, initialize_config_dir
+    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
+        defaults = compose(config_name="stacks/model_eval").cost.kwargs
     demand_time_weight = (defaults.demand_time_weight if demand_time_weight is None
                           else demand_time_weight)
     route_time_weight = (defaults.route_time_weight if route_time_weight is None
@@ -63,12 +56,11 @@ def build_lc_cfg(run_name, n_routes, min_route_len, max_route_len,
         "demand_time_weight": demand_time_weight,
         "route_time_weight": route_time_weight,
         "median_connectivity_weight": median_connectivity_weight,
-        "connectivity_mode": connectivity_mode,
         "run_name": run_name,
         "model_weights": str(MODEL_WEIGHTS_PATH),
     }
     cfg = get_eval_cfg(str(CFG_DIR), "stacks/model_eval", params)
-    return _apply_disabled_components(cfg)
+    return cfg
 
 
 def run_lc(cfg, init_routes=None, revisit_routes=None, *,

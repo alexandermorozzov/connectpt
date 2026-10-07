@@ -49,9 +49,12 @@ def route_adjustments(routes, reference_routes):
     The import is deferred: ``reports`` reads artifacts and must not pull the
     scoring stack in at module import time.
     """
-    from ..evaluation.route_scoring import route_adjustment_degrees
+    from ..objectives.penalties import adjustment_degree
 
-    return route_adjustment_degrees(routes, reference_routes)
+    current, reference = to_routes(routes), to_routes(reference_routes)
+    width = max(current.shape[-1], reference.shape[-1])
+    current, reference = to_routes(current, width=width), to_routes(reference, width=width)
+    return adjustment_degree(current, reference, True, mode="paper")[0].detach().cpu().numpy()
 
 
 def route_stats(routes):

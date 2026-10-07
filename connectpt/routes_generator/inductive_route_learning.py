@@ -15,8 +15,8 @@ import hydra
 
 from .city.graph import to_batch, STOP_KEY, DEMAND_KEY
 from .city.synthetic import CityGraphDataset, get_default_train_and_eval_split, get_dynamic_training_set
-from .transit_time_estimator import (COST_WEIGHT_KEY_ORDER,
-                                     ROUTE_ACTION_EXTEND, RouteGenBatchState)
+from .objectives.preferences import COST_WEIGHT_KEY_ORDER
+from .env.state import ROUTE_ACTION_EXTEND, RouteGenBatchState
 from . import utils as lrnu
 from .models import FeatureNorm, get_mlp, WEIGHT_FEATURE_KEYS
 from .eval_route_generator import eval_model
@@ -281,7 +281,6 @@ def eval_model_over_nroutes(model, eval_dl, n_routes_range, eval_cfg, cost_obj,
         cost=mean_eval_cost, att=all_metrics['ATT'].mean(), rtt=all_metrics['RTT'].mean(),
         d_un=all_metrics['$d_{un}$'].mean(),
         disconnected_pairs=all_metrics['# disconnected node pairs'].mean(),
-        median_connectivity=all_metrics['median_connectivity'].mean(),
         wmc=all_metrics['median_connectivity_weighted'].mean()), n_eps)
 
     return mean_eval_cost
@@ -406,10 +405,10 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
 
             # sample cost weights
             cost_weights = cost_obj.sample_variable_weights(data.num_graphs, device)
-            state = RouteGenBatchState(data, cost_obj, n_routes, 
+            state = RouteGenBatchState(data, cost_obj.constants, n_routes,
                                        cfg.eval.min_route_len,
                                        cfg.eval.max_route_len,
-                                       cost_weights=cost_weights)
+                                       preferences=cost_weights)
             state = model.setup_planning(state)
             ep_finished = state.is_done()
             # A new graph batch starts new episodes; keep these across rollouts
@@ -709,7 +708,6 @@ def setup_and_train(cfg: DictConfig, *,
             lrnu.process_standard_experiment_cfg(cfg, 'inductive_')
     # model always has legal route lengths by construction, so we don't need
      # to penalize it for illegal routes
-    cost_obj.ignore_stops_oob = True
 
     optimizer_type = getattr(torch.optim, cfg.optimizer)
     optimizer = optimizer_type(model.parameters(), lr=cfg.lr, 
@@ -758,7 +756,7 @@ def setup_and_train(cfg: DictConfig, *,
     # set a range of random cost parameters to use during validation
     val_cost_obj = copy.deepcopy(cost_obj)
     val_weights = val_cost_obj.sample_variable_weights(val_batch_size, device)
-    val_cost_obj.set_weights(**val_weights)
+    val_cost_obj = val_cost_obj.with_params(**val_weights)
     
     eval_n_routes = cfg.eval.n_routes
     if type(eval_n_routes) is int:

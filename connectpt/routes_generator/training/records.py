@@ -31,7 +31,6 @@ class ValidationRecord:
     rtt: float | None = _tag("val RTT")
     d_un: float | None = _tag("val $d_{un}$")
     disconnected_pairs: float | None = _tag("val # disconnected node pairs")
-    median_connectivity: float | None = _tag("val median_connectivity")
     wmc: float | None = _tag("val median_connectivity_weighted")
 
 

@@ -1,7 +1,7 @@
 """EditTrainingRun -- config-driven training of the edit / trim model.
 
 Builds the data module, model (via the factory, so checkpoints still load with
-strict=True), cost (via CostFactory + the unified objective) and the PPO trainer
+strict=True), cost (via build_cost + the unified objective) and the PPO trainer
 from a composed ``training/edit`` cfg, then trains and saves a v2 checkpoint.
 
 ``run(dry_run=True)`` builds everything and validates the wiring WITHOUT loading
@@ -16,7 +16,7 @@ from ..run.context import RunContext
 from ..run.schemas import (CurriculumParams, EditDatasetParams, TrainingPaths,
                            TrainingRunParams, params)
 from ..model_factory import RouteModelFactory
-from ..objectives import CostFactory
+from ..objectives.cost import build_cost
 from .edit_ppo_trainer import EditPPOTrainer
 from .runs import ExperimentRun, TrainingArtifact
 from .training_data import TrainingDataModule
@@ -47,7 +47,7 @@ class EditTrainingRun(ExperimentRun):
 
         # cost -- everything (weights, connectivity, adjustment, sampling
         # fractions) comes from cfg.experiment.cost_function
-        self.cost_obj = CostFactory.build(
+        self.cost_obj = build_cost(
             cfg.cost,
             symmetric_routes=bool(cfg.experiment.symmetric_routes),
         )
