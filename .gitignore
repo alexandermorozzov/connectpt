@@ -22,7 +22,6 @@ htmlcov/
 *.log
 local_settings.py
 db.sqlite3
-instance/
 .webassets-cache
 
 # Jupyter

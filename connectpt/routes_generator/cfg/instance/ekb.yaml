@@ -1,0 +1,6 @@
+name: ekb
+path: datasets/instances/ekb
+n_routes: 67
+min_route_len: 11
+max_route_len: 54
+crs: EPSG:32641

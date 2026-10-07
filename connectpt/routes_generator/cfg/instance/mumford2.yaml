@@ -1,0 +1,5 @@
+name: mumford2
+path: datasets/instances/mumford2
+n_routes: 56
+min_route_len: 10
+max_route_len: 22

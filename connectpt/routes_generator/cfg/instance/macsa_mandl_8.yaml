@@ -1,0 +1,5 @@
+name: macsa_mandl_8
+path: datasets/instances/macsa_mandl_8
+n_routes: 8
+min_route_len: 2
+max_route_len: 12
