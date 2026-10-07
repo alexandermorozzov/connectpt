@@ -20,7 +20,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from ..core.paths import DATASETS_DIR, resolve_under_root
+from ..run.context import DATASETS_DIR, resolve_under_root
 from .loaders import instance_spec
 from .routes import pad_routes_to
 
@@ -94,29 +94,27 @@ def load_routes_txt(path, *, n_nodes, spec) -> torch.Tensor:
 
 
 def load_instance(instance, *, instances_dir=None) -> Instance:
-    """Load an instance preset (or its name) as an :class:`Instance`."""
+    """Load an instance (``InstanceParams`` or a ``cfg/instance`` name) as an
+    :class:`Instance`."""
+    from ..run.schemas import InstanceParams, params
+
     if isinstance(instance, str):
-        cfg = instance_spec(instance)
-        name = instance
-    else:
-        cfg = instance
-        name = str(cfg.name)
+        instance = params(InstanceParams, instance_spec(instance))
+    name = instance.name
     if instances_dir is not None:
         d = Path(instances_dir) / name
-    elif cfg.get("path"):
-        d = resolve_under_root(cfg.path)
     else:
-        d = INSTANCES_DIR / name
+        d = resolve_under_root(instance.path)
     if not d.is_dir():
         raise FileNotFoundError(
             f"instance folder not found: {d}. An instance is a folder with "
             f"Coords.txt / TravelTimes.txt / Demand.txt / Routes.txt.")
     tensors = load_matrices(d)
-    spec = {"city": name, **{k: int(cfg[k]) for k in
-                             ("n_routes", "min_route_len", "max_route_len")}}
+    spec = {"city": name, "n_routes": instance.n_routes,
+            "min_route_len": instance.min_route_len, "max_route_len": instance.max_route_len}
     routes = load_routes_txt(d / "Routes.txt",
                              n_nodes=tensors["node_locs"].shape[0], spec=spec)
-    meta = {"crs": cfg["crs"]} if "crs" in cfg else {}
+    meta = {"crs": instance.crs} if instance.crs is not None else {}
     return Instance(label=name, tensors=tensors, init_routes=routes, spec=spec,
                     coords=tensors["node_locs"], street_adj=tensors["street_adj"],
                     meta=meta)

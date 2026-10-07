@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 from torch_geometric.loader import DataLoader
 
 from connectpt.routes_generator.citygraph_dataset import get_dataset_from_config
-from connectpt.routes_generator.core.paths import resolve_under_root
+from connectpt.routes_generator.run.context import resolve_under_root
 from connectpt.routes_generator.data import as_route_tensor, load_matrices
 from connectpt.routes_generator.objectives import CostFactory
 from connectpt.routes_generator.transit_time_estimator import RouteGenBatchState

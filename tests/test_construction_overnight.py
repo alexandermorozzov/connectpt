@@ -1,10 +1,8 @@
 import subprocess
-from pathlib import Path
-from uuid import uuid4
 
 from hydra import compose, initialize_config_dir
 
-from connectpt.routes_generator.core.paths import CFG_DIR
+from connectpt.routes_generator.run.context import CFG_DIR
 
 
 def test_overnight_preserves_measured_batch_and_independent_training_limits():
@@ -23,15 +21,14 @@ def test_overnight_preserves_measured_batch_and_independent_training_limits():
         assert 'parallel' not in cfg
 
 
-def test_direct_launcher_dry_run_validates_both_without_starting_workers():
-    root = Path('artifacts/comparisons') / f'direct_dry_{uuid4().hex}'
-    result = subprocess.run([
-        'powershell.exe', '-NoProfile', '-File', 'scripts/run_construction_overnight.ps1',
-        '-ComparisonRoot', str(root), '-Hours', '8', '-DryRun',
-    ], capture_output=True, text=True, timeout=90)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count('dry-run OK:') == 2
-    assert 'trainer=ppo_construction' in result.stdout
-    assert 'trainer=d3po_construction' in result.stdout
-    assert 'train_loop.max_seconds=25200' in result.stdout
-    assert not root.exists()
+def test_launcher_dry_run_validates_both_overnight_trainers(tmp_path):
+    for trainer in ('ppo_construction', 'd3po_construction'):
+        log = tmp_path / f'{trainer}.log'
+        result = subprocess.run([
+            'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/launch.ps1',
+            '--wait', 'run.py', '--config-name', 'runs/train_construction_overnight',
+            f'trainer={trainer}', '--dry-run', '--log', str(log),
+        ], capture_output=True, text=True, timeout=180)
+        assert result.returncode == 0, result.stdout + result.stderr
+        text = log.read_text(encoding='utf-8')
+        assert 'dry-run OK' in text and f'trainer={trainer}' in text

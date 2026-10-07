@@ -9,3 +9,9 @@ defaults:
 run:
   type: dataset_prepare
   name: prepare_dataset
+  seed: 0
+
+paths:
+  output_dir: artifacts/runs/prepare_dataset
+
+logger_list: []

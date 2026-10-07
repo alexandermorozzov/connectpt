@@ -30,7 +30,7 @@ class BeeColonyRunner:
         }
 
     def run_seeded(self, init_routes, tensors, *, eval_dims, n_iterations,
-                   alpha, adj_target, adj_weight, sum_writer=None):
+                   alpha, adj_target, adj_weight, logger_list=()):
         """Seeded improvement of an EXISTING network (init from ``init_routes``).
 
         ``alpha`` (RTT/WMC trade-off) sets route_time_weight=alpha and
@@ -45,7 +45,7 @@ class BeeColonyRunner:
 
         from ..bee_colony import run_bee_colony_plan
         from ..citygraph_dataset import get_dataset_from_config
-        from ..core.runtime import seed_everything
+        from ..run.context import seed_everything
         from ..utils import test_method
 
         if alpha is not None:
@@ -67,10 +67,8 @@ class BeeColonyRunner:
         _mean, _std, unserved, metrics, routes = test_method(
             run_bee_colony_plan, dataloader, eval_cfg,
             OmegaConf.create({"method": "tensor"}), self.cost_obj,
-            sum_writer=sum_writer, silent=self.silent,
+            logger_list=logger_list, silent=self.silent,
             device=self.device, return_routes=True, routes_tensor=init_routes,
-            # keep only the per-iteration ``best *`` curves in TB
-            log_eval_summary=False,
             n_bees=self.plan.total_bees, n_iterations=int(n_iterations), plan=self.plan,
             process_neural_bees_sequentially=self.sequential,
             **adjustment)

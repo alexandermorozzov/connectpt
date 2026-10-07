@@ -13,18 +13,12 @@ bounds, ...) into the composed cfg in code. Every parameter defaults to ``None``
 """
 from __future__ import annotations
 
-import re
 from typing import Sequence
 
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf, open_dict
 
-from .paths import CFG_DIR
-
-
-def _slug(text: str) -> str:
-    """Filesystem-safe slug for a method label (disambiguates run outputs)."""
-    return re.sub(r"[^a-z0-9]+", "_", str(text).lower()).strip("_")
+from .context import CFG_DIR, safe_run_name
 
 
 def _compose_experiment(name: str, overrides):
@@ -118,7 +112,7 @@ def build_experiment(
         if instance is not None:
             _retarget_instance(cfg, instance)
         if label is not None:
-            seg = _slug(label)
+            seg = safe_run_name(label)
             if seg and not str(cfg.run.name).endswith(seg):
                 cfg.run.name = f"{cfg.run.name}/{seg}"
                 _set_run_dir(cfg)

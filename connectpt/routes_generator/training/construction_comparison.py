@@ -2,10 +2,28 @@
 from pathlib import Path
 import json
 import numpy as np
+import pandas as pd
 from itertools import combinations, permutations
+from omegaconf import OmegaConf
 
-from ..core.artifacts import ArtifactStore
+from ..run.artifacts import ArtifactStore
 from .construction_metrics import nondominated, hypervolume_2d, coverage, front_metrics
+
+
+def _run_summary(run):
+    """Status, seed and commit from ``run.json``; counters from the last logged
+    values in ``history.csv``; the budget from ``config.yaml``."""
+    info = json.loads((run / 'run.json').read_text())
+    config = OmegaConf.load(run / 'config.yaml')
+    history = pd.read_csv(run / 'history.csv', float_precision='round_trip')
+    steps = history.dropna(subset=['time/total_timesteps'])
+    return dict(status=info['status'], seed=info['seed'], commit=info['commit'],
+                iterations=int(steps['step'].iloc[-1]) + 1,
+                training_seconds=float(steps['elapsed seconds'].iloc[-1]),
+                total_active_steps=int(steps['time/total_timesteps'].iloc[-1]),
+                max_seconds=config.train_loop.max_seconds,
+                preference_reset_policy='episode' if config.ppo.resample_preferences_on_terminal
+                else 'batch')
 
 
 def compare_runs(root, names=('ppo', 'decomposed_ppo', 'd3po'), *,
@@ -17,33 +35,31 @@ def compare_runs(root, names=('ppo', 'decomposed_ppo', 'd3po'), *,
         suffix = '' if checkpoint == 'last' and mode == 'greedy' else f'_{checkpoint}_{mode}'
         metadata[name] = json.loads((run / f'test_evaluation{suffix}.json').read_text())
         evaluations[name] = metadata[name]['rows']
-        statuses[name] = json.loads((run / 'status.json').read_text())
+        statuses[name] = _run_summary(run)
     keys = [{(r['graph'], r['preference'], r.get('sample', 0)) for r in rows}
             for rows in evaluations.values()]
     if any(k != keys[0] for k in keys[1:]):
         raise ValueError('Evaluation graph/preference grids differ')
-    for field in ('graph_sha256', 'protocol'):
-        values = [m.get(field) for m in metadata.values()]
-        if any(v != values[0] for v in values):
-            raise ValueError(f'Evaluation {field} differs')
-    if len({s['initial_actor_sha256'] for s in statuses.values()}) != 1:
-        raise ValueError('Initial actors differ')
-    if any(s['state'] != 'completed' for s in statuses.values()):
+    protocols = [m.get('protocol') for m in metadata.values()]
+    if any(v != protocols[0] for v in protocols):
+        raise ValueError('Evaluation protocol differs')
+    if any(s['status'] not in ('iterations', 'time_budget') for s in statuses.values()):
         raise ValueError('All runs must complete before comparison')
     if budget_mode == 'transitions':
         if len({s['total_active_steps'] for s in statuses.values()}) != 1:
             raise ValueError('Training interaction budgets differ')
     elif budget_mode == 'wall_time':
-        limits = {s.get('max_seconds') for s in statuses.values()}
+        limits = {s['max_seconds'] for s in statuses.values()}
         if len(limits) != 1 or None in limits or next(iter(limits)) <= 0:
             raise ValueError('Training time budgets differ or are missing')
-        if any(s.get('stop_reason') != 'time_budget' for s in statuses.values()):
+        if any(s['status'] != 'time_budget' for s in statuses.values()):
             raise ValueError('All runs must reach the training time budget')
     else:
         raise ValueError(f'Unknown budget mode: {budget_mode}')
-    if len({s.get('seed') for s in statuses.values()}) != 1:
-        raise ValueError('Training seeds differ')
-    reset_policies = {s.get('preference_reset_policy') for s in statuses.values()}
+    # Same seed and code -> the same initial actor (was a state-dict hash).
+    if len({(s['seed'], s['commit']) for s in statuses.values()}) != 1:
+        raise ValueError('Training seeds or commits differ')
+    reset_policies = {s['preference_reset_policy'] for s in statuses.values()}
     if len(reset_policies) != 1:
         raise ValueError('Preference reset policies differ')
     # New runs store fixed bounds. Keep pooled bounds only for legacy artifacts.
@@ -116,7 +132,7 @@ def compare_runs(root, names=('ppo', 'decomposed_ppo', 'd3po'), *,
         coverage_rule='Weak domination of unique points, computed within each graph',
         checkpoint=checkpoint, evaluation_mode=mode,
         budget='equal environment transitions' if budget_mode == 'transitions' else 'equal training wall time',
-        time_limit_seconds=statuses[names[0]].get('max_seconds') if budget_mode == 'wall_time' else None,
+        time_limit_seconds=statuses[names[0]]['max_seconds'] if budget_mode == 'wall_time' else None,
         stochastic_rule='Mean metrics of independent preference-grid draws; no pooling or best-of-N',
         n_training_seeds=1)
     report['preference_reset_policy'] = next(iter(reset_policies))

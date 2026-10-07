@@ -1,4 +1,3 @@
-import csv
 import pickle
 import math
 import random
@@ -9,6 +8,8 @@ import torch
 from torch_geometric.data import Batch
 from tqdm import tqdm
 
+from .run.logger import flush, log as log_metrics
+from .training.records import EditTrainRecord, EditValRecord
 from .citygraph_dataset import (
     DEMAND_KEY,
     STOP_KEY,
@@ -36,23 +37,19 @@ ROUTE_ACTION_NAMES = {
 ROUTE_ACTION_STAT_NAMES = tuple(ROUTE_ACTION_NAMES.values())
 
 
-def _write_history_checkpoint(history, checkpoint_path):
-    """Atomically persist completed training-history rows as CSV."""
-    if checkpoint_path is None or not history:
-        return None
+_OBJECTIVES = ("demand", "route", "connectivity")
 
-    checkpoint_path = Path(checkpoint_path)
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
-    with temp_path.open("w", newline="", encoding="utf-8") as file:
-        # Periodic evaluation can introduce new tags after the first iteration.
-        fields = list(dict.fromkeys(key for row in history for key in row))
-        writer = csv.DictWriter(file, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(history)
-    temp_path.replace(checkpoint_path)
-    return checkpoint_path
 
+def _edit_val_record(val):
+    """The last validation result (or NaN before the first one)."""
+    nan = float("nan")
+    return EditValRecord(
+        seed_cost=val["seed_cost"], final_cost=val["final_cost"], delta=val["delta"],
+        win_rate=val["win_rate"], changed_route_rate=val["changed_route_rate"],
+        changed_graph_rate=val["changed_graph_rate"],
+        component_delta_demand=val.get("component_delta_demand", nan),
+        component_delta_route=val.get("component_delta_route", nan),
+        component_delta_connectivity=val.get("component_delta_connectivity", nan))
 
 def _trim_route_padding(routes, max_route_len=None):
     """Drop trailing all-padding route columns from a loaded route tensor."""
@@ -1879,9 +1876,7 @@ def train_lc_improvement_cfg_ppo(
         max_trim_actions_per_route=None, train_indices=None, val_indices=None,
         best_model_path=None,
         max_rollout_samples=8192, target_n_routes=None,
-        curriculum_fn=None, val_curriculum_fn=None,
-        history_checkpoint_path=None, tensorboard_logdir=None,
-        tensorboard_scalars=None):
+        curriculum_fn=None, val_curriculum_fn=None, logger_list=()):
     """Train LC improvement with the construction PPO machinery adapted to edits.
 
     ``curriculum_fn(iteration) -> (indices, stage_label)`` optionally restricts
@@ -1902,14 +1897,6 @@ def train_lc_improvement_cfg_ppo(
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    tb_writer = None
-    if tensorboard_logdir is not None:
-        from torch.utils.tensorboard import SummaryWriter
-        tb_writer = SummaryWriter(log_dir=str(tensorboard_logdir))
-        print(f"[tensorboard] logging training metrics to {tensorboard_logdir}\n"
-              f"              view live: tensorboard --logdir "
-              f"{Path(tensorboard_logdir).parent}")
 
     if min_route_len is None:
         min_route_len = int(cfg.eval.min_route_len)
@@ -2097,7 +2084,6 @@ def train_lc_improvement_cfg_ppo(
 
     best_val_cost = float("inf")
     last_val = None
-    history = []
     # Curriculum: active subset of train indices for the current iteration.
     active_train_indices = train_indices
     cur_stage_label = "all"
@@ -2409,97 +2395,46 @@ def train_lc_improvement_cfg_ppo(
             "component_delta_route": float("nan"),
             "component_delta_connectivity": float("nan"),
         }
-        row = {
-            "iteration": iteration + 1,
-            "epoch": iteration + 1,
-            "algorithm": "cfg_ppo_improvement",
-            "target_n_routes": n_routes,
-            "diff_reward": diff_reward,
-            "reward_scale": reward_scale,
-            "discount_rate": gamma,
-            "edit_step_penalty": edit_step_penalty,
-            "forced_halt_penalty": forced_halt_penalty,
-            "max_trim_actions_per_route": max_trim_actions_per_route,
-            "ppo_horizon": int(horizon),
-            "ppo_epochs": int(ppo_epochs),
-            "ppo_minibatch_size": int(minibatch_size),
-            "train_seed_cost": train_seed,
-            "train_final_cost": train_final,
-            "train_delta": train_delta,
-            "train_component_demand_delta": float(component_delta[0]),
-            "train_component_route_delta": float(component_delta[1]),
-            "train_component_connectivity_delta": float(component_delta[2]),
-            "train_reward_mean": active_rewards.mean().item()
+        train = EditTrainRecord(
+            seed_cost=train_seed, final_cost=train_final, delta=train_delta,
+            component_demand_delta=float(component_delta[0]),
+            component_route_delta=float(component_delta[1]),
+            component_connectivity_delta=float(component_delta[2]),
+            reward_mean=active_rewards.mean().item()
                 if active_rewards.numel() > 0 else 0.0,
-            "train_reward_sum": reward_delta_diag["reward_sum"],
-            "train_reward_per_episode":
-                reward_delta_diag["reward_per_episode"],
-            "train_scaled_delta_sum":
-                reward_delta_diag["scaled_delta_sum"],
-            "train_reward_delta_residual":
-                reward_delta_diag["residual"],
-            "train_episode_count": reward_delta_diag["episode_count"],
-            "train_return_mean": active_returns.mean().item()
+            reward_sum=reward_delta_diag["reward_sum"],
+            reward_per_episode=reward_delta_diag["reward_per_episode"],
+            scaled_delta_sum=reward_delta_diag["scaled_delta_sum"],
+            reward_delta_residual=reward_delta_diag["residual"],
+            episode_count=reward_delta_diag["episode_count"],
+            return_mean=active_returns.mean().item()
                 if active_returns.numel() > 0 else 0.0,
-            "train_advantage_mean": active_advantages.mean().item()
+            advantage_mean=active_advantages.mean().item()
                 if active_advantages.numel() > 0 else 0.0,
-            "train_active_sample_count": int(
-                rollout["active_masks"].sum().item()),
-            "train_ppo_ratio_mean": ratio_mean,
-            "train_ppo_clip_fraction": clip_fraction,
-            "train_ppo_objective": ppo_stats["objective"],
-            "train_critic_mse_mean": ppo_stats.get(
-                "critic_mse_mean", float("nan")),
-            "train_critic_explained_variance": ppo_stats.get(
+            active_sample_count=int(rollout["active_masks"].sum().item()),
+            ppo_ratio_mean=ratio_mean, ppo_clip_fraction=clip_fraction,
+            ppo_objective=ppo_stats["objective"],
+            critic_mse_mean=ppo_stats.get("critic_mse_mean", float("nan")),
+            critic_explained_variance=ppo_stats.get(
                 "critic_explained_variance", float("nan")),
-            "curriculum_stage": cur_stage_label,
-            "is_eval_iteration": eval_due,
-            "val_seed_cost": val["seed_cost"],
-            "val_final_cost": val["final_cost"],
-            "val_delta": val["delta"],
-            "val_win_rate": val["win_rate"],
-            "val_changed_route_rate": val["changed_route_rate"],
-            "val_changed_graph_rate": val["changed_graph_rate"],
-            "val_component_delta_demand": val.get(
-                "component_delta_demand", float("nan")),
-            "val_component_delta_route": val.get(
-                "component_delta_route", float("nan")),
-            "val_component_delta_connectivity": val.get(
-                "component_delta_connectivity", float("nan")),
-        }
-        row.update({
-            f"train_action_{key}": value
-            for key, value in train_action_stats.items()
-        })
-        # Full PPO edits one active route slot at a time, so there is no cheap
-        # per-iteration full-route-set change rate. Validation tracks it.
-        row["train_changed_route_rate"] = float("nan")
-        history.append(row)
-        _write_history_checkpoint(history, history_checkpoint_path)
-
-        if tb_writer is not None:
-            _step = int(row.get("iteration", len(history)))
-            for _k, _v in row.items():
-                if tensorboard_scalars is not None and _k not in tensorboard_scalars:
-                    continue
-                if isinstance(_v, bool):
-                    _v = int(_v)
-                if isinstance(_v, (int, float)) and _v == _v:  # skip NaN
-                    tb_writer.add_scalar(_k, float(_v), _step)
-            tb_writer.flush()
+            is_eval_iteration=eval_due, action=dict(train_action_stats),
+            # Full PPO edits one active route slot at a time, so there is no
+            # cheap per-iteration full-route-set change rate. Validation has it.
+            changed_route_rate=float("nan"))
+        val_record = _edit_val_record(val)
 
         # Unified, comparable progress metrics: the per-episode reward is the
         # mean cost reduction over an episode (seed - final), computed the SAME
         # way for train and validation, so train_ep_rew, val_ep_rew and their
-        # gap are directly comparable. (Train is at the per-batch sampled cost
-        # weights / adjustment target; validation at the fixed eval operating
-        # point.) Everything else stays in the history DataFrame for the figure
-        # and TensorBoard, but is kept out of the live line to reduce clutter.
-        _tr_ep = row["train_delta"]
-        _va_ep = row["val_delta"]
+        # gap are directly comparable.
+        _tr_ep = train.delta
+        _va_ep = val_record.delta
         _gap = (_tr_ep - _va_ep
                 if _tr_ep == _tr_ep and _va_ep == _va_ep else float("nan"))
-        row["train_val_gap"] = _gap
+        train.val_gap = _gap
+        log_metrics(logger_list, train, iteration + 1)
+        log_metrics(logger_list, val_record, iteration + 1)
+        flush(logger_list)
         pbar.set_postfix({
             "stage": cur_stage_label,
             "tr_rew": f"{_tr_ep:+.3f}",
@@ -2507,7 +2442,7 @@ def train_lc_improvement_cfg_ppo(
             "gap": f"{_gap:+.3f}",
         })
         print(
-            f"iter={row['iteration']:03d} stage={cur_stage_label:<10} "
+            f"iter={iteration + 1:03d} stage={cur_stage_label:<10} "
             f"train_ep_rew={_tr_ep:+.4f} val_ep_rew={_va_ep:+.4f} "
             f"train_val_gap={_gap:+.4f}"
             + ("  [eval]" if eval_due else "")
@@ -2529,12 +2464,8 @@ def train_lc_improvement_cfg_ppo(
             "targets": ppo_stats["critic_last_targets"].numpy(),
         }
 
-    if tb_writer is not None:
-        tb_writer.close()
-
     return {
         "best_model_path": best_model_path,
-        "history": history,
         "train_indices": train_indices,
         "val_indices": val_indices,
         "critic_snapshot": critic_snapshot,
@@ -2553,8 +2484,7 @@ def train_lc_improvement_cfg_d3po(
         max_trim_actions_per_route=None, train_indices=None, val_indices=None,
         best_model_path=None,
         max_rollout_samples=8192, target_n_routes=None,
-        curriculum_fn=None, val_curriculum_fn=None,
-        history_checkpoint_path=None):
+        curriculum_fn=None, val_curriculum_fn=None, logger_list=()):
     """Train LC improvement with D3PO as a PPO alternative.
 
     Reads shared PPO-style hyperparameters from ``cfg.ppo`` (n_iterations,
@@ -2705,7 +2635,6 @@ def train_lc_improvement_cfg_d3po(
 
     best_val_cost = float("inf")
     last_val = None
-    history = []
     # Curriculum: active subset of train indices for the current iteration.
     active_train_indices = train_indices
     cur_stage_label = "all"
@@ -2899,101 +2828,56 @@ def train_lc_improvement_cfg_d3po(
             float("nan"), float("nan"), float("nan")]
         adv_per_obj = d3po_stats.get("advantage_mean_per_obj") or [
             float("nan"), float("nan"), float("nan")]
-        row = {
-            "iteration": iteration + 1,
-            "epoch": iteration + 1,
-            "algorithm": "cfg_d3po_improvement",
-            "target_n_routes": n_routes,
-            "diff_reward": diff_reward,
-            "reward_scale": reward_scale,
-            "discount_rate": gamma,
-            "edit_step_penalty": edit_step_penalty,
-            "forced_halt_penalty": forced_halt_penalty,
-            "max_trim_actions_per_route": max_trim_actions_per_route,
-            "d3po_horizon": int(horizon),
-            "d3po_epochs": int(d3po_epochs),
-            "d3po_minibatch_size": int(minibatch_size),
-            "d3po_diversity_weight": diversity_weight,
-            "d3po_diversity_alpha": diversity_alpha,
-            "d3po_preference_noise_sigma": preference_noise_sigma,
-            "train_seed_cost": train_seed,
-            "train_final_cost": train_final,
-            "train_delta": train_delta,
-            "train_component_demand_delta": float(component_delta[0]),
-            "train_component_route_delta": float(component_delta[1]),
-            "train_component_connectivity_delta": float(component_delta[2]),
-            "train_reward_mean": scalar_rewards.mean().item()
+        train = EditTrainRecord(
+            seed_cost=train_seed, final_cost=train_final, delta=train_delta,
+            component_demand_delta=float(component_delta[0]),
+            component_route_delta=float(component_delta[1]),
+            component_connectivity_delta=float(component_delta[2]),
+            reward_mean=scalar_rewards.mean().item()
                 if scalar_rewards.numel() > 0 else 0.0,
-            "train_return_mean": scalar_returns.mean().item()
+            return_mean=scalar_returns.mean().item()
                 if scalar_returns.numel() > 0 else 0.0,
-            "train_advantage_mean": scalar_advantages.mean().item()
+            advantage_mean=scalar_advantages.mean().item()
                 if scalar_advantages.numel() > 0 else 0.0,
-            "train_return_mean_demand": float(return_per_obj[0]),
-            "train_return_mean_route": float(return_per_obj[1]),
-            "train_return_mean_connectivity": float(return_per_obj[2]),
-            "train_advantage_mean_demand": float(adv_per_obj[0]),
-            "train_advantage_mean_route": float(adv_per_obj[1]),
-            "train_advantage_mean_connectivity": float(adv_per_obj[2]),
-            "train_active_sample_count": int(
-                rollout["active_masks"].sum().item()),
-            "train_d3po_ratio_mean": ratio_mean,
-            "train_d3po_clip_fraction": clip_fraction,
-            "train_d3po_objective": d3po_stats["objective"],
-            "train_d3po_diversity_loss": d3po_stats["diversity_loss"],
-            "train_critic_mse_mean": d3po_stats.get(
-                "critic_mse_mean", float("nan")),
-            "train_critic_mse_demand": float(critic_mse_per_obj[0]),
-            "train_critic_mse_route": float(critic_mse_per_obj[1]),
-            "train_critic_mse_connectivity": float(critic_mse_per_obj[2]),
-            "train_critic_explained_variance_demand": float(
-                critic_ev_per_obj[0]),
-            "train_critic_explained_variance_route": float(
-                critic_ev_per_obj[1]),
-            "train_critic_explained_variance_connectivity": float(
-                critic_ev_per_obj[2]),
-            "is_eval_iteration": eval_due,
-            "val_seed_cost": val["seed_cost"],
-            "val_final_cost": val["final_cost"],
-            "val_delta": val["delta"],
-            "val_win_rate": val["win_rate"],
-            "val_changed_route_rate": val["changed_route_rate"],
-            "val_changed_graph_rate": val["changed_graph_rate"],
-            "val_component_delta_demand": val.get(
-                "component_delta_demand", float("nan")),
-            "val_component_delta_route": val.get(
-                "component_delta_route", float("nan")),
-            "val_component_delta_connectivity": val.get(
-                "component_delta_connectivity", float("nan")),
-        }
-        row.update({
-            f"train_action_{key}": value
-            for key, value in train_action_stats.items()
-        })
-        row["train_changed_route_rate"] = float("nan")
-        history.append(row)
-        _write_history_checkpoint(history, history_checkpoint_path)
+            return_mean_by_objective=dict(zip(_OBJECTIVES, map(float, return_per_obj))),
+            advantage_mean_by_objective=dict(zip(_OBJECTIVES, map(float, adv_per_obj))),
+            active_sample_count=int(rollout["active_masks"].sum().item()),
+            d3po_ratio_mean=ratio_mean, d3po_clip_fraction=clip_fraction,
+            d3po_objective=d3po_stats["objective"],
+            d3po_diversity_loss=d3po_stats["diversity_loss"],
+            critic_mse_mean=d3po_stats.get("critic_mse_mean", float("nan")),
+            critic_mse_by_objective=dict(zip(_OBJECTIVES, map(float, critic_mse_per_obj))),
+            critic_explained_variance_by_objective=dict(
+                zip(_OBJECTIVES, map(float, critic_ev_per_obj))),
+            is_eval_iteration=eval_due, action=dict(train_action_stats),
+            changed_route_rate=float("nan"))
+        val_record = _edit_val_record(val)
+        log_metrics(logger_list, train, iteration + 1)
+        log_metrics(logger_list, val_record, iteration + 1)
+        flush(logger_list)
 
         pbar.set_postfix({
-            "reward": f"{row['train_reward_mean']:.3f}",
-            "delta": f"{row['train_delta']:.3f}",
-            "ratio": f"{row['train_d3po_ratio_mean']:.3f}",
-            "clip": f"{row['train_d3po_clip_fraction']:.2%}",
+            "reward": f"{train.reward_mean:.3f}",
+            "delta": f"{train.delta:.3f}",
+            "ratio": f"{train.d3po_ratio_mean:.3f}",
+            "clip": f"{train.d3po_clip_fraction:.2%}",
         })
+        action = train.action
         print(
-            f"cfg_d3po_iter={row['iteration']:03d} "
-            f"reward={row['train_reward_mean']:.4f} "
-            f"train_delta={row['train_delta']:.4f} "
-            f"val_delta={row['val_delta']:.4f} "
-            f"ratio={row['train_d3po_ratio_mean']:.3f} "
-            f"clip={row['train_d3po_clip_fraction']:.2%} "
-            f"div={row['train_d3po_diversity_loss']:.4f} "
+            f"cfg_d3po_iter={iteration + 1:03d} "
+            f"reward={train.reward_mean:.4f} "
+            f"train_delta={train.delta:.4f} "
+            f"val_delta={val_record.delta:.4f} "
+            f"ratio={train.d3po_ratio_mean:.3f} "
+            f"clip={train.d3po_clip_fraction:.2%} "
+            f"div={train.d3po_diversity_loss:.4f} "
             f"actions="
-            f"ext:{row['train_action_extend_count']} "
-            f"trim_s:{row['train_action_trim_start_count']} "
-            f"trim_e:{row['train_action_trim_end_count']} "
-            f"halt:{row['train_action_halt_count']} "
-            f"avg_steps={row['train_action_avg_actions_per_route']:.2f} "
-            f"eval={row['is_eval_iteration']}"
+            f"ext:{action['extend_count']} "
+            f"trim_s:{action['trim_start_count']} "
+            f"trim_e:{action['trim_end_count']} "
+            f"halt:{action['halt_count']} "
+            f"avg_steps={action['avg_actions_per_route']:.2f} "
+            f"eval={eval_due}"
         )
         # Do not keep the previous rollout reachable while collecting the
         # next one. This matters especially when rollout states stay on GPU.
@@ -3015,7 +2899,6 @@ def train_lc_improvement_cfg_d3po(
 
     return {
         "best_model_path": best_model_path,
-        "history": history,
         "train_indices": train_indices,
         "val_indices": val_indices,
         "critic_snapshot": critic_snapshot,

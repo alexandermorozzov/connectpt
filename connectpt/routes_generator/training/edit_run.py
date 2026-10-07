@@ -10,9 +10,11 @@ the (generated) dataset or running the long PPO loop -- the smoke check used by
 """
 from __future__ import annotations
 
-from ..core.checkpoints import CheckpointStore
-from ..core.paths import DATASETS_DIR, resolve_weights_path
-from ..core.runtime import RunContext
+from ..run.checkpoints import CheckpointStore
+from ..run.context import DATASETS_DIR, resolve_weights_path
+from ..run.context import RunContext
+from ..run.schemas import (CurriculumParams, EditDatasetParams, TrainingPaths,
+                           TrainingRunParams, params)
 from ..model_factory import RouteModelFactory
 from ..objectives import CostFactory
 from .edit_ppo_trainer import EditPPOTrainer
@@ -23,10 +25,13 @@ from .training_data import TrainingDataModule
 class EditTrainingRun(ExperimentRun):
     def setup(self) -> None:
         cfg = self.cfg
-        self.context = RunContext.create(
-            cfg.run.name, cfg.paths.output_dir,
-            seed=int(cfg.run.seed), cpu=bool(cfg.run.get("cpu", False)),
-        )
+        self.run_params = params(TrainingRunParams, cfg.run)
+        self.paths = params(TrainingPaths, cfg.paths)
+        self.dataset = params(EditDatasetParams, cfg.dataset)
+        self.curriculum = params(CurriculumParams, cfg.curriculum)
+        run = self.run_params
+        self.context = RunContext.create(run.name, self.paths.output_dir,
+                                         seed=run.seed, cpu=run.cpu)
         device = self.context.device
 
         # model -- built through the factory; never wrapped, so strict-load holds
@@ -34,14 +39,11 @@ class EditTrainingRun(ExperimentRun):
         self.model.to(device)
 
         # optional warm-start checkpoint
-        init_ckpt = cfg.paths.get("init_checkpoint_path")
-        if init_ckpt:
+        if self.paths.init_checkpoint_path:
             CheckpointStore.load_model_weights(
                 self.model,
-                resolve_weights_path(init_ckpt, cfg.paths.get("weights_dir")),
-                strict=bool(cfg.get("checkpoint", {}).get("strict_load", True)),
-                map_location=device,
-            )
+                resolve_weights_path(self.paths.init_checkpoint_path, self.paths.weights_dir),
+                strict=True, map_location=device)
 
         # cost -- everything (weights, connectivity, adjustment, sampling
         # fractions) comes from cfg.experiment.cost_function
@@ -52,45 +54,42 @@ class EditTrainingRun(ExperimentRun):
         self.cost_obj.to(device)
 
         # data module (not loaded yet -- loading happens in run())
-        dataset_dir = DATASETS_DIR / cfg.dataset.dataset_dirname
+        dataset_dir = DATASETS_DIR / self.dataset.dataset_dirname
         self.data = TrainingDataModule(
             raw_graphs_path=dataset_dir / "raw_graphs_1000.pkl",
             lc_results_dir=dataset_dir,
             device=device,
-            min_route_len=int(cfg.dataset.min_route_len),
-            max_route_len=int(cfg.dataset.max_route_len),
-            target_n_routes=cfg.dataset.get("target_n_routes"),
+            min_route_len=self.dataset.min_route_len,
+            max_route_len=self.dataset.max_route_len,
+            target_n_routes=self.dataset.target_n_routes,
         )
 
         # Resolve against the weights root (CWD-independent; the notebook runs
         # from examples/route_generator) and ensure the dir exists -- the PPO
         # loop's intermediate best-checkpoint torch.save does not create it.
-        self.best_path = resolve_weights_path(cfg.paths.checkpoint_path,
-                                              cfg.paths.get("weights_dir"))
+        self.best_path = resolve_weights_path(self.paths.checkpoint_path,
+                                              self.paths.weights_dir)
         self.best_path.parent.mkdir(parents=True, exist_ok=True)
         self.trainer = EditPPOTrainer(
             cfg=cfg, model=self.model, cost_obj=self.cost_obj,
-            data_module=self.data, run_name=cfg.run.name,
-            output_dir=self.context.output_dir, device=device,
+            data_module=self.data, dataset=self.dataset, seed=run.seed,
+            run_name=run.name, output_dir=self.context.output_dir, device=device,
             best_model_path=self.best_path,
         )
+        self.run_dir = self.context.output_dir
 
     def _build_curriculum(self):
         """Build (train_idx, val_idx, curriculum_fn, val_curriculum_fn) from the
-        cfg.curriculum block (config-driven; replaces the notebook's inline tier
-        split + CURRICULUM schedule). Returns Nones when no curriculum is set."""
-        cur = self.cfg.get("curriculum")
-        if not cur:
-            return None, None, None, None
+        curriculum group: split by tier, then the stage schedule."""
+        cur = self.curriculum
         import pandas as pd
-        dataset_dir = DATASETS_DIR / self.cfg.dataset.dataset_dirname
+        dataset_dir = DATASETS_DIR / self.dataset.dataset_dirname
         meta = pd.read_csv(dataset_dir / "meta.csv")
         tier_of = dict(zip(meta["graph_index"].astype(int), meta["tier"]))
         tiers = list(cur.tiers)
         train_idx, val_idx, _monitor, train_by_tier, val_by_tier = self.data.stratified_split(
-            tier_of, tiers, train_fraction=float(self.cfg.dataset.train_fraction),
-            n_val_per_tier=int(cur.get("n_val_per_tier", 4)),
-            seed=int(self.cfg.dataset.split_seed))
+            tier_of, tiers, train_fraction=self.dataset.train_fraction,
+            n_val_per_tier=cur.n_val_per_tier, seed=self.dataset.split_seed)
         n_iter = int(self.cfg.get("train_loop", {}).get("n_iterations",
                                                         self.cfg.ppo.n_iterations))
         schedule = [(round(float(frac) * n_iter), list(t), label)
@@ -98,28 +97,26 @@ class EditTrainingRun(ExperimentRun):
         cfn, vfn = self.data.build_curriculum(schedule, train_by_tier, val_by_tier)
         return train_idx, val_idx, cfn, vfn
 
-    def run(self, *, dry_run: bool = False) -> TrainingArtifact:
-        self.setup()
-        if dry_run:
-            return TrainingArtifact(
-                run_name=self.cfg.run.name,
-                output_dir=self.context.output_dir,
-                metadata={"dry_run": True,
-                          "model_class": type(self.model).__name__,
-                          "dataset_dir": str(DATASETS_DIR / self.cfg.dataset.dataset_dirname)},
-            )
+    def dry_run_artifact(self) -> TrainingArtifact:
+        return TrainingArtifact(
+            run_name=self.run_params.name,
+            output_dir=self.context.output_dir,
+            metadata={"dry_run": True,
+                      "model_class": type(self.model).__name__,
+                      "dataset_dir": str(DATASETS_DIR / self.dataset.dataset_dirname)},
+        )
 
+    def execute(self) -> TrainingArtifact:
         self.data.setup()
         train_idx, val_idx, curriculum_fn, val_curriculum_fn = self._build_curriculum()
-        history = self.trainer.fit(
-            train_indices=train_idx, val_indices=val_idx,
+        self.trainer.fit(
+            logger_list=self.logger_list, train_indices=train_idx, val_indices=val_idx,
             curriculum_fn=curriculum_fn, val_curriculum_fn=val_curriculum_fn)
 
         CheckpointStore.save_model_weights(self.model, self.best_path, cfg=self.cfg)
         return TrainingArtifact(
-            run_name=self.cfg.run.name,
+            run_name=self.run_params.name,
             output_dir=self.context.output_dir,
             checkpoint_path=self.best_path,
-            history=history,
             metadata={"model_class": type(self.model).__name__},
         )

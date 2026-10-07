@@ -21,6 +21,9 @@ from .transit_time_estimator import (COST_WEIGHT_KEY_ORDER,
 from . import utils as lrnu
 from .models import FeatureNorm, get_mlp, WEIGHT_FEATURE_KEYS
 from .eval_route_generator import eval_model
+from .run.logger import log as log_metrics
+from .training.records import (ConstructionRolloutRecord, ConstructionTrainRecord,
+                               DataCounts, ValidationRecord)
 
 
 class NNBaseline:
@@ -250,29 +253,8 @@ class NNBaseline:
 
         return baseline.detach()
     
-    def get_baseline(self, graph_data, n_routes, cost_weights, state_vecs,
-                     sumwriter=None, n_eps=None):
-        # set up the input data
-        assert self._curr_estimate is None, "Baseline estimate already exists!"
-        
-        input_data = self.inputs_from_data(graph_data, cost_weights)
-        # add extra features and batch dimension for the numbers of routes
-        input_data = input_data[:, None].repeat(1, state_vecs.shape[-2], 1)
-        input_data[..., -state_vecs.shape[-1]:] = state_vecs
-        
-        baseline = self.model(input_data).squeeze(-1)
-        self._curr_estimate = baseline
-
-        sumwriter.add_scalar("baseline", baseline.mean(), n_eps)
-        sumwriter.add_scalar("baseline std", baseline.std(), n_eps)
-
-        assert baseline.isfinite().all()
-
-        return baseline.detach()
-    
-
-def eval_model_over_nroutes(model, eval_dl, n_routes_range, eval_cfg, cost_obj, 
-                            sumwriter=None, n_eps=0, n_samples=None, 
+def eval_model_over_nroutes(model, eval_dl, n_routes_range, eval_cfg, cost_obj,
+                            logger_list=(), n_eps=0, n_samples=None,
                             silent=False, device=None):
     # evaluate the model over a variety of n_routes, and take the mean
     eval_costs = []
@@ -296,25 +278,14 @@ def eval_model_over_nroutes(model, eval_dl, n_routes_range, eval_cfg, cost_obj,
         eval_cfg.n_routes = cached_eval_n_routes
 
     mean_eval_cost = sum(eval_costs) / len(eval_costs)
-    if sumwriter is not None:
-        sumwriter.add_scalar("val cost", mean_eval_cost, n_eps)
-        sumwriter.add_scalar('validation/cost', mean_eval_cost, n_eps)
-        for metric_name in ['ATT', 'RTT', '$d_{un}$', 
-                            '# disconnected node pairs', 'median_connectivity', 'median_connectivity_weighted']:
-            mean_value = all_metrics[metric_name].mean()
-            sumwriter.add_scalar(f"val {metric_name}", mean_value, n_eps)
-            if metric_name in ('ATT', 'RTT'):
-                sumwriter.add_scalar(f'validation/{metric_name.lower()}_minutes', mean_value, n_eps)
+    log_metrics(logger_list, ValidationRecord(
+        cost=mean_eval_cost, att=all_metrics['ATT'].mean(), rtt=all_metrics['RTT'].mean(),
+        d_un=all_metrics['$d_{un}$'].mean(),
+        disconnected_pairs=all_metrics['# disconnected node pairs'].mean(),
+        median_connectivity=all_metrics['median_connectivity'].mean(),
+        wmc=all_metrics['median_connectivity_weighted'].mean()), n_eps)
 
     return mean_eval_cost
-
-
-class DummySummaryWriter:
-    def add_scalar(self, *args, **kwargs):
-        pass
-
-    def add_text(self, *args, **kwargs):
-        pass
 
 
 def _collect_episode_statistics(rewards, dones, reward_sums, lengths):
@@ -332,7 +303,7 @@ def _collect_episode_statistics(rewards, dones, reward_sums, lengths):
 
 def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
               train_dataloader, val_dataloader, cost_obj, eval_fn, 
-              return_scale=1, sumwriter=None, device=None, 
+              return_scale=1, logger_list=(), device=None, 
               checkpoint_dir=None, algorithm='ppo',
               max_seconds=None, iteration_callback=None, evaluation_callback=None):
     if algorithm not in ('ppo', 'decomposed_ppo', 'd3po'):
@@ -360,10 +331,6 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
     assert (cfg.ppo.horizon * batch_size) % cfg.ppo.minibatch_size == 0, \
         "minibatch size must wholly divide the number of samples per epoch"
 
-    if sumwriter is None:
-        # instantiate a dummy summary writer so that the calls to it still work
-        sumwriter = DummySummaryWriter()
-    
     # set up neural network baseline
     critic_kwargs = dict(learning_rate=cfg.baseline_lr, device=device,
                          weight_feature_keys=model.weight_feature_keys,
@@ -402,9 +369,9 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
             if iteration == 0 and calibrate_first:
                 # Calibrate first, then score the frozen actor that is actually
                 # saved as best_model and used by subsequent validation.
-                eval_fn(model, val_dataloader, None, pbar.n)
+                eval_fn(model, val_dataloader, (), pbar.n)
                 model.update_and_freeze_feature_norms()
-            avg_val_cost = eval_fn(model, val_dataloader, sumwriter, pbar.n)
+            avg_val_cost = eval_fn(model, val_dataloader, logger_list, pbar.n)
             if iteration == 0 and not calibrate_first:
                 # Original order: one validation pass, then freeze its norms.
                 model.update_and_freeze_feature_norms()
@@ -558,16 +525,17 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
             weights = torch.stack([cost_obj.get_preference_weights(ss, normalize=True)[:, objective_indices]
                                    for ss in buf_states]).to(device)
             scalar_rewards = (buf_rewards * weights).sum(-1)
-            sumwriter.add_scalar("avg return", scalar_rewards.mean(), pbar.n)
-            sumwriter.add_scalar("baseline", (buf_val_ests * weights).sum(-1).mean(), pbar.n)
-            for oi, ci in enumerate(objective_indices):
-                name = ('ATT', 'RTT', 'connectivity')[ci]
-                sumwriter.add_scalar(f"avg return {name}", buf_rewards[..., oi].mean(), pbar.n)
-                sumwriter.add_scalar(f"baseline {name}", buf_val_ests[..., oi].mean(), pbar.n)
+            names = [('ATT', 'RTT', 'connectivity')[ci] for ci in objective_indices]
+            log_metrics(logger_list, ConstructionRolloutRecord(
+                avg_return=scalar_rewards.mean(),
+                baseline=(buf_val_ests * weights).sum(-1).mean(),
+                avg_return_by_objective={n: buf_rewards[..., oi].mean() for oi, n in enumerate(names)},
+                baseline_by_objective={n: buf_val_ests[..., oi].mean() for oi, n in enumerate(names)}),
+                pbar.n)
         else:
             scalar_rewards = buf_rewards
-            sumwriter.add_scalar("avg return", buf_rewards.mean(), pbar.n)
-            sumwriter.add_scalar("baseline", buf_val_ests.mean(), pbar.n)
+            log_metrics(logger_list, ConstructionRolloutRecord(
+                avg_return=buf_rewards.mean(), baseline=buf_val_ests.mean()), pbar.n)
         completed_rewards, completed_lengths = _collect_episode_statistics(
             scalar_rewards, done_at_step_mask, episode_reward_sums, episode_lengths)
         update_metrics = []
@@ -590,15 +558,15 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
                 diversity_alpha=float(dcfg.diversity_alpha),
                 preference_noise_sigma=float(dcfg.preference_noise_sigma),
                 normalize_advantages_per_objective=bool(dcfg.normalize_advantages_per_objective))
-            stats = {'objective': d3po_stats['objective'],
-                     'entropy': d3po_stats['entropy'],
-                     'initial ratio error': d3po_stats['initial_ratio_error'],
-                     'value loss': d3po_stats['critic_mse_mean'],
-                     'clip fraction': d3po_stats['clipped_count'] / max(d3po_stats['ratio_count'], 1),
-                     'diversity loss': d3po_stats['diversity_loss']}
-            for oi, value in enumerate(d3po_stats['critic_explained_variance_per_obj'] or []):
-                sumwriter.add_scalar(f'critic explained variance {oi}', value, iteration)
-                stats[f'critic/explained_variance_{("att", "rtt", "connectivity")[objective_indices[oi]]}'] = value
+            record = ConstructionTrainRecord(
+                objective=d3po_stats['objective'], entropy=d3po_stats['entropy'],
+                initial_ratio_error=d3po_stats['initial_ratio_error'],
+                value_loss=d3po_stats['critic_mse_mean'],
+                clip_fraction=d3po_stats['clipped_count'] / max(d3po_stats['ratio_count'], 1),
+                diversity_loss=d3po_stats['diversity_loss'],
+                explained_variance_by_objective={
+                    ('att', 'rtt', 'connectivity')[objective_indices[oi]]: value
+                    for oi, value in enumerate(d3po_stats['critic_explained_variance_per_obj'] or [])})
         else:
             # train on the rolled-out episodes
             train_orders = [torch.randperm(len(buf_states), device=device)
@@ -664,14 +632,15 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
                     float(((ratios.detach() - 1).abs() > epsilon).float().mean()),
                     ratio_error])
 
-            means = np.mean(update_metrics, axis=0)
-            stats = dict(zip(('route obj', 'objective', 'entropy', 'value loss',
-                              'clip fraction'), means[:5].tolist()))
-            stats['initial ratio error'] = update_metrics[0][-1]
+            means = np.mean(update_metrics, axis=0).tolist()
             targets = torch.cat(critic_targets)
             residuals = targets - torch.cat(critic_values)
             variance = targets.var(unbiased=False)
-            stats['critic/explained_variance'] = float(1-residuals.var(unbiased=False)/variance) if variance > 0 else float('nan')
+            record = ConstructionTrainRecord(
+                route_obj=means[0], objective=means[1], entropy=means[2], value_loss=means[3],
+                clip_fraction=means[4], initial_ratio_error=update_metrics[0][-1],
+                explained_variance=float(1-residuals.var(unbiased=False)/variance)
+                if variance > 0 else float('nan'))
 
         # save a checkpoint every val period
         if checkpoint_dir is not None and iteration % cfg.ppo.val_period == 0:
@@ -680,42 +649,32 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
 
         pbar.update(1)
         completed_iterations = iteration + 1
-        stats['train seconds'] = time.monotonic() - iteration_started
-        stats['elapsed seconds'] = time.monotonic() - started
-        stats['env transitions'] = completed_iterations * horizon * batch_size
-        stats['graph instances loaded'] = graph_instances_loaded
-        stats['graph batches loaded'] = graph_batches_loaded
-        stats['completed networks'] = int(done_at_step_mask.sum())
-        # No finished episodes means no measured mean, rather than zero or a
-        # stale value carried forward by MetricWriter into the CSV.
-        stats['mean episode reward'] = float(completed_rewards.mean()) if completed_rewards.numel() else float('nan')
-        stats['mean episode length'] = float(completed_lengths.float().mean()) if completed_lengths.numel() else float('nan')
-        stats['return target mean'] = float(buf_returns.mean())
-        stats['train/reward'] = stats['mean episode reward']
-        stats['train/episode_length'] = stats['mean episode length']
-        stats['train/step_reward'] = float(scalar_rewards.mean())
-        stats['train/completed_networks'] = stats['completed networks']
+        record.train_seconds = time.monotonic() - iteration_started
+        record.elapsed_seconds = time.monotonic() - started
+        record.env_transitions = record.total_timesteps = completed_iterations * horizon * batch_size
+        record.graph_instances_loaded = graph_instances_loaded
+        record.graph_batches_loaded = graph_batches_loaded
+        record.completed_networks = int(done_at_step_mask.sum())
+        # No finished episodes means no measured mean, not zero.
+        record.mean_episode_reward = float(completed_rewards.mean()) if completed_rewards.numel() else float('nan')
+        record.mean_episode_length = float(completed_lengths.float().mean()) if completed_lengths.numel() else float('nan')
+        record.return_target_mean = float(buf_returns.mean())
+        record.step_reward = float(scalar_rewards.mean())
         for key, values in terminal_metrics.items():
             if key != 'alpha':
-                stats[f'train/{key}'] = float(torch.cat(values).mean()) if values else float('nan')
+                setattr(record, key, float(torch.cat(values).mean()) if values else float('nan'))
         alpha = torch.cat(terminal_metrics['alpha']) if terminal_metrics['alpha'] else None
-        stats['train/completed_alpha_mean'] = float(alpha.mean()) if alpha is not None else float('nan')
+        record.completed_alpha_mean = float(alpha.mean()) if alpha is not None else float('nan')
         for name, condition in (('alpha_0', lambda a: a == 0), ('alpha_1', lambda a: a == 1),
                                 ('alpha_intermediate', lambda a: (a > 0) & (a < 1))):
-            stats[f'train/completed_{name}_fraction'] = float(condition(alpha).float().mean()) if alpha is not None else float('nan')
-        stats['ppo/clip_fraction'] = stats['clip fraction']
-        stats['critic/value_loss'] = stats['value loss']
-        stats['performance/iteration_seconds'] = stats['train seconds']
-        stats['performance/env_transitions'] = stats['env transitions']
-        if 'entropy' in stats:
-            stats['ppo/entropy'] = stats['entropy']
-        for key, value in stats.items():
-            sumwriter.add_scalar(key, value, iteration)
+            setattr(record, f'completed_{name}_fraction',
+                    float(condition(alpha).float().mean()) if alpha is not None else float('nan'))
+        log_metrics(logger_list, record, iteration)
         if iteration_callback is not None:
-            iteration_callback(completed_iterations, stats, model, val_module, optimizer)
+            iteration_callback(completed_iterations, record, model, val_module, optimizer)
 
     # final eval
-    avg_val_cost = eval_fn(model, val_dataloader, sumwriter, pbar.n)
+    avg_val_cost = eval_fn(model, val_dataloader, logger_list, pbar.n)
     if evaluation_callback is not None:
         evaluation_callback(model, val_dataloader, pbar.n, final=True)
     if avg_val_cost < best_val_cost:
@@ -744,10 +703,10 @@ def train_decomposed_ppo(*args, **kwargs):
 
 def setup_and_train(cfg: DictConfig, *,
                     model=None, cost_obj=None, device=None, run_name=None,
-                    sum_writer=None, output_dir=None, iteration_callback=None,
+                    logger_list=(), output_dir=None, iteration_callback=None,
                     return_training_result=False):
     if model is None:
-        device, run_name, sum_writer, cost_obj, model = \
+        device, run_name, _, cost_obj, model = \
             lrnu.process_standard_experiment_cfg(cfg, 'inductive_')
     # model always has legal route lengths by construction, so we don't need
      # to penalize it for illegal routes
@@ -792,10 +751,9 @@ def setup_and_train(cfg: DictConfig, *,
         val_ds = [val_ds[i] for i in validation_indices]
         val_batch_size = min(val_batch_size, len(val_ds))
     val_dl = DataLoader(val_ds, batch_size=val_batch_size)
-    if sum_writer is not None:
-        if cfg.dataset.type != 'dynamic':
-            sum_writer.add_scalar('training graph count', len(train_ds), 0)
-        sum_writer.add_scalar('validation graph count', len(val_ds), 0)
+    log_metrics(logger_list, DataCounts(
+        training_graphs=len(train_ds) if cfg.dataset.type != 'dynamic' else None,
+        validation_graphs=len(val_ds)), 0)
 
     # run training
     model.to(device)
@@ -809,9 +767,9 @@ def setup_and_train(cfg: DictConfig, *,
         eval_n_routes = [eval_n_routes]
         
     # define evaluation function
-    eval_fn = lambda mm, dd, sw, ne: \
-        eval_model_over_nroutes(mm, dd, eval_n_routes, cfg.eval, val_cost_obj, 
-                                sw, ne, n_samples=1, silent=True, device=device)
+    eval_fn = lambda mm, dd, loggers, ne: \
+        eval_model_over_nroutes(mm, dd, eval_n_routes, cfg.eval, val_cost_obj,
+                                loggers, ne, n_samples=1, silent=True, device=device)
 
     if output_dir is not None:
         output_dir = Path(output_dir)
@@ -826,9 +784,7 @@ def setup_and_train(cfg: DictConfig, *,
     evaluation_callback = None
     if evaluation_cfg.get('pareto_enabled', False):
         from .training.construction_experiment import evaluate_pareto
-        from .core.artifacts import ArtifactStore
-        if sum_writer is None:
-            raise ValueError('Pareto monitoring requires a TensorBoard writer')
+        from .run.artifacts import ArtifactStore
         if int(evaluation_cfg.pareto_period) < 1:
             raise ValueError('evaluation.pareto_period must be positive')
         ArtifactStore(output_dir).save_json(dict(indices=validation_indices,
@@ -839,7 +795,7 @@ def setup_and_train(cfg: DictConfig, *,
         def evaluation_callback(actor, loader, step, final=False):
             if final or step % int(evaluation_cfg.pareto_period) == 0:
                 evaluate_pareto(actor, loader.dataset, cfg, cost_obj, output_dir,
-                                device, sum_writer, step)
+                                device, logger_list, step)
 
     min_n_routes = min(eval_n_routes)
     max_n_routes = max(eval_n_routes)
@@ -851,7 +807,7 @@ def setup_and_train(cfg: DictConfig, *,
                 'decomposed_ppo': train_decomposed_ppo}[cfg.trainer]
     best_model, best_cost = train_fn(
         model, min_n_routes, max_n_routes, cfg, optimizer, train_dl,
-        val_dl, cost_obj, eval_fn, sumwriter=sum_writer, device=device,
+        val_dl, cost_obj, eval_fn, logger_list=logger_list, device=device,
         checkpoint_dir=checkpoint_dir,
         max_seconds=cfg.get('train_loop', {}).get('max_seconds'),
         return_scale=float(cfg.get('reward_scale', 1.0)),

@@ -177,8 +177,8 @@ def _revisit_seeded_routes(model, state, revisit_routes, greedy=False):
     return state
 
 
-def eval_model(model, eval_dataloader, eval_cfg, cost_obj, sum_writer=None, 
-               iter_num=0, n_samples=None, silent=False, 
+def eval_model(model, eval_dataloader, eval_cfg, cost_obj,
+               n_samples=None, silent=False, 
                sample_batch_size=None, return_routes=False, device=None,
                init_cfg=None, routes_tensor=None, current_routes_tensor=None,
                revisit_routes_tensor=None):
@@ -219,9 +219,8 @@ def eval_model(model, eval_dataloader, eval_cfg, cost_obj, sum_writer=None,
             )
             return sampled_state, None
     cost, _, unserved_demand, metrics, routes = \
-        lrnu.test_method(method_fn, eval_dataloader, eval_cfg, init_cfg, cost_obj, 
-                         sum_writer, device=device, silent=silent, 
-                         iter_num=iter_num, return_routes=True,
+        lrnu.test_method(method_fn, eval_dataloader, eval_cfg, init_cfg, cost_obj,
+                         device=device, silent=silent, return_routes=True,
                          routes_tensor=routes_tensor)
     if return_routes:
         routes = get_batch_tensor_from_routes(routes)

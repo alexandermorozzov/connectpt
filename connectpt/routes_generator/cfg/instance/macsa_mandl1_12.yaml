@@ -3,3 +3,4 @@ path: datasets/instances/macsa_mandl1_12
 n_routes: 12
 min_route_len: 3
 max_route_len: 7
+crs: null

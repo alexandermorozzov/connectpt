@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 from hydra import compose, initialize_config_dir
 
-from connectpt.routes_generator.core.paths import CFG_DIR
+from connectpt.routes_generator.run.context import CFG_DIR
 from connectpt.routes_generator.citygraph_dataset import DynamicCityGraphDataset
 from connectpt.routes_generator.model_factory import RouteModelFactory
 from connectpt.routes_generator.objectives import CostFactory
@@ -124,33 +124,41 @@ def test_three_way_comparison_separates_conditioned_utility_and_archive():
                      att_norm=x, rtt_norm=y, feasible=True, unserved_fraction=0)
                 for w, x, y in [(0., 1., 5.), (1., 5., 1.)]]
         (run / 'test_evaluation.json').write_text(json.dumps({'rows': rows}))
-        status = dict(state='completed', initial_actor_sha256='same', total_active_steps=2048,
-                      seed=42, iterations=1, training_seconds=1)
-        (run / 'status.json').write_text(json.dumps(status))
+        write_run(run, status='iterations', timesteps=2048, max_seconds=None)
     report = compare_runs(tmp_path)
     assert report['summary']['ppo']['eu_conditioned_penalized'] == -5.
     assert report['summary']['ppo']['eu_archive_penalized'] > -5.
+    assert report['summary']['ppo']['active_steps'] == 2048
+    assert report['summary']['ppo']['iterations'] == 2
     assert len(report['paired_differences']) == 3
     assert not list(tmp_path.rglob('*.md'))
-    path = tmp_path / 'runs/d3po/status.json'
-    status['total_active_steps'] = 1024
-    path.write_text(json.dumps(status))
+    write_run(tmp_path / 'runs/d3po', status='iterations', timesteps=1024, max_seconds=None)
     with pytest.raises(ValueError, match='budgets differ'):
         compare_runs(tmp_path)
     for name in ('ppo', 'decomposed_ppo', 'd3po'):
-        path = tmp_path / 'runs' / name / 'status.json'
-        row = json.loads(path.read_text())
-        row.update(max_seconds=14400, stop_reason='time_budget')
-        path.write_text(json.dumps(row))
+        write_run(tmp_path / 'runs' / name, status='time_budget', timesteps=2048, max_seconds=14400)
     report = compare_runs(tmp_path, names=('ppo', 'd3po'), budget_mode='wall_time')
     assert set(report['summary']) == {'ppo', 'd3po'}
     assert report['budget'] == 'equal training wall time'
     assert report['time_limit_seconds'] == 14400
-    path = tmp_path / 'runs/d3po/status.json'
-    row.update(max_seconds=7200)
-    path.write_text(json.dumps(row))
+    write_run(tmp_path / 'runs/d3po', status='time_budget', timesteps=2048, max_seconds=7200)
     with pytest.raises(ValueError, match='time budgets differ'):
         compare_runs(tmp_path, names=('ppo', 'd3po'), budget_mode='wall_time')
+    write_run(tmp_path / 'runs/d3po', status='time_budget', timesteps=2048, max_seconds=14400,
+              commit='other')
+    with pytest.raises(ValueError, match='seeds or commits differ'):
+        compare_runs(tmp_path, names=('ppo', 'd3po'), budget_mode='wall_time')
+
+
+def write_run(run, *, status, timesteps, max_seconds, commit='same'):
+    """run.json, config.yaml and history.csv as a finished training run leaves them."""
+    (run / 'run.json').write_text(json.dumps(dict(commit=commit, seed=42, argv=[], status=status)))
+    (run / 'config.yaml').write_text(
+        f"train_loop:\n  max_seconds: {'null' if max_seconds is None else max_seconds}\n"
+        "ppo:\n  resample_preferences_on_terminal: false\n")
+    (run / 'history.csv').write_text(
+        "step,val cost,time/total_timesteps,elapsed seconds\n"
+        f"0,1.0,{timesteps // 2},0.5\n1,,{timesteps},1.0\n2,0.9,,\n")
 
 
 def test_replayed_action_and_existing_d3po_diversity_restore_state():
@@ -207,7 +215,6 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer):
     import pickle
     from connectpt.routes_generator.citygraph_dataset import RAW_GRAPH_FILENAME
     from connectpt.routes_generator.training.construction_run import ConstructionTrainingRun
-    from connectpt.routes_generator.training.construction_experiment import state_dict_hash
     torch.set_num_threads(2)
     torch.manual_seed(7)
     folder = Path('artifacts/audits/rl_construction_2026-10-04/reuse_checks') / uuid4().hex
@@ -234,63 +241,58 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer):
             f'paths.weights_dir={(folder / "weights").as_posix()}'])
     run = ConstructionTrainingRun(cfg)
     artifact = run.run()
-    assert len(artifact.history) == 2
-    status = json.loads((artifact.output_dir / 'status.json').read_text())
-    assert status['state'] == 'completed' and status['total_active_steps'] == 32
-    assert status['implementation'] == 'inductive_route_learning.setup_and_train'
-    assert state_dict_hash(run.model) != status['initial_actor_sha256']
+    info = json.loads((artifact.output_dir / 'run.json').read_text())
+    assert set(info) == {'commit', 'seed', 'argv', 'status'} and info['status'] == 'iterations'
+    import pandas as pd
+    history = pd.read_csv(artifact.output_dir / 'history.csv', float_precision='round_trip')
+    history = history.dropna(subset=['time/total_timesteps']).to_dict('records')
+    assert len(history) == 2 and history[-1]['time/total_timesteps'] == 32
     assert artifact.checkpoint_path.exists()
     assert artifact.checkpoint_path.with_name('best.pt').exists()
     test_protocol = json.loads((artifact.output_dir / 'test_protocol.json').read_text())
     assert test_protocol['split'] == 'independent test' and len(test_protocol['indices']) == 1
     assert (artifact.output_dir / 'test_evaluation_best_stochastic.json').exists()
     from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-    import csv
     events = EventAccumulator(str(artifact.output_dir / 'tensorboard')).Reload()
-    required_tags = ('train/reward', 'train/att_minutes', 'train/rtt_minutes',
-                     'validation/cost', 'pareto/greedy/hv_feasible',
+    required_tags = ('mean episode reward', 'train/att_minutes', 'train/rtt_minutes',
+                     'val cost', 'pareto/greedy/hv_feasible',
                      'pareto/stochastic/eu_archive_penalized',
                      'pareto/greedy/distinct_networks', 'pareto/greedy/distinct_pareto_networks')
     assert all(tag in events.Tags()['scalars'] for tag in required_tags)
     assert 'pareto/greedy/front_city_0' in events.Tags()['images']
-    assert status['preference_reset_policy'] == 'batch'
-    assert status['advantage_normalization'] == 'minibatch'
     protocol = json.loads((artifact.output_dir / 'pareto/validation_protocol.json').read_text())
     assert len(protocol['indices']) == 3
     assert protocol['reference'] == [3., 3.]
-    with (artifact.output_dir / 'history.csv').open(newline='') as stream:
-        csv_history = list(csv.DictReader(stream))
     for tag in ('mean episode reward', 'mean episode length'):
         recorded = events.Scalars(tag)
-        assert len(recorded) == len(artifact.history)
-        for entry, row, csv_row in zip(recorded, artifact.history, csv_history):
+        assert len(recorded) == len(history)
+        for entry, row in zip(recorded, history):
             value = row[tag]
             if row['completed networks']:
                 assert math.isfinite(value)
                 assert entry.value == pytest.approx(value)
-                assert float(csv_row[tag]) == pytest.approx(value)
             else:
-                assert math.isnan(value) and math.isnan(entry.value) and math.isnan(float(csv_row[tag]))
-    assert any(row['completed networks'] for row in artifact.history)
-    assert all(row['mean episode length'] >= 1 for row in artifact.history if row['completed networks'])
-    for row in artifact.history:
+                assert math.isnan(value) and math.isnan(entry.value)
+    assert any(row['completed networks'] for row in history)
+    assert all(row['mean episode length'] >= 1 for row in history if row['completed networks'])
+    for row in history:
         if row['completed networks']:
             assert math.isfinite(row['train/att_minutes']) and math.isfinite(row['train/rtt_minutes'])
             # Diff rewards telescope from the empty network to its final cost.
             expected_reward = 5.5 + 2*row['train/completed_alpha_mean'] - row['train/cost']
-            assert row['train/reward'] == pytest.approx(expected_reward, abs=1e-5)
+            assert row['mean episode reward'] == pytest.approx(expected_reward, abs=1e-5)
     if trainer == 'ppo_construction':
-        assert artifact.history[-1]['initial ratio error'] < 2e-4
+        assert history[-1]['initial ratio error'] < 2e-4
     elif trainer == 'd3po_construction':
-        assert artifact.history[-1]['diversity loss'] > 0
+        assert history[-1]['diversity loss'] > 0
     else:
-        assert artifact.history[-1]['diversity loss'] == 0
+        assert history[-1]['diversity loss'] == 0
 
 
 def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     from connectpt.routes_generator.inductive_route_learning import NNBaseline
     from connectpt.routes_generator.improvement_learning import D3POValueModule
-    from connectpt.routes_generator.core.checkpoints import CheckpointStore
+    from connectpt.routes_generator.run.checkpoints import CheckpointStore
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
         cfg = compose(config_name='runs/train_construction')
         legacy = compose(config_name='runs/train_construction', overrides=['model=construction'])
@@ -374,7 +376,7 @@ def test_pareto_network_identity_and_per_city_fronts():
 
 
 def test_fixed_preference_evaluation_does_not_consume_training_rng():
-    from connectpt.routes_generator.training.construction_experiment import evaluate_test, evaluation_graph_hash
+    from connectpt.routes_generator.training.construction_experiment import evaluate_test
     torch.set_num_threads(2)
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
         cfg = compose(config_name='runs/train_construction', overrides=[
@@ -395,4 +397,3 @@ def test_fixed_preference_evaluation_does_not_consume_training_rng():
     assert rows == repeated
     assert len(rows) == 12
     assert all('network_signature' in row for row in rows)
-    assert evaluation_graph_hash(graphs) == evaluation_graph_hash(list(graphs))

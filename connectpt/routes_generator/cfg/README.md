@@ -5,7 +5,7 @@
 
 ```text
 cfg/
-├── runs/            # точки входа: search, train, train_construction, train_construction_overnight, prepare_dataset
+├── runs/            # точки входа: search, train, train_construction, train_construction_overnight, prepare_dataset, compare
 ├── instance/        # путь к бенчмарку и ограничения маршрутов
 ├── method/          # методы поиска: ea, nea, nea_edit, nea_combined
 ├── bee_set/         # набор пчёл метода и их число
@@ -33,9 +33,9 @@ cfg/
 ```powershell
 python scripts/run_search.py --dry-run --methods ea
 python scripts/run_search.py --methods nea_edit --instances mandl
-python scripts/run_training.py --dry-run
-python scripts/run_training.py --config-name runs/train_construction trainer=d3po_construction --dry-run
-python scripts/prepare_data.py
+python scripts/run.py --config-name runs/train --dry-run
+python scripts/run.py --config-name runs/train_construction trainer=d3po_construction --dry-run
+python scripts/run.py --config-name runs/prepare_dataset
 ```
 
 Поиск и edit-обучение используют одну цель `cost=rtt_wmc`. Штраф за изменение

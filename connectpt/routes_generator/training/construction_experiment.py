@@ -2,50 +2,19 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 import time
 
 import numpy as np
 import torch
 from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 
-from ..core.artifacts import ArtifactStore
+from ..run.artifacts import ArtifactStore
+from ..run.logger import flush, log
 from ..eval_route_generator import eval_model
 from ..transit_time_estimator import RouteGenBatchState
 from .construction_metrics import canonical_network, summarize_evaluation
-
-
-class MetricWriter(SummaryWriter):
-    """Keep the original TensorBoard tags and mirror their latest values to CSV."""
-    def __init__(self, path):
-        super().__init__(str(path))
-        self.latest = {}
-
-    def add_scalar(self, tag, scalar_value, global_step=None, *args, **kwargs):
-        self.latest[tag] = float(scalar_value)
-        return super().add_scalar(tag, scalar_value, global_step, *args, **kwargs)
-
-
-def state_dict_hash(model):
-    digest = hashlib.sha256()
-    for key, value in sorted(model.state_dict().items()):
-        digest.update(key.encode())
-        digest.update(value.detach().cpu().contiguous().numpy().tobytes())
-    return digest.hexdigest()
-
-
-def evaluation_graph_hash(data):
-    """Fingerprint actual city tensors, independently of their file paths."""
-    digest = hashlib.sha256()
-    for index in range(len(data)):
-        graph = data[index]
-        for key in ('pos', 'demand', 'street_adj', 'drive_times'):
-            tensor = getattr(graph, key).detach().cpu().contiguous()
-            digest.update(f'{index}:{key}:{tuple(tensor.shape)}:{tensor.dtype}'.encode())
-            digest.update(tensor.numpy().tobytes())
-    return digest.hexdigest()
+from .records import ParetoRecord
 
 
 def evaluate_test(model, data, cfg, cost, output, device, *, checkpoint='last',
@@ -100,7 +69,6 @@ def evaluate_test(model, data, cfg, cost, output, device, *, checkpoint='last',
         artifacts.save_json({'rows': rows,
                'checkpoint': checkpoint, 'mode': mode, 'samples_per_preference': samples,
                'hv_reference': list(cfg.evaluation.get('hv_reference', [3., 3.])),
-               'graph_sha256': evaluation_graph_hash(data),
                'eu_preference_count': int(cfg.evaluation.get('eu_preference_count', 101)),
                'protocol': dict(graph_count=len(data), preference_count=count,
                                 seed=int(cfg.evaluation.seed), n_routes=int(cfg.eval.n_routes),
@@ -111,17 +79,17 @@ def evaluate_test(model, data, cfg, cost, output, device, *, checkpoint='last',
     return rows
 
 
-def log_pareto_metrics(rows, cfg, writer, step, prefix):
+def log_pareto_metrics(rows, cfg, logger_list, step, prefix):
     report = summarize_evaluation(rows, cfg.evaluation.hv_reference,
                                   int(cfg.evaluation.get('eu_preference_count', 101)))
-    for tag, value in report['summary'].items():
-        writer.add_scalar(f'{prefix}/{tag}', float('nan') if value is None else value, step)
-    for axis, value in zip(('att', 'rtt'), cfg.evaluation.hv_reference):
-        writer.add_scalar(f'{prefix}/reference_{axis}', value, step)
+    summary = {k: float('nan') if v is None else v for k, v in report['summary'].items()}
+    reference_att, reference_rtt = cfg.evaluation.hv_reference
+    log(logger_list, ParetoRecord(**summary, reference_att=reference_att,
+                                  reference_rtt=reference_rtt), step, prefix=prefix)
     return report
 
 
-def evaluate_pareto(model, data, cfg, cost, output, device, writer, step):
+def evaluate_pareto(model, data, cfg, cost, output, device, logger_list, step):
     """Fixed held-out cities/preferences/action seeds, isolated from training RNG."""
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -131,9 +99,10 @@ def evaluate_pareto(model, data, cfg, cost, output, device, writer, step):
         rows = evaluate_test(model, data, cfg, cost, output, device, mode=mode,
             preference_count=int(cfg.evaluation.pareto_preference_count),
             stochastic_samples=int(cfg.evaluation.pareto_stochastic_samples), save_artifacts=False)
-        report = log_pareto_metrics(rows, cfg, writer, step, f'pareto/{mode}')
+        report = log_pareto_metrics(rows, cfg, logger_list, step, f'pareto/{mode}')
         report['evaluation_seconds'] = time.monotonic()-started
-        writer.add_scalar(f'pareto/{mode}/evaluation_seconds', report['evaluation_seconds'], step)
+        log(logger_list, ParetoRecord(evaluation_seconds=report['evaluation_seconds']), step,
+            prefix=f'pareto/{mode}')
         example = [r for r in rows if r['graph'] == 0 and r['sample'] == 0]
         report['example_front'] = example
         artifacts.save_json(report, f'pareto/iter{step:05d}_{mode}.json')
@@ -155,6 +124,7 @@ def evaluate_pareto(model, data, cfg, cost, output, device, writer, step):
             ax.legend(loc='best')
             fig.colorbar(scatter, ax=ax, label='Passenger weight alpha')
             fig.tight_layout()
-            writer.add_figure(f'pareto/{mode}/front_city_0', fig, step, close=True)
-    writer.flush()
+            for logger in logger_list:
+                logger.figure(f'pareto/{mode}/front_city_0', fig, step)
+    flush(logger_list)
 

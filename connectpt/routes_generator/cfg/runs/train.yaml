@@ -21,9 +21,6 @@ paths:
   checkpoint_path: improvement/edit_training_v1.pt
   init_checkpoint_path: null
 
-checkpoint:
-  strict_load: true
-
 experiment:
   logdir: null
 
@@ -33,3 +30,5 @@ model:
       serial_halting: true
       allow_trim_below_min: true
       n_adjustment_cond_feats: 0
+
+logger_list: [tensorboard, csv]

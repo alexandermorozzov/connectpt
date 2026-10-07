@@ -12,6 +12,7 @@ run:
   name: search
   seed: 0
   cpu: false
+  silent: true
 
 paths:
   weights_dir: artifacts/model_weights
@@ -28,5 +29,4 @@ search:
 
 metrics: [RTT, WMC, ATT, adj_vs_seed, d0, d1, d2, d_un, cost]
 
-logging:
-  tensorboard: true
+logger_list: [tensorboard, csv]

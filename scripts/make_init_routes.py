@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import argparse
 
-from connectpt.routes_generator.core.paths import resolve_under_root
-from connectpt.routes_generator.core.runtime import resolve_device, seed_everything
+from connectpt.routes_generator.run.context import resolve_under_root
+from connectpt.routes_generator.run.context import resolve_device, seed_everything
 from connectpt.routes_generator.data import (INSTANCES_DIR, build_init_routes,
                                              instance_spec, load_matrices,
                                              write_routes_txt)

@@ -11,6 +11,8 @@ from torch_geometric.loader import DataLoader
 from omegaconf import DictConfig
 import hydra
 
+from .run.logger import log as log_metrics
+from .search.records import METRIC_FIELDS, SearchBestRecord
 from .models import check_extensions_add_connections
 from . import torch_utils as tu
 from .citygraph_dataset import get_dataset_from_config
@@ -325,7 +327,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                silent=False,
                iteration_callback=None,
                force_linking_unlinked=False,
-               sum_writer=None, mutation_counts_out=None,
+               logger_list=(), mutation_counts_out=None,
                adjustment_degree_weight=0.0,
                adjustment_degree_gap=0.1,
                adjustment_degree_mode='current',
@@ -465,15 +467,15 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
     best_adjustment_degrees = bee_adjustment_degrees[batch_idxs, best_idxs]
     best_adjustment_penalties = bee_adjustment_penalties[batch_idxs, best_idxs]
 
-    if sum_writer is not None:
-        # log the initial values of various metrics
-        for name, vals in zip(metric_names, best_metrics.unbind(-1)):
-            sum_writer.add_scalar(f'best {name}', vals.mean(), 0)
+    def log_best(step):
+        record = SearchBestRecord(**{METRIC_FIELDS[name]: vals.mean() for name, vals in
+                                     zip(metric_names, best_metrics.unbind(-1))})
         if use_adjustment_penalty:
-            sum_writer.add_scalar('best adjustment degree',
-                                  best_adjustment_degrees.mean(), 0)
-            sum_writer.add_scalar('best adjustment penalty',
-                                  best_adjustment_penalties.mean(), 0)
+            record.adjustment_degree = best_adjustment_degrees.mean()
+            record.adjustment_penalty = best_adjustment_penalties.mean()
+        log_metrics(logger_list, record, step)
+
+    log_best(0)
 
     cost_history = torch.zeros((batch_size, n_iterations + 1), device=dev)
     cost_history[:, 0] = best_raw_costs
@@ -645,17 +647,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                 bee_adjustment_penalties[batch_idxs[:, None], recruiters]
             bee_metrics = bee_metrics[batch_idxs[:, None], recruiters]
 
-        if sum_writer is not None:
-            # log the various metrics
-            for name, vals in zip(metric_names, best_metrics.unbind(-1)):
-                sum_writer.add_scalar(f'best {name}', vals.mean(), iteration+1)
-            if use_adjustment_penalty:
-                sum_writer.add_scalar('best adjustment degree',
-                                      best_adjustment_degrees.mean(),
-                                      iteration + 1)
-                sum_writer.add_scalar('best adjustment penalty',
-                                      best_adjustment_penalties.mean(),
-                                      iteration + 1)
+        log_best(iteration + 1)
 
     # return the best solution
     state.replace_routes(best_networks)

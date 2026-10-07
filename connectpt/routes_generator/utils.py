@@ -7,7 +7,6 @@ from itertools import count
 from heapq import heappush, heappop
 
 import torch
-from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import numpy as np
 from omegaconf import DictConfig
@@ -83,15 +82,6 @@ def get_graphnet_from_cfg(net_cfg, common_cfg):
     assert False, f'Unknown net type {net_type}'
 
 
-def log_config(cfg, sumwriter, prefix=''):
-    for key, val in cfg.items():
-        if type(val) is DictConfig:
-            log_config(val, sumwriter, prefix + key + '.')
-        else:
-            name = prefix + key
-            sumwriter.add_text(name, str(val), 0)
-
-
 def process_standard_experiment_cfg(cfg, run_name_prefix='', 
                                     weights_required=False):
     """Performs some standard setup using learning arguments.
@@ -127,16 +117,7 @@ def process_standard_experiment_cfg(cfg, run_name_prefix='',
     run_name = cfg.get('run_name', 
                        datetime.now().strftime("%d_%m_%Y_%H:%M:%S"))
     run_name = run_name_prefix + run_name
-    if 'logdir' in exp_cfg and exp_cfg.logdir is not None:
-        log_path = Path(exp_cfg.logdir)
-        # and set up summary writer
-        summary_writer = SummaryWriter(log_path / run_name)
-        summary_writer.add_text('device type', device.type, 0)
-        summary_writer.add_text("random seed", str(seed), 0)
-        log_config(cfg, summary_writer)
-
-    else:
-        summary_writer = None
+    summary_writer = None
 
     # set anomaly detection if requested
     torch.autograd.set_detect_anomaly(exp_cfg.get('anomaly', False))
@@ -168,20 +149,6 @@ def process_standard_experiment_cfg(cfg, run_name_prefix='',
     return device, run_name, summary_writer, cost_obj, model
 
 
-def log_stops_per_route(batch_routes, sum_writer, ep_count, prefix=''):
-    elem1 = batch_routes[0][0]
-    no_batch = type(elem1) is int or \
-        (type(elem1) is torch.Tensor and elem1.ndim == 0)
-    if no_batch:
-        # add a batch around this single network
-        batch_routes = [batch_routes]
-    route_lens = [[len(rr) for rr in routes] for routes in batch_routes]
-    avg_stops_per_network = [torch.tensor(rls, dtype=float).mean() 
-                              for rls in route_lens]
-    avg_stops = torch.stack(avg_stops_per_network).mean()
-    sum_writer.add_scalar(prefix + ' # stops per route', avg_stops, ep_count)
-
-
 def rewards_to_returns(rewards, discount_rate=1):
     if discount_rate == 1:
         return rewards.flip([-1]).cumsum(-1).flip([-1])
@@ -198,9 +165,8 @@ def rewards_to_returns(rewards, discount_rate=1):
 
 @torch.no_grad()
 def test_method(method_fn, dataloader, eval_cfg, init_cfg, cost_obj,
-                sum_writer=None, silent=False, return_routes=False,
-                device=None, iter_num=0, routes_tensor=None,
-                return_histories=False, log_eval_summary=True,
+                logger_list=(), silent=False, return_routes=False,
+                device=None, routes_tensor=None, return_histories=False,
                 *method_args, **method_kwargs):
     if method_fn is not None:
         log.debug(f"evaluating {method_fn.__name__} on dataset")
@@ -232,7 +198,7 @@ def test_method(method_fn, dataloader, eval_cfg, init_cfg, cost_obj,
         if method_fn is not None:
             state, cost_history = method_fn(state, cost_obj, silent=silent,
                                             init_network=init_network,
-                                            sum_writer=sum_writer, *method_args, 
+                                            logger_list=logger_list, *method_args, 
                                             **method_kwargs)
         else:
             # just evaluate the initial solution
@@ -280,16 +246,6 @@ def test_method(method_fn, dataloader, eval_cfg, init_cfg, cost_obj,
     # compute some aggregate statistics
     final_costs = torch.cat(final_costs)
     mean_metrics = {key: val.mean() for key, val in all_metrics.items()}
-    if sum_writer is not None and log_eval_summary:
-        # One-shot end-of-run aggregate (single TB point at ``iter_num``). Wanted
-        # for periodic training/validation (repeated iter_num -> a val curve),
-        # but redundant with the sweep CSV for a one-off BCO run -- the sweep
-        # callers pass ``log_eval_summary=False`` so TB keeps only the per-BCO-
-        # iteration ``best *`` curves (bee_colony.py) and skips these bare points.
-        sum_writer.add_scalar("val cost", final_costs.mean(), iter_num)
-        for name, stat_value in mean_metrics.items():
-            sum_writer.add_scalar(name, stat_value, iter_num)
-
     if not silent:
         if eval_cfg.csv and eval_cfg.get('average_metrics', True):
             # print averaged statistics in csv format

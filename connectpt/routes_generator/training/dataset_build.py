@@ -5,21 +5,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..core.runs import ExperimentRun, RunArtifact
+from ..run.runs import ExperimentRun, RunArtifact
 
 
-def copytier_config(cfg) -> "CopyTierConfig":
-    """Build the dataset-generation config from a composed train cfg
-    (reads ``cfg.dataset_build`` and ``cfg.dataset``)."""
-    from omegaconf import OmegaConf
-
-    from connectpt.routes_generator.core.paths import DATASETS_DIR
+def copytier_config(dg, data, connectivity_mode) -> "CopyTierConfig":
+    """The dataset-generation config from the ``dataset_build`` and ``dataset``
+    parameters."""
+    from connectpt.routes_generator.run.context import DATASETS_DIR
     from connectpt.routes_generator.data.route_copies import COPY_TIER_CFG
 
-    dg, data = cfg.dataset_build, cfg.dataset
     ddir = DATASETS_DIR / data.dataset_dirname
-    tiers = list(dg.tiers) if dg.get("tiers") else list(COPY_TIER_CFG)
-    combos = [list(c) for c in OmegaConf.to_container(dg.lc_combos, resolve=True)]
+    tiers = list(dg.tiers) if dg.tiers else list(COPY_TIER_CFG)
+    combos = [list(c) for c in dg.lc_combos]
     return CopyTierConfig(
         new_dataset_dir=ddir, subset_pkl=ddir / "raw_graphs_1000.pkl",
         meta_csv=ddir / "meta.csv", raw_graph_seed=int(dg.raw_graph_seed),
@@ -27,9 +24,9 @@ def copytier_config(cfg) -> "CopyTierConfig":
         n_graphs=int(dg.n_graphs), tiers=tiers, lc_combos=combos,
         target_n_routes=int(data.target_n_routes), min_route_len=int(data.min_route_len),
         max_route_len=int(data.max_route_len),
-        connectivity_mode=str(cfg.cost.kwargs.connectivity_mode),
+        connectivity_mode=str(connectivity_mode),
         lc_n_samples=int(dg.lc_n_samples), tier_cfg=COPY_TIER_CFG,
-        force_regen=bool(dg.get("force_regen", False)))
+        force_regen=dg.force_regen)
 
 
 def _graph_tensors(g):
@@ -185,14 +182,27 @@ class DatasetPreparationRun(ExperimentRun):
     """Generate the dataset described by a composed ``runs/prepare_dataset`` cfg."""
 
     def setup(self) -> None:
-        self.dataset = copytier_config(self.cfg)
+        from ..run.context import resolve_under_root
+        from ..run.schemas import (DatasetBuildParams, EditDatasetParams, OutputPaths,
+                                   RunParams, params)
 
-    def run(self, *, dry_run: bool = False):
-        self.setup()
-        seconds = None if dry_run else build_copytier_dataset(self.dataset)
+        cfg = self.cfg
+        self.run_params = params(RunParams, cfg.run)
+        self.dataset = copytier_config(params(DatasetBuildParams, cfg.dataset_build),
+                                       params(EditDatasetParams, cfg.dataset),
+                                       cfg.cost.kwargs.connectivity_mode)
+        self.run_dir = resolve_under_root(params(OutputPaths, cfg.paths).output_dir)
+
+    def _artifact(self, seconds, dry_run):
         return RunArtifact(
-            run_name=str(self.cfg.run.name),
+            run_name=self.run_params.name,
             output_dir=Path(self.dataset.new_dataset_dir),
             metadata={"dry_run": dry_run, "seconds_per_graph": seconds,
                       "dataset": self.dataset},
         )
+
+    def dry_run_artifact(self):
+        return self._artifact(None, True)
+
+    def execute(self):
+        return self._artifact(build_copytier_dataset(self.dataset), False)

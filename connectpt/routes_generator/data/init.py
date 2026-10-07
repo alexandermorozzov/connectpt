@@ -19,7 +19,7 @@ def build_init_routes(spec, tensors, *, seed: int = 0, device=None,
     from .route_copies import inject_realistic_tier, pad_routes
 
     if device is None:
-        from ..core.runtime import resolve_device
+        from ..run.context import resolve_device
         device = resolve_device()
 
     routes = _lc_construct(spec, tensors, device=device)
@@ -40,9 +40,9 @@ def _lc_construct(spec, tensors, *, device) -> torch.Tensor:
     from torch_geometric.loader import DataLoader
 
     from ..citygraph_dataset import get_dataset_from_config
-    from ..core.checkpoints import CheckpointStore
-    from ..core.paths import CFG_DIR, CONSTRUCTION_MODEL_WEIGHTS_PATH
-    from ..core.runtime import seed_everything
+    from ..run.checkpoints import CheckpointStore
+    from ..run.context import CFG_DIR, CONSTRUCTION_MODEL_WEIGHTS_PATH
+    from ..run.context import seed_everything
     from ..eval_route_generator import eval_model
     from ..model_factory import RouteModelFactory
     from ..objectives import CostFactory, cost_kwargs

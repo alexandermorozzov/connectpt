@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..core.artifacts import ArtifactStore
+from ..run.artifacts import ArtifactStore
 from ..data.routes import as_route_tensor
 from ..evaluation import full_metric_row
 

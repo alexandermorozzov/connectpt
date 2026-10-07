@@ -37,3 +37,4 @@ evaluation:
   stochastic_samples: 4
   seed: 9001
   final_test: true
+logger_list: [tensorboard, csv]

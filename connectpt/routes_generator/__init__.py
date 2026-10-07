@@ -121,7 +121,6 @@ from .utils import (
     process_standard_experiment_cfg,
     test_method,
     yen_k_shortest_paths,
-    log_config,
 )
 
 # === Torch Utilities ===
@@ -141,11 +140,8 @@ from .torch_utils import (
 # The narrow public surface the notebook uses: name an experiment, run it,
 # render it. Everything above is the legacy/library internals surface (narrowed
 # in stage 7 once eval_lib + baselines dissolve).
-from .core import (
-    ExperimentRunFactory,
-    build_experiment,
-    load_experiment,
-)
+from .run.factory import ExperimentRunFactory
+from .run.config import build_experiment, load_experiment
 from .reports import render_report
 
 # Author & license

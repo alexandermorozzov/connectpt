@@ -16,8 +16,9 @@ from datetime import datetime
 
 import pandas as pd
 
-from connectpt.routes_generator.core import ExperimentRunFactory, build_experiment
-from connectpt.routes_generator.core.paths import LOGS_DIR, RESULTS_DIR, resolve_under_root
+from connectpt.routes_generator.run.factory import ExperimentRunFactory
+from connectpt.routes_generator.run.config import build_experiment
+from connectpt.routes_generator.run.context import LOGS_DIR, RESULTS_DIR, resolve_under_root
 from connectpt.routes_generator.evaluation import initial_row
 from connectpt.routes_generator.reports import save_paper_routes
 

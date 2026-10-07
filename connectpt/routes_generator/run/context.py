@@ -1,21 +1,19 @@
-"""Canonical repo paths for route-generation experiments.
-
-The single, library-level source of truth for the filesystem layout:
-
-* inputs  -- ``datasets/`` at the repo root (raw graphs, benchmark files,
-  MACSA scenarios, pretrained weights);
-* outputs -- ``artifacts/`` at the repo root (trained weights, route dumps,
-  logs, paper tables).
+"""Run context: repo paths, run names, device, seeding and ``RunContext``.
 
 Paths are computed from this file's location, so they hold no matter which
-directory the process runs from (the notebooks run from
-``examples/route_generator``).
+directory the process runs from. Inputs live under ``datasets/``, outputs under
+``artifacts/``; every output root is overridable per run from the CLI.
 """
 from __future__ import annotations
 
+import random
+from dataclasses import dataclass, field
 from pathlib import Path
 
-# connectpt/routes_generator/core/paths.py -> repo root is 3 levels up.
+import numpy as np
+import torch
+
+# connectpt/routes_generator/run/context.py -> repo root is 3 levels up.
 ROOT_DIR = Path(__file__).resolve().parents[3]
 CFG_DIR = ROOT_DIR / "connectpt" / "routes_generator" / "cfg"
 
@@ -85,3 +83,38 @@ def ensure_output_dirs() -> None:
     """Create the artifact write targets (inputs under datasets/ must exist)."""
     for d in (MODEL_WEIGHTS_DIR, EDIT_MODEL_WEIGHTS_DIR, MODEL_OUTPUTS_DIR):
         d.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_device(cpu: bool = False) -> torch.device:
+    """CPU if requested or CUDA is unavailable, else CUDA (matches the trainer)."""
+    if cpu or not torch.cuda.is_available():
+        return torch.device("cpu")
+    return torch.device("cuda")
+
+
+def seed_everything(seed: int | None) -> None:
+    """Seed torch / numpy / random (no-op if ``seed`` is None)."""
+    if seed is None:
+        return
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+
+@dataclass
+class RunContext:
+    """Per-run runtime settings shared by every ExperimentRun."""
+
+    run_name: str
+    output_dir: Path
+    seed: int | None = 0
+    device: torch.device = field(default_factory=lambda: resolve_device())
+
+    @classmethod
+    def create(cls, run_name: str, output_dir, *, seed: int | None = 0,
+               cpu: bool = False) -> "RunContext":
+        seed_everything(seed)
+        ctx = cls(run_name=run_name, output_dir=Path(output_dir), seed=seed,
+                  device=resolve_device(cpu))
+        ctx.output_dir.mkdir(parents=True, exist_ok=True)
+        return ctx

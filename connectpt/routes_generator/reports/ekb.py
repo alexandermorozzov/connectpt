@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from pyproj import Transformer
 
-from ..core.paths import ARTIFACTS_DIR, DATASETS_DIR
+from ..run.context import ARTIFACTS_DIR, DATASETS_DIR
 from ..data.routes import as_route_tensor
 
 

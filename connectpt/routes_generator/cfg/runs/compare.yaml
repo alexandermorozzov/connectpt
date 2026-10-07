@@ -1,0 +1,16 @@
+# @package _global_
+run:
+  type: comparison
+  name: compare
+  seed: 0
+
+paths:
+  output_dir: null
+
+comparison:
+  names: [ppo, d3po]
+  checkpoint: last
+  mode: greedy
+  budget_mode: transitions
+
+logger_list: []

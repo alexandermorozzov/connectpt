@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..core.paths import ARTIFACTS_DIR
+from ..run.context import ARTIFACTS_DIR
 
 log = logging.getLogger(__name__)
 

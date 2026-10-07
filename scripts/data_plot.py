@@ -19,7 +19,7 @@ matplotlib.use("Agg")
 
 import torch  # noqa: E402
 
-from connectpt.routes_generator.core.paths import resolve_under_root  # noqa: E402
+from connectpt.routes_generator.run.context import resolve_under_root  # noqa: E402
 from connectpt.routes_generator.data import INSTANCES_DIR, load_instance  # noqa: E402
 from connectpt.routes_generator.reports import plot_routes_grid  # noqa: E402
 

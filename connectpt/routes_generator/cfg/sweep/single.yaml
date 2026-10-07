@@ -1,2 +1,4 @@
 alpha: 0.5
 n_iterations: 400
+adj_target: null
+adj_weight: null

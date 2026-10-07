@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from ..core.paths import BENCHMARK_DIR, DATASETS_DIR
+from ..run.context import BENCHMARK_DIR, DATASETS_DIR
 from .routes import as_route_tensor
 
 # Instance specs live in the Hydra ``cfg/instance`` group.

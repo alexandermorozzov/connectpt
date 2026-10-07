@@ -15,7 +15,7 @@ from torch_geometric.loader import DataLoader
 
 from . import utils as lrnu
 from .citygraph_dataset import get_dataset_from_config
-from .core.paths import CFG_DIR, CONSTRUCTION_MODEL_WEIGHTS_PATH as MODEL_WEIGHTS_PATH, safe_run_name
+from .run.context import CFG_DIR, CONSTRUCTION_MODEL_WEIGHTS_PATH as MODEL_WEIGHTS_PATH, safe_run_name
 from .data.routes import as_route_tensor
 from .eval_route_generator import eval_model
 from .evaluation.cost_breakdown import add_cost_breakdown_to_metrics

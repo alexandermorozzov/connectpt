@@ -6,29 +6,28 @@ the policy adapters and translates the BeeSpecs into an ExecutablePlan. The
 search layer never imports the training layer; it consumes checkpoints + configs
 only.
 
-``run()`` improves the instance's initial network at ONE point (alpha,
-adj_target) of ``cfg.sweep``; the script loops over the grid.
+``execute()`` improves the instance's initial network at ONE point (alpha,
+adj_target) of ``cfg.sweep``; the script loops over the grid. The point has its
+own run directory under ``output_dir``.
 ``run(dry_run=True)`` validates the whole wiring without running the BCO loop:
 cost, models (strict-loaded), policies, bee operators + plan.
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 _log = logging.getLogger("connectpt.sweep")
 
 
-def _fs_key(text: Any) -> str:
-    """Filesystem-safe token from a sweep point key (spaces / '=' -> '_')."""
-    return "".join(c if c.isalnum() else "_" for c in str(text))
-
-from ..core.checkpoints import CheckpointStore
-from ..core.paths import resolve_weights_path
-from ..core.runs import ExperimentRun, RunArtifact
-from ..core.runtime import RunContext
+from ..run.checkpoints import CheckpointStore
+from ..run.context import resolve_weights_path, safe_run_name
+from ..run.runs import ExperimentRun, RunArtifact
+from ..run.context import RunContext
+from ..run.schemas import (AdjustmentParams, InstanceParams, SearchPaths, SearchRunParams,
+                           SweepParams, params)
 from ..data import load_instance
 from ..evaluation import full_metric_row, select_metrics
 from ..model_factory import RouteModelFactory
@@ -56,10 +55,14 @@ class BeeColonySearchRun(ExperimentRun):
 
     def setup(self) -> None:
         cfg = self.cfg
-        self.context = RunContext.create(
-            cfg.run.name, cfg.paths.output_dir,
-            seed=int(cfg.run.seed), cpu=bool(cfg.run.get("cpu", False)),
-        )
+        self.run_params = params(SearchRunParams, cfg.run)
+        self.paths = params(SearchPaths, cfg.paths)
+        self.instance = params(InstanceParams, cfg.instance)
+        self.sweep = params(SweepParams, cfg.sweep)
+        self.adjustment = AdjustmentParams.from_cost(cfg.cost.kwargs)
+        run = self.run_params
+        self.context = RunContext.create(run.name, self.paths.output_dir,
+                                         seed=run.seed, cpu=run.cpu)
         device = self.context.device
 
         # cost: the /cost group this run composed (single source).
@@ -74,8 +77,7 @@ class BeeColonySearchRun(ExperimentRun):
                 continue
             model = self._ROLE_BUILDER[role](m_cfg.config)
             CheckpointStore.load_model_weights(
-                model,
-                resolve_weights_path(m_cfg.checkpoint_path, cfg.paths.weights_dir),
+                model, resolve_weights_path(m_cfg.checkpoint_path, self.paths.weights_dir),
                 strict=True, map_location=device)
             model.to(device)
             self.models[role] = model
@@ -88,57 +90,45 @@ class BeeColonySearchRun(ExperimentRun):
 
         self.runner = BeeColonyRunner(
             cost_obj=self.cost_obj, plan=self.plan, device=device,
-            seed=int(cfg.run.seed), silent=bool(cfg.run.get("silent", True)),
+            seed=run.seed, silent=run.silent,
             sequential=bool(cfg.search.process_neural_bees_sequentially),
-            adjustment={k: v for k, v in cfg.cost.kwargs.items()
-                        if k.startswith("adjustment_degree_")})
+            adjustment=asdict(self.adjustment))
 
-    def run(self, *, dry_run: bool = False) -> SearchArtifact:
-        self.setup()
-        summary = self.runner.plan_summary()
-        if dry_run:
-            return SearchArtifact(
-                run_name=self.cfg.run.name, output_dir=self.context.output_dir,
-                plan=summary,
-                metadata={"dry_run": True,
-                          "models_loaded": sorted(self.models),
-                          "policies": sorted(self.policies)},
-            )
+        self.alpha = self.sweep.alpha
+        self.adj_target = None if self.sweep.adj_target is None else float(self.sweep.adj_target)
+        self.run_dir = (Path(self.context.output_dir) / safe_run_name(
+            f"{run.label}_seed{run.seed}_a{self.alpha}_t{self.adj_target}"))
 
+    def dry_run_artifact(self) -> SearchArtifact:
+        return SearchArtifact(
+            run_name=self.run_params.name, output_dir=self.context.output_dir,
+            plan=self.runner.plan_summary(),
+            metadata={"dry_run": True,
+                      "models_loaded": sorted(self.models),
+                      "policies": sorted(self.policies)},
+        )
+
+    def execute(self) -> SearchArtifact:
         import pandas as pd
 
-        inst = load_instance(self.cfg.instance)
-        sweep = self.cfg.sweep
-        alpha = sweep.alpha
-        adj_target = sweep.get("adj_target")
-        adj_target = None if adj_target is None else float(adj_target)
-        n_iterations = int(sweep.n_iterations)
-        label = self.cfg.run.get("label", self.cfg.run.name)
+        inst = load_instance(self.instance)
+        alpha, adj_target = self.alpha, self.adj_target
+        n_iterations = self.sweep.n_iterations
+        label = self.run_params.label
         _log.info("search point | %s | alpha=%s adj_target=%s", label, alpha, adj_target)
-
-        writer = None
-        if bool((self.cfg.get("logging") or {}).get("tensorboard", False)):
-            from torch.utils.tensorboard import SummaryWriter
-            tb_dir = Path(self.context.output_dir) / "tb" / _fs_key(f"a{alpha}_t{adj_target}")
-            writer = SummaryWriter(str(tb_dir))
-        try:
-            routes, _unserved, metrics = self.runner.run_seeded(
-                inst.init_routes, inst.tensors, eval_dims=inst.spec,
-                n_iterations=n_iterations, alpha=alpha, adj_target=adj_target,
-                adj_weight=sweep.get("adj_weight"), sum_writer=writer)
-        finally:
-            if writer is not None:
-                writer.close()
+        routes, _unserved, metrics = self.runner.run_seeded(
+            inst.init_routes, inst.tensors, eval_dims=inst.spec,
+            n_iterations=n_iterations, alpha=alpha, adj_target=adj_target,
+            adj_weight=self.sweep.adj_weight, logger_list=self.logger_list)
 
         keep = list(self.cfg.get("metrics", []))
-        row = full_metric_row(metrics, routes, inst.init_routes,
-                              adjustment=self.cfg.cost.kwargs)
+        row = full_metric_row(metrics, routes, inst.init_routes, adjustment=self.adjustment)
         row = select_metrics(row, keep) if keep else row
         row.update(method=label, alpha=alpha, adj_target=adj_target,
                    n_iterations=n_iterations)
         return SearchArtifact(
-            run_name=self.cfg.run.name, output_dir=self.context.output_dir,
-            table=pd.DataFrame([row]), plan=summary, instance=inst,
+            run_name=self.run_params.name, output_dir=self.context.output_dir,
+            table=pd.DataFrame([row]), plan=self.runner.plan_summary(), instance=inst,
             routes={"Initial": inst.init_routes,
                     f"{label} a={alpha} t={adj_target}": routes},
         )
