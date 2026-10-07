@@ -1,7 +1,7 @@
 """ExperimentRunFactory -- dispatch a composed config to its run class.
 
 The factory imports the concrete run classes lazily so that ``import core`` does
-not statically pull in training/search/evaluation/reports.
+not statically pull in training/search.
 """
 from __future__ import annotations
 
@@ -23,10 +23,4 @@ class ExperimentRunFactory:
         if run_type == "dataset_prepare":
             from ..training import DatasetPreparationRun
             return DatasetPreparationRun(cfg)
-        if run_type == "evaluation":
-            from ..evaluation import ModelEvaluationRun
-            return ModelEvaluationRun(cfg)
-        if run_type == "report":
-            from ..reports import ReportRun
-            return ReportRun(cfg)
         raise ValueError(f"Unknown run.type: {run_type!r}")

@@ -10,20 +10,18 @@ from pathlib import Path
 from itertools import permutations
 import logging as log
 
-from matplotlib import pyplot as plt
 import numpy as np
 import torch
 from torch.distributions import MultivariateNormal
 from tqdm import tqdm
-from scipy.spatial import Voronoi, voronoi_plot_2d
+from scipy.spatial import Voronoi
 import networkx as nx
 import torch_geometric.utils as pygu
 from torch_geometric.data import Data, HeteroData, InMemoryDataset
 from torch_geometric.transforms import KNNGraph, RemoveIsolatedNodes, \
     BaseTransform, RandomRotate, RandomFlip, Compose
 
-from .torch_utils import get_batch_tensor_from_routes, load_routes_tensor, \
-    floyd_warshall
+from .torch_utils import load_routes_tensor, floyd_warshall
 
 RAW_GRAPH_FILENAME = 'raw_graphs_1000.pkl'
 
@@ -125,168 +123,8 @@ def get_dataset_from_config(ds_cfg, center_nodes=True, tensors:dict=None):
             scale_dynamically=do_scaling, extra_node_feats=extra_node_feats,
             fully_connected_demand=True, center_nodes=center_nodes)
         return [data]
-    elif ds_cfg['type'] == 'macsa':
-        do_scaling = ds_cfg.get('scale_dynamically', True)
-        extra_node_feats = ds_cfg.get('extra_node_feats', True)
-        tensors = load_macsa_tensors(ds_cfg.path)
-        data = CityGraphData.from_tensors_with_transformations(
-            tensors,
-            scale_dynamically=do_scaling,
-            extra_node_feats=extra_node_feats,
-            fully_connected_demand=True,
-            center_nodes=center_nodes,
-        )
-        return [data]
     else:
         raise ValueError(f"Unknown dataset type {ds_cfg['type']}")
-
-
-MACSA_REQUIRED_FILENAMES = (
-    'Coords.txt',
-    'TravelTimes.txt',
-    'Demand.txt',
-    'Routes.txt',
-)
-
-
-def is_macsa_scenario_dir(path):
-    path = Path(path)
-    return path.is_dir() and all((path / name).exists()
-                                 for name in MACSA_REQUIRED_FILENAMES)
-
-
-def load_macsa_tensors(scenario_dir, travel_time_scale=60.0):
-    """Load one MACSA-style scenario into the tensor dataset structure.
-
-    Travel times in the supplied files follow the Mumford convention and are
-    minutes, so they are converted to seconds by default.
-    """
-    scenario_dir = Path(scenario_dir)
-    coords = np.genfromtxt(scenario_dir / 'Coords.txt', skip_header=1)
-    travel_times = np.genfromtxt(scenario_dir / 'TravelTimes.txt')
-    demand = np.genfromtxt(scenario_dir / 'Demand.txt')
-
-    node_locs = torch.tensor(np.atleast_2d(coords), dtype=torch.float32)
-    street_adj = torch.tensor(np.atleast_2d(travel_times), dtype=torch.float32)
-    demand = torch.tensor(np.atleast_2d(demand), dtype=torch.float32)
-    street_adj = street_adj * float(travel_time_scale)
-
-    n_nodes = node_locs.shape[0]
-    expected_shape = (n_nodes, n_nodes)
-    if tuple(street_adj.shape) != expected_shape:
-        raise ValueError(
-            f"{scenario_dir}: TravelTimes.txt has shape "
-            f"{tuple(street_adj.shape)}, expected {expected_shape}"
-        )
-    if tuple(demand.shape) != expected_shape:
-        raise ValueError(
-            f"{scenario_dir}: Demand.txt has shape {tuple(demand.shape)}, "
-            f"expected {expected_shape}"
-        )
-
-    return {
-        'node_locs': node_locs,
-        'street_adj': street_adj,
-        'demand': demand,
-    }
-
-
-def _read_macsa_routes_file(path):
-    routes = []
-    with Path(path).open('r', encoding='utf-8') as file:
-        for line in file:
-            line = line.split('#', 1)[0].strip()
-            if not line:
-                continue
-            routes.append([int(part) for part in line.split()])
-    return routes
-
-
-def _normalize_macsa_route_indices(routes, n_nodes, one_indexed=None):
-    flat_nodes = [node for route in routes for node in route]
-    if not flat_nodes:
-        return routes
-
-    min_node = min(flat_nodes)
-    max_node = max(flat_nodes)
-    if one_indexed is None:
-        one_indexed = min_node >= 1 and max_node == n_nodes
-    if one_indexed:
-        routes = [[node - 1 for node in route] for route in routes]
-        flat_nodes = [node for route in routes for node in route]
-        min_node = min(flat_nodes)
-        max_node = max(flat_nodes)
-
-    if min_node < 0 or max_node >= n_nodes:
-        raise ValueError(
-            "MACSA routes contain node ids outside the scenario range: "
-            f"min={min_node}, max={max_node}, n_nodes={n_nodes}"
-        )
-    return routes
-
-
-def load_macsa_routes(scenario_dir, n_nodes=None, one_indexed=None,
-                      max_route_len=None):
-    """Load one-directional MACSA routes as a batched padded route tensor.
-
-    The returned tensor has shape ``(1, n_routes, max_route_len)`` and uses
-    ``-1`` padding, matching the BCO/RL evaluation helpers.
-    """
-    scenario_dir = Path(scenario_dir)
-    if n_nodes is None:
-        n_nodes = int(np.genfromtxt(scenario_dir / 'Coords.txt',
-                                    max_rows=1).item())
-    routes = _read_macsa_routes_file(scenario_dir / 'Routes.txt')
-    routes = _normalize_macsa_route_indices(routes, n_nodes, one_indexed)
-    if max_route_len is None:
-        max_route_len = n_nodes
-    longest_route = max((len(route) for route in routes), default=0)
-    if longest_route > max_route_len:
-        raise ValueError(
-            f"{scenario_dir}: longest route has {longest_route} stops, "
-            f"but max_route_len is {max_route_len}"
-        )
-    return get_batch_tensor_from_routes(routes, max_route_len=max_route_len)
-
-
-def load_macsa_scenario(scenario_dir, one_indexed=None,
-                        route_max_len=None):
-    """Load one MACSA scenario as tensors plus seeded routes."""
-    scenario_dir = Path(scenario_dir)
-    tensors = load_macsa_tensors(scenario_dir)
-    n_nodes = tensors['node_locs'].shape[0]
-    routes = load_macsa_routes(
-        scenario_dir,
-        n_nodes=n_nodes,
-        one_indexed=one_indexed,
-        max_route_len=route_max_len or n_nodes,
-    )
-    return {
-        'name': scenario_dir.name,
-        'path': scenario_dir,
-        'tensors': tensors,
-        'routes': routes,
-    }
-
-
-def load_macsa_scenarios(root_dir, one_indexed=None, route_max_len=None):
-    """Load every MACSA scenario directory under ``root_dir``."""
-    root_dir = Path(root_dir)
-    scenarios = []
-    for scenario_dir in sorted(root_dir.iterdir()):
-        if not is_macsa_scenario_dir(scenario_dir):
-            continue
-        scenarios.append(load_macsa_scenario(
-            scenario_dir,
-            one_indexed=one_indexed,
-            route_max_len=route_max_len,
-        ))
-    if not scenarios:
-        raise FileNotFoundError(
-            f"No MACSA scenarios with {MACSA_REQUIRED_FILENAMES} found in "
-            f"{root_dir}"
-        )
-    return scenarios
 
 
 def get_dynamic_training_set(min_nodes, max_nodes, space_scale, demand_scale, 
@@ -376,7 +214,7 @@ class DynamicCityGraphDataset(torch.utils.data.IterableDataset):
             graph = self.transform(graph)
             yield graph
 
-    def generate_graph(self, draw=False, n_nodes=None, max_n_nodes=None):
+    def generate_graph(self, n_nodes=None, max_n_nodes=None):
         if not max_n_nodes:
             max_n_nodes = self.max_nodes
         if not n_nodes:
@@ -420,7 +258,7 @@ class DynamicCityGraphDataset(torch.utils.data.IterableDataset):
             if self.mumford_style:
                 demand = uniform_demand_on_edges(street_graph.pos, 1.0)
             else:
-                demand = inter_loci_demand(street_graph.pos, draw=draw)
+                demand = inter_loci_demand(street_graph.pos)
                             
             if not self.directed:
                 # make the demand matrix symmetric
@@ -439,12 +277,6 @@ class DynamicCityGraphDataset(torch.utils.data.IterableDataset):
     
             done = demand.sum() > 0
                         
-        if draw:
-            plt.hist(demand.numpy().flatten(), bins=20)
-            plt.title("Inter-node demand counts")
-            plt.yscale('log')
-            plt.show()
-
         # pad the demand matrix to the max size
         n_pad = max_n_nodes - n_nodes
         demand = torch.nn.functional.pad(demand, (0, n_pad, 0, n_pad))
@@ -469,13 +301,6 @@ class DynamicCityGraphDataset(torch.utils.data.IterableDataset):
             graph[STOP_KEY].x = torch.zeros((n_nodes, 0))
         else:
             graph[STOP_KEY].x = get_node_features(street_idx, demand)
-
-        if draw:
-            # draw the graph
-            ax = plt.axes()
-            graph.draw(ax, node_size=100, show_demand=False)
-            plt.tight_layout()
-            plt.show()
 
         assert graph is not None
         return graph
@@ -560,31 +385,6 @@ class CityGraphData(HeteroData):
         else:
             return super().__cat_dim__(key, value, *args, **kwargs)
                 
-    def draw(self, ax=None, node_size=10, show_demand=True):
-        street_graph = Data(edge_index=self[STREET_KEY].edge_index,
-                            edge_attr=self[STREET_KEY].edge_attr,
-                            pos=self[STOP_KEY].pos)
-        transpose_adj = self.street_adj.transpose(-2, -1)
-        undirected_streets = (self.street_adj == transpose_adj).all()
-        nx_graph = pygu.to_networkx(street_graph, 
-                                    to_undirected=undirected_streets)
-        locs = self.pos.cpu().numpy()
-        nx.draw(nx_graph, pos=locs, node_size=node_size, width=1, arrowsize=20,
-                ax=ax)
-
-        if show_demand:
-            transposed_demand = self.demand.transpose(-2, -1)
-            dmd_is_directed = not (self.demand == transposed_demand).all()
-            creator = nx.DiGraph if dmd_is_directed else nx.Graph
-            nx_dmd_graph = nx.from_numpy_array(self.demand.cpu().numpy(), 
-                                            create_using=creator)
-            de_widths = torch.tensor([dd['weight'] for _, _, dd in 
-                                    nx_dmd_graph.edges(data=True)])
-            de_widths *= 2 / de_widths.max()
-            nx.draw_networkx_edges(nx_dmd_graph, edge_color="red", 
-                                pos=locs, width=de_widths,
-                                style='dashed', ax=ax)
-            
     @staticmethod
     def from_tensors(node_locs, street_adj, demand, pos_only=False):
         graph = CityGraphData()
@@ -883,13 +683,6 @@ def locus_based_demand(node_locs, max_loci_frac):
     return demand
 
 
-def plot_ellipse(center, radii, colour=None):
-    tt = np.linspace(0, 2 * np.pi, 100)
-    xs = center[0] + radii[0] * np.cos(tt)
-    ys = center[1] + radii[1] * np.sin(tt)
-    plt.plot(xs, ys, color=colour)
-
-
 def make_oval_groups(node_locs, n_groups, min_radius, max_radius):
     n_nodes = node_locs.shape[0]
     is_in_group = torch.zeros((n_nodes, n_groups), dtype=torch.bool)
@@ -917,7 +710,7 @@ def make_oval_groups(node_locs, n_groups, min_radius, max_radius):
     return is_in_group, centers, shapes
 
 
-def inter_loci_demand(node_locs, draw=False):
+def inter_loci_demand(node_locs):
     # pick number of population clusters
     n_nodes = node_locs.shape[0]
     max_centers = max(int(CENTERNODES_PER_NODE * n_nodes), 1)
@@ -947,20 +740,6 @@ def inter_loci_demand(node_locs, draw=False):
     is_in_sink, sink_centers, sink_shapes = \
         make_oval_groups(node_locs, n_sinks, MIN_SINK_RADIUS_M, 
                          MAX_SINK_RADIUS_M)
-
-    if draw:
-        # draw ovals for clusters and sinks
-        for center, radii in zip(cluster_centers, cluster_shapes):
-            plot_ellipse(center, radii, colour='green')
-        for center, radii in zip(sink_centers, sink_shapes):
-            plot_ellipse(center, radii, colour='orange')
-        # draw the population graph
-        node_pops = node_pops_by_type.sum(dim=1)
-        plt.scatter(node_locs[:, 0], node_locs[:, 1], c=node_pops, 
-                    cmap='viridis', label='Nodes, coloured by pop.')
-        plt.colorbar()
-        plt.legend()
-        plt.show()
 
     # combine the two as before
     n_pop_clusters = is_in_cluster.shape[1]
@@ -1085,7 +864,7 @@ def get_locs_around_unit_circle(n_nodes):
     return locs
 
 
-def build_voronoi_graph(n_nodes, draw_voronoi=False, *args, **kwargs):
+def build_voronoi_graph(n_nodes, *args, **kwargs):
     n_points = int(n_nodes)
     # initial step size for adjusting the number of nodes via binary search.
      # this value seems to work well.
@@ -1125,10 +904,6 @@ def build_voronoi_graph(n_nodes, draw_voronoi=False, *args, **kwargs):
         if is_strongly_connected(nx_graph):
             # we've got a valid one, so we're done!
             break
-
-    if draw_voronoi:
-        voronoi_plot_2d(vor)
-        plt.show()
 
     return street_graph
 
@@ -1287,11 +1062,6 @@ def build_smallworld_graph(n_levels, n_nodes_per_level=4, p_attach=0.5):
     maxes = base_graph.pos.max(dim=0)[0]
     base_graph.pos = base_graph.pos / maxes
 
-    # degrees = pygu.degree(base_graph.edge_index[0])
-    # plt.hist(degrees.numpy(), bins=20)
-    # plt.yscale('log')
-    # plt.show()
-
     return base_graph
 
 
@@ -1344,8 +1114,6 @@ def main():
                         help="minimum graph size in nodes")
     parser.add_argument("--max", type=int, default=100,
                         help="maximum graph size in nodes")
-    parser.add_argument("--draw", action="store_true", 
-                        help="render each generated graph")
     parser.add_argument("--delete", action="store_true", 
         help="if provided, and a dataset already exists at the given path, " \
              "delete it before creating a new one.")
@@ -1369,7 +1137,7 @@ def main():
         side_length_m=args.sidelen, mumford_style=not args.ovaldemand,
         pos_only=args.pos_only)
     
-    graphs = [dataset.generate_graph(args.draw) for _ in tqdm(range(args.n))]
+    graphs = [dataset.generate_graph() for _ in tqdm(range(args.n))]
 
     # save the dataset as a pickled list
     path = Path(args.path)

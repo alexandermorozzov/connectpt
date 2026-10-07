@@ -1,4 +1,4 @@
-"""Build the copy-tier training dataset; load the training config."""
+"""Build the copy-tier training dataset."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,18 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from ..core.runs import ExperimentRun, RunArtifact
-
-
-def load_train_config(name="runs/train", *, overrides=None, cfg_dir=None):
-    """Compose a training config from ``cfg/training/<name>.yaml`` (the single
-    source of truth for every training/report knob)."""
-    from hydra import compose, initialize_config_dir
-
-    from connectpt.routes_generator.core.paths import CFG_DIR
-
-    cfg_dir = cfg_dir or CFG_DIR
-    with initialize_config_dir(config_dir=str(cfg_dir), version_base=None):
-        return compose(config_name=name, overrides=list(overrides or []))
 
 
 def copytier_config(cfg) -> "CopyTierConfig":
@@ -32,8 +20,6 @@ def copytier_config(cfg) -> "CopyTierConfig":
     ddir = DATASETS_DIR / data.dataset_dirname
     tiers = list(dg.tiers) if dg.get("tiers") else list(COPY_TIER_CFG)
     combos = [list(c) for c in OmegaConf.to_container(dg.lc_combos, resolve=True)]
-    corrupt_target = (int(data.target_n_routes) if bool(dg.get("corrupt_all_routes"))
-                      else dg.get("n_routes_to_corrupt"))
     return CopyTierConfig(
         new_dataset_dir=ddir, subset_pkl=ddir / "raw_graphs_1000.pkl",
         meta_csv=ddir / "meta.csv", raw_graph_seed=int(dg.raw_graph_seed),
@@ -43,7 +29,7 @@ def copytier_config(cfg) -> "CopyTierConfig":
         max_route_len=int(data.max_route_len),
         connectivity_mode=str(cfg.cost.kwargs.connectivity_mode),
         lc_n_samples=int(dg.lc_n_samples), tier_cfg=COPY_TIER_CFG,
-        corrupt_target=corrupt_target, force_regen=bool(dg.get("force_regen", False)))
+        force_regen=bool(dg.get("force_regen", False)))
 
 
 def _graph_tensors(g):
@@ -77,7 +63,6 @@ class CopyTierConfig:
     connectivity_mode: str
     lc_n_samples: int
     tier_cfg: dict
-    corrupt_target: Any = None
     force_regen: bool = False
 
 
@@ -172,7 +157,6 @@ def build_copytier_dataset(cfg: CopyTierConfig):
                 "graph_index": gi, "tier": tier, "tier_kind": ("clean" if not tier_cfg["kinds"] else "copies"),
                 "lc_combo": ctag,
                 "applied_events": int(sum(event_counts.values())),
-                "n_routes_to_corrupt": ("" if cfg.corrupt_target is None else int(cfg.corrupt_target)),
                 "n_corrupted_routes": int(n_corrupted),
                 "mutation_events": json.dumps(dict(event_counts), sort_keys=True),
                 "d_un_after_pct": round(uncovered_demand_pct(routes, tn["demand"], cfg.raw_n_nodes), 2),

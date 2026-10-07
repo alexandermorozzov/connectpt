@@ -3,22 +3,19 @@
 Library home of the notebook's LC helpers (was eval_lib.helpers). ``build_lc_cfg``
 composes the eval config (weights + route bounds + unified cost weights);
 ``run_lc`` / ``run_lc_batch`` run the construction model through ``eval_model`` and
-annotate the metrics with the cost breakdown. ``build_rpc_cfg`` / ``build_rpc_routes``
-back the random-path-combiner init (no trained weights). Imports are explicit
+annotate the metrics with the cost breakdown. Imports are explicit
 library dependencies -- the objective weights come from the single source, the
 disabled-component injection is inlined (was compat.bco_config).
 """
 from __future__ import annotations
 
 import torch
-from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from torch_geometric.loader import DataLoader
 
 from . import utils as lrnu
-from .baselines import safe_run_name
 from .citygraph_dataset import get_dataset_from_config
-from .core.paths import CFG_DIR, CONSTRUCTION_MODEL_WEIGHTS_PATH as MODEL_WEIGHTS_PATH
+from .core.paths import CFG_DIR, CONSTRUCTION_MODEL_WEIGHTS_PATH as MODEL_WEIGHTS_PATH, safe_run_name
 from .data.routes import as_route_tensor
 from .eval_route_generator import eval_model
 from .evaluation.cost_breakdown import add_cost_breakdown_to_metrics
@@ -77,57 +74,6 @@ def build_lc_cfg(run_name, n_routes, min_route_len, max_route_len,
     return _apply_disabled_components(cfg)
 
 
-def build_rpc_cfg(run_name, n_routes, min_route_len, max_route_len,
-                  demand_time_weight=None, route_time_weight=None,
-                  median_connectivity_weight=None,
-                  connectivity_mode="median_weighted"):
-    """LC-style eval cfg backed by random_path_combiner (no trained weights)."""
-    defaults = cost_kwargs()
-    demand_time_weight = (defaults.demand_time_weight if demand_time_weight is None
-                          else demand_time_weight)
-    route_time_weight = (defaults.route_time_weight if route_time_weight is None
-                         else route_time_weight)
-    median_connectivity_weight = (
-        defaults.median_connectivity_weight if median_connectivity_weight is None
-        else median_connectivity_weight)
-    run_name = safe_run_name(run_name)
-    overrides = [
-        "+eval=mumford0",
-        "++eval.dataset.type=tensor",
-        "++experiment.logdir=null",
-        f"++eval.n_routes={n_routes}",
-        f"++eval.min_route_len={min_route_len}",
-        f"++eval.max_route_len={max_route_len}",
-        f"++cost.kwargs.demand_time_weight={demand_time_weight}",
-        f"++cost.kwargs.route_time_weight={route_time_weight}",
-        f"++cost.kwargs.median_connectivity_weight={median_connectivity_weight}",
-        f"++cost.kwargs.connectivity_mode={connectivity_mode}",
-        f"++run_name={run_name}",
-        "model=random_path_combiner",
-    ]
-    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        cfg = compose(config_name="stacks/model_eval", overrides=overrides)
-    return _apply_disabled_components(cfg)
-
-
-def _pad_routes_to_spec(routes, n_routes, max_route_len):
-    routes = as_route_tensor(routes).long()
-    if routes.ndim == 2:
-        routes = routes[None]
-    if routes.shape[1] != n_routes:
-        raise ValueError(
-            f"Expected {n_routes} routes, got tensor shape {tuple(routes.shape)}")
-    current_len = routes.shape[-1]
-    if current_len > max_route_len:
-        raise ValueError(
-            f"RPC init produced route tensor length {current_len}, "
-            f"but max_route_len={max_route_len}")
-    if current_len < max_route_len:
-        routes = torch.nn.functional.pad(
-            routes, (0, max_route_len - current_len), value=-1)
-    return routes
-
-
 def run_lc(cfg, init_routes=None, revisit_routes=None, *,
            tensors=None, run_name_prefix="lc_", n_samples=None):
     if tensors is None:
@@ -169,14 +115,3 @@ def run_lc_batch(cfg, tensors_list, *, run_name_prefix="lc_", n_samples=None,
         model, dataloader, cfg.eval, cost_obj, n_samples=effective_n_samples,
         sample_batch_size=bs, return_routes=True, silent=True, device=device)
     return as_route_tensor(routes)
-
-
-def build_rpc_routes(spec, tensors, run_name=None, n_samples=1):
-    """Generate benchmark initial routes with RPC/pi_random (one benchmark_spec)."""
-    run_name = run_name or f"rpc_init_{spec['city']}"
-    cfg = build_rpc_cfg(run_name=run_name, n_routes=spec["n_routes"],
-                        min_route_len=spec["min_route_len"],
-                        max_route_len=spec["max_route_len"])
-    _, _metrics, _unserved, routes, _step_counts = run_lc(
-        cfg, tensors=tensors, run_name_prefix="rpc_", n_samples=n_samples)
-    return _pad_routes_to_spec(routes, spec["n_routes"], spec["max_route_len"])

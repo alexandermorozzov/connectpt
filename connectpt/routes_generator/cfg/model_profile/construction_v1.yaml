@@ -1,4 +1,2 @@
-enabled: true
 config: construction
 checkpoint_path: inductive_random_graphs_weighted_connectivity.pt
-strict_load: true

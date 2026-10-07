@@ -11,9 +11,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import numpy as np
 from omegaconf import DictConfig
-import matplotlib.pyplot as plt
 import networkx as nx
-from hydra.core.global_hydra import GlobalHydra
 
 from . import models
 from .initialization import init_from_cfg
@@ -83,21 +81,6 @@ def get_graphnet_from_cfg(net_cfg, common_cfg):
     elif net_type == 'edge graph':
         return models.EdgeGraphNet(**common_cfg, **kwargs)
     assert False, f'Unknown net type {net_type}'
-
-
-def get_random_path_combiner():
-    overrides = ["model=random_path_combiner"]
-    if GlobalHydra.instance().is_initialized():
-        cfg = compose(config_name='baselines/neural_bco_mumford.yaml',
-                      overrides=overrides)
-    else:
-        cfg_dir = Path(__file__).resolve().parent / "cfg"
-        with initialize_config_dir(config_dir=str(cfg_dir),
-                                   version_base=None):
-            cfg = compose(config_name='baselines/neural_bco_mumford.yaml',
-                          overrides=overrides)
-    model = build_model_from_cfg(cfg.model, cfg.experiment)
-    return model
 
 
 def log_config(cfg, sumwriter, prefix=''):

@@ -1,4 +1,2 @@
-enabled: true
 config: edit_trim_seeded
 checkpoint_path: improvement/improvement_lc_rttconn_adj_w10_t02_finetune100.pt
-strict_load: true

@@ -1,6 +1,0 @@
-# @package cost.kwargs
-adjustment_degree_weight: 10.0
-adjustment_degree_target: 0.2
-adjustment_degree_objective: target
-adjustment_degree_gap: 0.1
-adjustment_degree_mode: paper

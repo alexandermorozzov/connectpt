@@ -1,5 +1,3 @@
-# Holliday's ATT/RTT model: 13 edge, 11 global, 16 path and 13 halt features.
-# The legacy 14-edge construction profile remains available for WMC checkpoints.
 defaults:
   - construction
   - _self_

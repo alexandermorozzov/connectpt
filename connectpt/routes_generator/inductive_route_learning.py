@@ -1,19 +1,14 @@
 import copy
-import math
 import random
 import logging as log
 import time
 from pathlib import Path
-from itertools import product
 
 from tqdm import tqdm
 import torch
-import networkx as nx
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Batch
 import numpy as np
-import matplotlib.pyplot as plt
-import optuna
 from omegaconf import DictConfig, OmegaConf
 import hydra
 
@@ -26,64 +21,6 @@ from .transit_time_estimator import (COST_WEIGHT_KEY_ORDER,
 from . import utils as lrnu
 from .models import FeatureNorm, get_mlp, WEIGHT_FEATURE_KEYS
 from .eval_route_generator import eval_model
-
-
-BLMODE_NONE = "none"
-BLMODE_GREEDY = "greedy"
-BLMODE_ROLL = "rolling average"
-BLMODE_NN = "neural"
-
-
-class Baseline:
-    def update(self, mean_cost):
-        raise NotImplementedError
-
-    def get_baseline(self, graph_data, n_routes, cost_weights, sumwriter=None, 
-                     n_eps=None):
-        raise NotImplementedError
-    
-
-class FixedBaseline:
-    def __init__(self, baseline=0, *args, **kwargs):
-        self.baseline = baseline
-
-    def update(self, costs):
-        self.baseline = costs.mean()
-
-    def get_baseline(self, graph_data, n_routes, cost_weights, sumwriter=None,
-                     n_eps=None):
-        if sumwriter is not None:
-            sumwriter.add_scalar("baseline", self.baseline, n_eps)
-        batch_size = graph_data.num_graphs
-        return self.baseline[None, None].expand(batch_size, n_routes)
-    
-
-class RollingBaseline:
-    def __init__(self, alpha):
-        assert 0 < alpha <= 1
-        self.alpha = alpha
-        self.baseline = None
-
-    def update(self, costs):
-        mean_cost = costs.mean()
-        if self.baseline is None:
-            self.baseline = mean_cost
-        else:
-            self.baseline = self.alpha * mean_cost + (1 - self.alpha) * \
-                self.baseline
-    
-    def get_baseline(self, graph_data, cost_weights, sumwriter=None, 
-                     n_eps=None):
-        if sumwriter is not None:
-            if self.baseline is None:
-                sumwriter.add_scalar("baseline", 0, n_eps)
-            else:
-                sumwriter.add_scalar("baseline", self.baseline, n_eps)
-
-        if self.baseline is None:
-            return 0
-        else:
-            return self.baseline
 
 
 class NNBaseline:
@@ -372,44 +309,6 @@ def eval_model_over_nroutes(model, eval_dl, n_routes_range, eval_cfg, cost_obj,
     return mean_eval_cost
 
 
-def render_scenario(graph, routes, show_demand=False):
-    # draw the routes on top of the city
-    num_colours = max(2, int(np.ceil((2 * len(routes)) ** (1/3))))
-    dim_points = np.linspace(0.1, 0.9, num_colours)
-    # filter out grayscale colours
-    colours = [cc for cc in product(dim_points, dim_points, dim_points)
-                if len(np.unique(cc)) > 1]
-    colours = iter(colours)
-
-    nx_graph = nx.DiGraph()
-    for ii in range(graph.num_nodes):
-        nx_graph.add_node(ii)
-    posdict = {ii: pos.cpu().numpy() 
-               for ii, pos in enumerate(graph[STOP_KEY].pos)}
-    nx.draw_networkx_nodes(nx_graph, pos=posdict, node_size=10)
-    widths = torch.linspace(10, 2, len(routes))
-    for width, colour, route in zip(widths, colours, routes):
-        route_graph = nx.DiGraph()
-        if type(route) is torch.Tensor:
-            route = [ss.item() for ss in route]
-        for jj in range(len(route) - 1):
-            route_graph.add_edge(route[jj], route[jj+1])
-        nx.draw_networkx_edges(route_graph, pos=posdict, width=width, 
-                               edge_color=colour)
-    
-    if show_demand:
-        dmd_graph = nx.DiGraph()
-        for ii, jj in graph[DEMAND_KEY].edge_index.T:
-            dmd_graph.add_edge(ii.item(), jj.item())
-        demands = graph.demand[graph[DEMAND_KEY].edge_index[0], 
-                               graph[DEMAND_KEY].edge_index[1]]
-        widths = demands.cpu().numpy() * 5                               
-        nx.draw_networkx_edges(dmd_graph, pos=posdict, width=widths,
-                               edge_color='red', style="dotted")
-
-    plt.show()
-
-
 class DummySummaryWriter:
     def add_scalar(self, *args, **kwargs):
         pass
@@ -433,7 +332,7 @@ def _collect_episode_statistics(rewards, dones, reward_sums, lengths):
 
 def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
               train_dataloader, val_dataloader, cost_obj, eval_fn, 
-              return_scale=1, sumwriter=None, optuna_trial=None, device=None, 
+              return_scale=1, sumwriter=None, device=None, 
               checkpoint_dir=None, algorithm='ppo',
               max_seconds=None, iteration_callback=None, evaluation_callback=None):
     if algorithm not in ('ppo', 'decomposed_ppo', 'd3po'):
@@ -511,12 +410,6 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
                 model.update_and_freeze_feature_norms()
             if evaluation_callback is not None:
                 evaluation_callback(model, val_dataloader, pbar.n)
-
-            if optuna_trial is not None:
-                optuna_trial.report(avg_val_cost, iteration)
-                if iteration > 0 and optuna_trial.should_prune():
-                    # don't prune just because of a bad initialization
-                    raise optuna.exceptions.TrialPruned()
 
             # Kool et al. does this with a paired t-test, we're keeping it simple
             # for the moment.
@@ -849,222 +742,7 @@ def train_decomposed_ppo(*args, **kwargs):
     return _train_construction(*args, algorithm='decomposed_ppo', **kwargs)
 
 
-def train(model, min_n_routes, max_n_routes, cfg, optimizer, train_dataloader, 
-          val_dataloader, cost_obj, eval_fn, sumwriter=None, optuna_trial=None,
-          device=None, checkpoint_dir=None):
-    """Train a model on a dataset.
-    
-    Args:
-    eval_model -- a function that takes:
-        - a model, 
-        - a dataloader, 
-        - a summary writer,
-        - and the number of episodes so far
-        as input, and returns a scalar cost.
-    """
-    if sumwriter is None:
-        # instantiate a dummy summary writer so that the calls to it still work
-        sumwriter = DummySummaryWriter()
-
-    best_model = copy.deepcopy(model)
-    best_cost = float('inf')
-    try:
-        graphs_per_epoch = len(train_dataloader.dataset)
-    except TypeError:
-        graphs_per_epoch = 9 * len(val_dataloader.dataset)
-    batches_per_epoch = \
-        math.ceil(graphs_per_epoch / train_dataloader.batch_size)
-    pbar = tqdm(total=graphs_per_epoch * cfg.reinforce.n_epochs)
-
-    bl_module = None
-    if device is None:
-        device = next(model.parameters()).device
-    if cfg.baseline_mode == BLMODE_NONE:
-        baseline = 0
-    elif cfg.baseline_mode == BLMODE_ROLL:
-        bl_module = RollingBaseline(cfg.bl_alpha)
-    elif cfg.baseline_mode == BLMODE_NN:
-        bl_module = NNBaseline(device=device)
-        bl_module.set_input_norm(train_dataloader.dataset)
-    elif cfg.baseline_mode == BLMODE_GREEDY:
-        bl_module = FixedBaseline()
-    
-    log.info(f"discount rate is {cfg.discount_rate}")
-    supports_route_actions = getattr(model, 'supports_trim_actions', False)
-
-    n_routes = None
-    for epoch in range(cfg.reinforce.n_epochs):
-        avg_cost = eval_fn(model, val_dataloader, sumwriter, pbar.n)
-        if epoch == 0:
-            model.update_and_freeze_feature_norms()
-
-        if optuna_trial is not None:
-            optuna_trial.report(avg_cost, epoch)
-            if epoch > 0 and optuna_trial.should_prune():
-                # don't prune just because of a bad initialization
-                raise optuna.exceptions.TrialPruned()
-
-        # Kool et al. does this with a paired t-test, we're keeping it simple
-         # for the moment.
-        if avg_cost < best_cost:
-            # update the best model and the baseline
-            best_model = copy.deepcopy(model)
-            best_cost = avg_cost
-            if cfg.baseline_mode == BLMODE_GREEDY:
-                bl_module.update(-avg_cost * cfg.reward_scale)
-
-        dl_iter = iter(train_dataloader)
-        for _ in range(batches_per_epoch):
-            if n_routes is None:
-                # use the max n routes first, so that if we're going to run out
-                 # of memory, we do so right away
-                n_routes = max_n_routes
-            else:
-                # pick a random number of routes in the evaluation range
-                n_routes = random.randint(min_n_routes, max_n_routes)
-            data = next(dl_iter)
-            if device.type != 'cpu':
-                data = data.cuda()
-
-            # sample cost weights
-            cost_weights = \
-                cost_obj.sample_variable_weights(data.num_graphs, device)
-            state = RouteGenBatchState(data, cost_obj, n_routes, cfg.eval.min_route_len,
-                                       cfg.eval.max_route_len, cost_weights=cost_weights)
-            state = model.setup_planning(state)
-            
-            # run those graphs though the net
-            all_logits = []
-            all_entropy = 0
-            n_routes_so_far = []
-            state_vecs = []
-
-            if cfg.diff_reward:
-                base_result = cost_obj(state)
-                base_cost = base_result.cost
-                prev_cost = base_cost
-                rewards = []
-
-            while not state.is_done().all():
-                n_routes_so_far.append(state.n_finished_routes)
-                state_vecs.append(state.get_global_state_features(
-                    weight_feature_keys=model.weight_feature_keys))
-                if supports_route_actions:
-                    action_kinds, actions, logits, entropy = \
-                        model.step_route_action(state)
-                    state.apply_route_actions(action_kinds, actions)
-                else:
-                    actions, logits, entropy = model.step(state)
-                    state.shortest_path_action(actions)
-                if cfg.diff_reward:
-                    result = cost_obj(state)
-                    reward = (prev_cost - result.cost) * cfg.reward_scale
-                    rewards.append(reward)
-                    prev_cost = result.cost * ~state.is_done()
-             
-                all_logits.append(logits)
-                all_entropy += entropy
-
-            logits = torch.stack(all_logits, dim=1)
-
-            if cfg.diff_reward:
-                rewards = torch.stack(rewards, dim=1)
-                # apply the discount factor, gamma, to get the returns
-                rev_rwds = rewards.flip(-1)
-                prev_rr = None
-                rev_rtrns = []
-                for rr in rev_rwds.transpose(1, 0):
-                    if prev_rr is not None:
-                        rr = rr + prev_rr * cfg.discount_rate
-                    rev_rtrns.append(rr)
-                    prev_rr = rr
-                returns = torch.stack(rev_rtrns, dim=1).flip(-1)
-            else:
-                # all returns are just the final return
-                result = cost_obj(state)
-                costs = result.cost
-                costs = costs[:, None].expand(-1, logits.shape[1])
-                returns = -costs * cfg.reward_scale
-                
-            n_routes_so_far = torch.stack(n_routes_so_far, dim=1)
-            state_vecs = torch.stack(state_vecs, dim=1)
-
-            route_lens = [len(rr) for br in state.routes for rr in br]
-            sumwriter.add_scalar("avg # stops on a route", 
-                                 np.mean(route_lens), pbar.n)
-
-            sumwriter.add_scalar("avg train cost", costs[:, -1].mean(), pbar.n)
-            
-            # Log some stats with the summary writer
-            avg_rtrn = returns.mean().item()
-            sumwriter.add_scalar("avg return", avg_rtrn, pbar.n)
-
-            for metric_name, metric in result.get_metrics().items():
-                mean_value = metric.mean()
-                sumwriter.add_scalar(f"avg {metric_name}", mean_value, pbar.n)
-
-            # Log some stats with the summary writer
-            # if plan_out.route_est_vals is not None:
-            #     baseline = plan_out.route_est_vals
-            #     sumwriter.add_scalar("baseline", baseline.mean().item(), n_eps)
-            #     returns -= baseline.detach()
-            #     sumwriter.add_scalar("avg return vs baseline", returns.mean(),
-            #                           n_eps)
-            #     sumwriter.add_scalar("std return vs baseline", returns.std(), 
-            #                           n_eps)
-            if bl_module is not None:
-                baseline = bl_module.get_baseline(data, n_routes, 
-                                                  state.cost_weights,
-                                                  state_vecs, sumwriter, 
-                                                  pbar.n)
-                no_action_mask = n_routes_so_far == n_routes
-                # don't make any updates on these entries
-                returns[no_action_mask] = baseline[no_action_mask]
-                if cfg.baseline_mode != BLMODE_GREEDY:
-                    bl_module.update(returns)
-                returns -= baseline
-
-                sumwriter.add_scalar("avg return vs baseline", returns.mean(),
-                                     pbar.n)
-                sumwriter.add_scalar("std return vs baseline", returns.std(), 
-                                     pbar.n)
-
-            objective = 0
-            # compute the training signal on the logits
-            route_signal = returns
-            route_obj = (route_signal * logits).mean()
-            sumwriter.add_scalar("route obj", route_obj.item(), pbar.n)
-            objective += route_obj
-            # add entropy to the signal
-            objective += cfg.entropy_weight * entropy.mean()
-            sumwriter.add_scalar("entropy", entropy.mean().item(), pbar.n)
-
-            sumwriter.add_scalar("objective", objective.item(), pbar.n)
-
-            # backprop and weight update
-            optimizer.zero_grad()
-            objective.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            
-            pbar.update(data.num_graphs)
-
-        if checkpoint_dir is not None:
-            ckpt_filename = checkpoint_dir / f"epoch{epoch}.pt"
-            torch.save(model.state_dict(), ckpt_filename)
-
-    # final eval
-    avg_cost = eval_fn(model, val_dataloader, sumwriter, pbar.n)
-    if avg_cost < best_cost:
-        # update the best model and the baseline
-        best_model = copy.deepcopy(model)
-
-    pbar.close()
-
-    return best_model, best_cost
-
-
-def setup_and_train(cfg: DictConfig, trial: optuna.trial.Trial = None, *,
+def setup_and_train(cfg: DictConfig, *,
                     model=None, cost_obj=None, device=None, run_name=None,
                     sum_writer=None, output_dir=None, iteration_callback=None,
                     return_training_result=False):
@@ -1169,17 +847,15 @@ def setup_and_train(cfg: DictConfig, trial: optuna.trial.Trial = None, *,
     if not checkpoint_dir.exists():
         checkpoint_dir.mkdir(parents=True)
 
-    trainer = cfg.get('trainer', 'ppo' if 'ppo' in cfg else 'reinforce')
     train_fn = {'ppo': train_ppo, 'd3po': train_d3po,
-                'decomposed_ppo': train_decomposed_ppo, 'reinforce': train}[trainer]
-    extra = {} if trainer == 'reinforce' else dict(
-        max_seconds=cfg.get('train_loop', {}).get('max_seconds'),
-        return_scale=float(cfg.get('reward_scale', 1.0)),
-        iteration_callback=iteration_callback, evaluation_callback=evaluation_callback)
+                'decomposed_ppo': train_decomposed_ppo}[cfg.trainer]
     best_model, best_cost = train_fn(
         model, min_n_routes, max_n_routes, cfg, optimizer, train_dl,
         val_dl, cost_obj, eval_fn, sumwriter=sum_writer, device=device,
-        optuna_trial=trial, checkpoint_dir=checkpoint_dir, **extra)
+        checkpoint_dir=checkpoint_dir,
+        max_seconds=cfg.get('train_loop', {}).get('max_seconds'),
+        return_scale=float(cfg.get('reward_scale', 1.0)),
+        iteration_callback=iteration_callback, evaluation_callback=evaluation_callback)
 
     if return_training_result:
         return best_model, best_cost

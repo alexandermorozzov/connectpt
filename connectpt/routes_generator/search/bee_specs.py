@@ -1,9 +1,9 @@
 """BeeSpec -- the declarative description of one bee population.
 
 A BeeSpec is pure config: it names the operator, the policy it uses, the actions
-it may take, the route selector and the acceptance rule. Building a concrete bee
-(and validating the action set against the policy's model) happens in
-``bee_operators``; this module is just the parsed schema.
+it may take, the route selector and the acceptance rule. The plan
+(``executable_plan``) turns specs into operators; this module is just the
+parsed schema.
 """
 from __future__ import annotations
 

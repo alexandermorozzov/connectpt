@@ -8,9 +8,7 @@ preserved by construction:
 * the slot permutation is sliced by group counts exactly like the old
   ``type1_idxs..type7_idxs`` slices;
 * the neural operators keep the legacy "run the model over ALL bees, then
-  gather the group's slots" pattern (RNG-relevant);
-* the random-path-combiner model is created lazily at the same point of the
-  engine (``materialize()``) where the legacy code built it.
+  gather the group's slots" pattern (RNG-relevant).
 
 Builder: :meth:`ExecutablePlan.from_specs` builds a plan from declarative
 BeeSpecs (``cfg/bee`` + ``cfg/bee_set``).
@@ -23,8 +21,6 @@ from typing import Any
 import importlib
 
 import torch
-
-from .. import utils as _lrnu
 
 # Import the bee_colony *module* (not the package attribute): the package
 # __init__ rebinds ``connectpt.routes_generator.bee_colony`` to the compat
@@ -86,19 +82,14 @@ class HeuristicRebuildOp:
 
 
 class NeuralRebuildOp:
-    """Legacy type-1 neural / type-3 RPC: full-route rebuild via a model.
-
-    ``model=None`` marks a lazily-materialized random path combiner (the
-    legacy engine built it at run start; see :meth:`ExecutablePlan.materialize`).
-    """
+    """Legacy type-1 neural: full-route rebuild via the construction model."""
 
     kind = "neural_rebuild"
     uses_remaining_state = False
 
-    def __init__(self, model, name="type1", lazy_rpc=False):
+    def __init__(self, model, name="type1"):
         self.model = model
         self.name = name
-        self.lazy_rpc = lazy_rpc
 
     def mutate(self, ctx: MutationContext, idxs):
         if ctx.process_sequentially:
@@ -271,7 +262,7 @@ class ExecutablePlan:
         for g in self.groups:
             if g.count <= 0:
                 continue
-            if isinstance(g.op, NeuralRebuildOp) and not g.op.lazy_rpc:
+            if isinstance(g.op, NeuralRebuildOp):
                 return True
             if isinstance(g.op, ConstructionExtendOp):
                 return True
@@ -284,16 +275,6 @@ class ExecutablePlan:
         return {g.op.name: int(g.count) for g in self.groups}
 
     # -- lifecycle -----------------------------------------------------------
-
-    def materialize(self):
-        """Create lazily-built models (the RPC combiner) at engine start --
-        the exact point the legacy engine built them, so RNG order and model
-        state match bit-for-bit."""
-        for g in self.groups:
-            if isinstance(g.op, NeuralRebuildOp) and g.op.lazy_rpc \
-                    and g.op.model is None and g.count > 0:
-                g.op.model = _lrnu.get_random_path_combiner()
-        return self
 
     def validate(self, n_bees: int) -> None:
         total = self.total_bees
@@ -326,7 +307,7 @@ class ExecutablePlan:
         legacy per-type branching: draw one bee permutation, slice it by
         group counts in canonical (slot) order, refill empty routes, then run
         each group's operator over its slots. Returns the mutated networks and a
-        per-bee slot tensor (1..7) for mutation stats.
+        per-bee 1-based group slot tensor for mutation stats.
         """
         bee_networks = bee_networks.clone()
         seq_state = (single_bee_env_state if single_bee_env_state is not None
@@ -461,8 +442,6 @@ class ExecutablePlan:
         groups = [
             PlanGroup(rebuild_op, count_of(1)),
             PlanGroup(ShortenOp(name=name_of(2, "type2")), count_of(2)),
-            PlanGroup(NeuralRebuildOp(None, name=name_of(3, "type3"),
-                                      lazy_rpc=True), count_of(3)),
             PlanGroup(ConstructionExtendOp(
                 construction_model, name=name_of(4, "type4"),
                 allow_halt=halt_of(4),
@@ -492,8 +471,6 @@ def _canonical_slot(spec, policies: dict) -> int:
         kind = (spec.mutation_kind or spec.route_selection or "").lower()
         if "shorten" in kind:
             return 2
-        if "path_mix" in kind or "path_combin" in kind or "rpc" in kind:
-            return 3
         return 1
     if spec.operator == "neural_route_action":
         if policies[spec.model_ref].role == "construction":

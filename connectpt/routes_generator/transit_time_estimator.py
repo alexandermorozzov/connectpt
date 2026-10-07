@@ -24,7 +24,6 @@ import numpy as np
 
 MEAN_STOP_TIME_S = 0
 AVG_TRANSFER_WAIT_TIME_S = 300
-UNSAT_PENALTY_EXTRA_S = 3000
 EPSILON = 1e-6
 
 ROUTE_ACTION_EXTEND = 0
@@ -2332,12 +2331,6 @@ class MyCostModule(CostModule):
         cost = (components * weights).sum(dim=-1) + constraint_cost
         adj_pen = self._adjustment_penalty(state, cost)
         cost = cost + adj_pen
-        cho.adjustment_penalty = adj_pen   # exposed for multi-objective get_cost
-        # Normalized components (demand, route, connectivity) -- same scaling the
-        # scalar cost uses. Stashed so MultiObjectiveCostModule.get_cost (NSGA-II)
-        # can build O(1) Pareto objectives instead of raw total_route_time (~1e4),
-        # which otherwise swamps WMC (~1e2) and the adj penalty (~1).
-        cho.norm_components = components
         cho.cost = cost
 
         assert cost.isfinite().all(), "invalid cost was computed!"
@@ -2346,122 +2339,11 @@ class MyCostModule(CostModule):
         return cho
     
 
-class MultiObjectiveCostModule(MyCostModule):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.variable_weights = True
-        # don't sample any edge cases
-        self.pp_fraction = 0.33
-        self.op_fraction = 0.33
-        # median-connectivity fraction: required by the inherited
-        # sample_variable_weights; this class predated its addition.
-        self.mcw_fraction = 0.33
-
-    def sample_weights(self, batch_size, device=None):
-        weights = self.sample_variable_weights(batch_size, device)
-        weights['demand_time_weight'][0] = 1.0
-        weights['demand_time_weight'][1] = 0.0
-        weights['demand_time_weight'][2] = 0.0
-
-        weights['route_time_weight'][0] = 0.0
-        weights['route_time_weight'][1] = 1.0
-        weights['route_time_weight'][2] = 0.0
-
-        weights['median_connectivity_weight'][0] = 0.0
-        weights['median_connectivity_weight'][1] = 0.0
-        weights['median_connectivity_weight'][2] = 1.0
-        return self._mask_weight_dict(weights)
-
-    def forward(self, state, return_per_route_riders=False):
-        cho = super().forward(state, return_per_route_riders=return_per_route_riders)
-        return cho
-    
-    def get_cost(self, cho):
-        # Use the NORMALIZED cost components (same scaling as the scalar cost) so
-        # the Pareto axes are O(1) -- otherwise raw total_route_time (~1e4) swamps
-        # WMC (~1e2) and the adj penalty (~1), collapsing NSGA-II to argmin(RTT).
-        nc = getattr(cho, "norm_components", None)   # [B, 3] = (demand, route, conn)
-        if nc is not None:
-            if self.use_weighted_connectivity == True:
-                # Unified regime: (RTT_norm, WMC_norm). conn component already
-                # carries the weighted mean connectivity when uwc is on.
-                costs = torch.stack((nc[..., 1], nc[..., 2]), dim=-1)
-            else:
-                # Legacy paper baseline: (ATT_norm, RTT_norm).
-                costs = torch.stack((nc[..., 0], nc[..., 1]), dim=-1)
-        elif self.use_weighted_connectivity == True:   # fallback (no stashed norm)
-            costs = torch.stack((cho.total_route_time, cho.median_connectivity_weighted),
-                                dim=-1)
-        else:
-            costs = torch.stack((cho.mean_demand_time, cho.total_route_time),
-                                dim=-1)
-        # Unified adjustment-degree penalty also shifts the multi-objective
-        # costs (NSGA-II), so deviation from the seed is balanced like in the
-        # scalar-cost methods. Gated: no-op unless weight>0 and a seed is set.
-        adj = getattr(cho, 'adjustment_penalty', None)
-        if (adj is not None and getattr(self, 'adjustment_degree_weight', 0) > 0
-                and getattr(self, 'adjustment_seed', None) is not None):
-            costs = costs + adj.reshape(-1, 1)
-        any_violations = cho.are_constraints_violated()
-        return costs, any_violations
-
-
-class NikolicCostModule(CostModule):
-    def __init__(self, mean_stop_time_s=MEAN_STOP_TIME_S, 
-                 avg_transfer_wait_time_s=AVG_TRANSFER_WAIT_TIME_S,
-                 symmetric_routes=True, low_memory_mode=False,
-                 unsatisfied_penalty_extra_s=UNSAT_PENALTY_EXTRA_S, 
-                 ):
-        super().__init__(mean_stop_time_s, avg_transfer_wait_time_s,
-                         symmetric_routes, low_memory_mode)
-        self.unsatisfied_penalty_extra_s = unsatisfied_penalty_extra_s
-
-    def forward(self, state):
-        """
-        symmetric_routes: if True, treat routes as going both ways along their
-            stops.
-        """
-        cho = self._cost_helper(state)
-        # Note that unlike Nikolic, we count trips that take >2 transfers as 
-         # satisfied.
-        tot_sat_demand = cho.total_demand - cho.unserved_demand
-        w_2 = cho.total_demand_time / tot_sat_demand
-        no_sat_dmd = torch.isclose(tot_sat_demand, 
-                                   torch.zeros_like(tot_sat_demand))
-        # if no demand is satisfied, set w_2 to the average time of all trips 
-         # plus the penalty
-        w_2[no_sat_dmd] = cho.trip_times[no_sat_dmd].mean(dim=(-2,-1))
-        w_2 += self.unsatisfied_penalty_extra_s
-
-        cost = cho.total_demand_time + w_2 * cho.unserved_demand
-
-        assert not ((cost == 0) & (cho.total_demand > 0)).any()
-
-        log.debug("finished nikolic")
-        assert cost.isfinite().all(), "invalid cost was computed!"
-
-        cho.cost = cost
-        
-        return cho
-
-    def get_weights(self, device=None):
-        return {}
-    
-
 def get_cost_module_from_cfg(cost_cfg: DictConfig, low_memory_mode=False,
                              symmetric_routes=True):
-    # setup the cost function
-    if cost_cfg.type == 'nikolic':
-        cost_obj = NikolicCostModule(low_memory_mode=low_memory_mode, 
-                                     **cost_cfg.kwargs)
-    elif cost_cfg.type == 'mine':
-        cost_obj = MyCostModule(low_memory_mode=low_memory_mode, 
-                                **cost_cfg.kwargs)
-    elif cost_cfg.type == 'multi':
-        cost_obj = MultiObjectiveCostModule(
-            low_memory_mode=low_memory_mode,
-            **cost_cfg.kwargs)                                            
-    return cost_obj
+    if cost_cfg.type != 'mine':
+        raise ValueError(f"unknown cost type {cost_cfg.type!r}; expected 'mine'")
+    return MyCostModule(low_memory_mode=low_memory_mode, **cost_cfg.kwargs)
 
 
 def check_for_duplicate_routes(routes_tensor):

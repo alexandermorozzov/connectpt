@@ -11,9 +11,8 @@ This package provides tools for:
     - neural network models for inductive route generation,
     - heuristic initialization methods (John et al., Nikolić & Teodorović),
     - Bee Colony Optimization (BCO),
-    - training loops (PPO / REINFORCE-style inductive learning),
+    - training loops (PPO / D3PO inductive learning),
     - evaluation utilities for route generators,
-    - replay buffers (standard & prioritized),
     - model-building helpers and common utilities.
 
 Typical usage:
@@ -63,8 +62,6 @@ from .transit_time_estimator import (
     CostHelperOutput,
     CostModule,
     MyCostModule,
-    MultiObjectiveCostModule,
-    NikolicCostModule,
     ROUTE_ACTION_EXTEND,
     ROUTE_ACTION_HALT,
     ROUTE_ACTION_TRIM_END,
@@ -87,14 +84,6 @@ from .initialization import (
 # The bee-colony engine is ``bee_colony.run_bee_colony_plan`` (plan-driven);
 # the search application wraps it via ``search.BeeColonySearchRun``.
 
-# === Comparison Baselines (ported from AHolliday/transit_learning) ===
-from .simulated_annealing import simulated_annealing_with_reheating
-from .genetic_algorithm import run as genetic_algorithm
-from .hyperheuristics import hyperheuristic
-from .nsgaii import NSGAII, husselmann_init
-from . import heuristics
-from .nx_heuristic import build_nx_heuristic_routes, generate_initial_routes
-
 # === Evaluation & Sampling ===
 from .eval_route_generator import (
     sample_from_model,
@@ -103,14 +92,7 @@ from .eval_route_generator import (
 
 # === Inductive Learning ===
 from .inductive_route_learning import (
-    Baseline,
-    FixedBaseline,
-    RollingBaseline,
     NNBaseline,
-    BLMODE_NONE,
-    BLMODE_GREEDY,
-    BLMODE_ROLL,
-    BLMODE_NN,
 )
 
 # === Models & Architectures ===
@@ -136,15 +118,11 @@ from .models import (
 from .utils import (
     build_model_from_cfg,
     get_graphnet_from_cfg,
-    get_random_path_combiner,
     process_standard_experiment_cfg,
     test_method,
     yen_k_shortest_paths,
     log_config,
 )
-
-# === Replay Buffers ===
-from .replay_buffer import ReplayBuffer, PrioritizedReplayBuffer
 
 # === Torch Utilities ===
 from .torch_utils import (
@@ -158,9 +136,6 @@ from .torch_utils import (
     unravel_indices,
     AllShortestPaths,
 )
-
-# === Build Dataset (Simulation-Based) ===
-from .build_dataset import build_dataset
 
 # === Experiment orchestration API (M010 stage 6) ===
 # The narrow public surface the notebook uses: name an experiment, run it,

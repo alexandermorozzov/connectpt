@@ -38,13 +38,6 @@ def load_experiment(name: str, *, overrides=None):
     return _compose_experiment(name, overrides)
 
 
-def _as_list(value):
-    """A scalar sweep axis is normalised to a one-element grid."""
-    if isinstance(value, (list, tuple)):
-        return list(value)
-    return [value]
-
-
 def _runs_root(cfg) -> str:
     """The scratch root for per-run outputs (``paths.runs_dir``)."""
     return str((cfg.get("paths") or {}).get("runs_dir") or "artifacts/runs")
@@ -92,8 +85,8 @@ def build_experiment(
     A **method** selects the ``method=<x>`` Hydra group, which carries the
     operators AND the models they need; ``label`` names it in the results table.
 
-    ``alpha``/``adj_target`` accept a scalar or a list (the sweep grid axis);
-    ``route_len`` is ``(min_route_len, max_route_len)``.
+    ``alpha``/``adj_target`` set the one search point (the script loops over
+    the grid); ``route_len`` is ``(min_route_len, max_route_len)``.
 
     ``weights_dir`` is the root relative checkpoint paths resolve against and
     ``runs_dir`` the root of the per-run scratch dir -- both default to the
@@ -135,15 +128,13 @@ def build_experiment(
             cfg.instance.min_route_len = int(route_len[0])
             cfg.instance.max_route_len = int(route_len[1])
 
-        # -- sweep grid (create the block if the leaf has none) --
+        # -- search point (create the block if the leaf has none) --
         if cfg.get("sweep") is None:
             cfg.sweep = OmegaConf.create({})
         if alpha is not None:
-            cfg.sweep.alpha = _as_list(alpha)
+            cfg.sweep.alpha = alpha
         if adj_target is not None:
-            cfg.sweep.adj_target = (_as_list(adj_target)
-                                    if isinstance(adj_target, (list, tuple))
-                                    else adj_target)
+            cfg.sweep.adj_target = adj_target
         if adj_weight is not None:
             cfg.sweep.adj_weight = adj_weight
         if n_iterations is not None:

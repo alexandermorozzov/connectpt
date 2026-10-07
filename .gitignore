@@ -61,3 +61,4 @@ graphify-out/
 training_figure_variants/
 curric_noadj_v1/
 tmp/
+tests/

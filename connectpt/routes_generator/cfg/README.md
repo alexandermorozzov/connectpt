@@ -11,7 +11,7 @@ cfg/
 ├── bee_set/         # набор пчёл метода и их число
 ├── bee/             # один тип пчелы (оператор)
 ├── cost/            # цель: rtt_wmc (поиск, edit), att_rtt (construction)
-├── adjustment/      # штраф за изменение сети: cap, target, disabled
+├── adjustment/      # штраф за изменение сети: cap
 ├── model/           # архитектура сети
 ├── model_profile/   # версия модели: архитектура + чекпоинт
 ├── dataset/         # датасет и его разбиение
@@ -19,7 +19,7 @@ cfg/
 ├── curriculum/      # расписание тиров edit-обучения
 ├── trainer/         # оптимизатор и цикл PPO / D3PO
 ├── experiment/      # общие настройки: seed, symmetric_routes
-├── sweep/           # сетка поиска: α, число итераций
+├── sweep/           # точка поиска: α, число итераций
 └── stacks/          # внутренняя сборка для оценки моделей
 ```
 
@@ -39,7 +39,7 @@ python scripts/prepare_data.py
 ```
 
 Поиск и edit-обучение используют одну цель `cost=rtt_wmc`. Штраф за изменение
-сети задаётся отдельно: `adjustment=cap`, `adjustment=target` или
-`adjustment=disabled`. Прогоны по умолчанию берут `cap`.
+сети задаёт `adjustment/cap.yaml`. Выключить штраф: `cost.kwargs.adjustment_degree_weight=0`
+(в поиске — `--adj-weight 0`). Режим «цель»: `cost.kwargs.adjustment_degree_objective=target`.
 
 YAML содержит только значения. Комментарии в конфигах не пишутся.

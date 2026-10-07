@@ -24,14 +24,12 @@ eval:
   max_route_len: 12
   csv: false
 evaluation:
-  # Fixed held-out validation subset; never sampled from the train/test split.
   graph_count: 64
   test_graph_count: null
   pareto_enabled: true
   pareto_period: 10
   pareto_preference_count: 11
   pareto_stochastic_samples: 1
-  # Fixed normalized ATT/RTT bounds, shared across runs and training iterations.
   hv_reference: [3.0, 3.0]
   eu_preference_count: 101
   log_pareto_front: true

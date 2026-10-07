@@ -283,13 +283,6 @@ def _record_accepted_mutations(mutation_counts_out, mutation_types,
         bee_names)
 
 
-def _record_worse_accepted_mutations(mutation_counts_out, mutation_types,
-                                     accepted_mask, bee_names):
-    _record_mutation_mask(
-        mutation_counts_out, 'worse_accepted', mutation_types, accepted_mask,
-        bee_names)
-
-
 def _ensure_selection_stats_bucket(mutation_counts_out):
     if mutation_counts_out is None:
         return None
@@ -297,38 +290,7 @@ def _ensure_selection_stats_bucket(mutation_counts_out):
     bucket.setdefault('parent_copies', 0)
     bucket.setdefault('nonbest_parent_copies', 0)
     bucket.setdefault('worse_parent_copies', 0)
-    bucket.setdefault('trim_grace_forced_accepts', 0)
-    bucket.setdefault('trim_grace_protected', 0)
     return bucket
-
-
-def _record_trim_grace_stats(mutation_counts_out, *, forced_accepts=0,
-                             protected=0):
-    """Record trim-grace activity (force-accepted trims, protected bees)."""
-    if mutation_counts_out is None:
-        return
-    bucket = _ensure_selection_stats_bucket(mutation_counts_out)
-    bucket['trim_grace_forced_accepts'] += int(forced_accepts)
-    bucket['trim_grace_protected'] += int(protected)
-
-
-def _apply_trim_grace_to_parents(parent_idxs, trim_grace, bee_idxs):
-    """Force trim-protected bees to be their own parent during selection.
-
-    A bee whose route was just trimmed has a temporarily worse cost. Without
-    protection, cost-based selection (recruiter/follower or soft) discards it
-    immediately, so the trim never reaches the next generation and a
-    follow-up extend never gets the chance to recover the loss. Bees with
-    ``trim_grace > 0`` keep their own just-trimmed network instead.
-
-    Returns ``(parent_idxs, n_protected)``.
-    """
-    protected = trim_grace > 0
-    if not protected.any():
-        return parent_idxs, 0
-    self_idxs = bee_idxs[None].expand_as(parent_idxs)
-    parent_idxs = torch.where(protected, self_idxs, parent_idxs)
-    return parent_idxs, int(protected.sum().item())
 
 
 def _record_selection_stats(mutation_counts_out, parent_idxs,
@@ -347,75 +309,13 @@ def _record_selection_stats(mutation_counts_out, parent_idxs,
         (parent_costs > bee_objective_costs).sum().item())
 
 
-def _sample_soft_selection_parents(bee_objective_costs, temperature,
-                                   uniform_mix=0.05, elite_count=1):
-    """Sample parent bee indices with a soft preference for lower cost."""
-    _, n_bees = bee_objective_costs.shape
-    centered = bee_objective_costs - \
-        bee_objective_costs.min(dim=1, keepdim=True).values
-    probs = torch.softmax(-centered / temperature, dim=1)
-    if uniform_mix > 0:
-        probs = (1 - uniform_mix) * probs + uniform_mix / n_bees
-    parents = probs.multinomial(n_bees, replacement=True)
-
-    elite_count = min(max(int(elite_count), 0), n_bees)
-    if elite_count > 0:
-        elite_idxs = bee_objective_costs.topk(
-            elite_count, dim=1, largest=False).indices
-        parents[:, :elite_count] = elite_idxs
-    return parents
-
-
-def _get_route_selection_weights(bee_networks, demand,
-                                 use_demand_weighted_route_selection=False):
-    """Return per-route sampling weights for choosing mutation targets.
-
-    When demand weighting is enabled, routes that directly satisfy less demand
-    get larger weights, so they are sampled more often but not deterministically.
-    """
-    batch_size, n_bees, n_routes, _ = bee_networks.shape
-    dev = bee_networks.device
-    weights = torch.ones((batch_size, n_bees, n_routes), dtype=torch.float32,
-                         device=dev)
-    if not use_demand_weighted_route_selection:
-        return weights
-
-    expanded_demand = demand[:, None].expand(-1, n_bees, -1, -1)
-    flat_expanded_demand = expanded_demand.flatten(0, 1)
-    flat_bee_networks = bee_networks.flatten(0, 1)
-    direct_demand = tu.aggr_edges_over_sequences(
-        flat_bee_networks,
-        flat_expanded_demand[..., None],
-    ).squeeze(-1)
-    direct_demand = direct_demand.reshape(batch_size, n_bees, n_routes)
-
-    # Turn "how much demand this route directly serves" into a "badness"
-    # score so worse-covered routes are sampled more often.
-    max_direct_demand = direct_demand.max(dim=-1, keepdim=True).values
-    weights = (max_direct_demand - direct_demand).clamp_min(0)
-    no_positive_weights = weights.sum(dim=-1) == 0
-    weights[no_positive_weights] = 1.0
-    return weights
-
-
-def _choose_route_indices(bee_networks, demand, n_routes,
-                          use_demand_weighted_route_selection=False):
-    """Sample one route index per bee for mutation."""
-    if not use_demand_weighted_route_selection:
-        return torch.randint(
-            high=int(n_routes.item()),
-            size=bee_networks.shape[:2],
-            device=bee_networks.device,
-        )
-
-    weights = _get_route_selection_weights(
-        bee_networks,
-        demand,
-        use_demand_weighted_route_selection=True,
+def _choose_route_indices(bee_networks, n_routes):
+    """Sample one route index per bee for mutation, uniformly."""
+    return torch.randint(
+        high=int(n_routes.item()),
+        size=bee_networks.shape[:2],
+        device=bee_networks.device,
     )
-    flat_weights = weights.flatten(0, 1)
-    chosen_flat = flat_weights.multinomial(1).squeeze(-1)
-    return chosen_flat.reshape(bee_networks.shape[:2])
 
 
 def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
@@ -431,19 +331,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                adjustment_degree_mode='current',
                adjustment_degree_objective='raw',
                adjustment_degree_target=0.2,
-               use_demand_weighted_route_selection=False,
-               worse_accept_temperature=0.0,
-               worse_accept_decay=0.995,
-               worse_accept_min_temperature=0.001,
-               worse_selection_temperature=0.0,
-               worse_selection_decay=0.995,
-               worse_selection_min_temperature=0.001,
-               worse_selection_uniform_mix=0.05,
-               worse_selection_elite_count=1,
-               trim_grace_period=0,
-               process_neural_bees_sequentially=False,
-               early_stop_patience=None,
-               early_stop_min_delta=0.0):
+               process_neural_bees_sequentially=False):
     """Implementation of the method of  Nikolic and Teodorovic (2013).
     
     state -- A RouteGenBatchState object representing the initial state.
@@ -460,7 +348,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
         called P in the paper.  In their experiments, they use 0.2.
     n_iters -- The number of iterations to perform, called IT in the paper.
     plan -- an ExecutablePlan (search.executable_plan): the ordered mutation-
-        operator groups (rebuild / shorten / RPC / construction-extend /
+        operator groups (rebuild / shorten / construction-extend /
         edit / trim / trim-then-extend) with their bee counts, models and
         per-operator halt/max-len flags. Built from declarative BeeSpecs via
         ``ExecutablePlan.from_specs``.
@@ -475,62 +363,12 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
         adjustment_degree_target instead of the raw adjustment itself.
     adjustment_degree_target -- target adjustment value when using the
         "target" objective.
-    use_demand_weighted_route_selection -- if True, choose routes for mutation
-        by sampling routes that directly satisfy less demand more often.
-    worse_accept_temperature -- if > 0, also accept strictly worse mutations
-        with probability exp(-delta / temperature).  Set to 0 to keep the
-        original greedy acceptance.
-    worse_accept_decay -- multiplicative temperature decay per BCO iteration.
-    worse_accept_min_temperature -- lower temperature bound while worse
-        acceptance is enabled.
-    worse_selection_temperature -- if > 0, use soft population selection
-        instead of the original recruiter/follower copying. Lower objective
-        costs remain more likely, but worse/non-best bees can survive.
-    worse_selection_decay -- multiplicative temperature decay per BCO
-        iteration for soft population selection.
-    worse_selection_min_temperature -- lower selection temperature bound while
-        soft population selection is enabled.
-    worse_selection_uniform_mix -- probability mass mixed into a uniform
-        parent distribution to preserve exploration.
-    worse_selection_elite_count -- number of best current bees copied into
-        the first population slots before the remaining slots are sampled.
-    trim_grace_period -- if > 0, enable trim-grace selection. A route-edit
-        that shrinks its route (a trim) is a setup move: on its own it
-        raises cost, so plain cost-based acceptance/selection discards it
-        before a follow-up extend can pay off. With trim grace, a trimming
-        mutation is force-accepted (one per grace window) and the bee is
-        protected from cost-based selection for ``trim_grace_period``
-        population-selection rounds, letting the trim survive into the next
-        generation. Set to 0 to keep the original cost-only selection.
-    process_neural_bees_sequentially -- if True, neural/RPC/edit bee
+    process_neural_bees_sequentially -- if True, neural/edit bee
         mutations are evaluated one bee at a time along the bee dimension and
         then reassembled. This reduces peak memory for large single graphs
         while preserving the default batched behaviour when False.
     """
     plan.validate(n_bees)
-    if worse_accept_temperature < 0:
-        raise ValueError("worse_accept_temperature must be >= 0")
-    if worse_accept_decay <= 0:
-        raise ValueError("worse_accept_decay must be > 0")
-    if worse_accept_min_temperature < 0:
-        raise ValueError("worse_accept_min_temperature must be >= 0")
-    if worse_selection_temperature < 0:
-        raise ValueError("worse_selection_temperature must be >= 0")
-    if worse_selection_decay <= 0:
-        raise ValueError("worse_selection_decay must be > 0")
-    if worse_selection_min_temperature < 0:
-        raise ValueError("worse_selection_min_temperature must be >= 0")
-    if not 0 <= worse_selection_uniform_mix <= 1:
-        raise ValueError("worse_selection_uniform_mix must be in [0, 1]")
-    if worse_selection_elite_count < 0:
-        raise ValueError("worse_selection_elite_count must be >= 0")
-    if trim_grace_period < 0:
-        raise ValueError("trim_grace_period must be >= 0")
-
-    # materialize lazily-built operator models (the random path combiner) at
-    # the exact point the legacy engine instantiated them, so the RNG order and
-    # model init match bit-for-bit.
-    plan.materialize()
 
     batch_size = state.batch_size
 
@@ -639,37 +477,8 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
 
     cost_history = torch.zeros((batch_size, n_iterations + 1), device=dev)
     cost_history[:, 0] = best_raw_costs
-    use_worse_accept = worse_accept_temperature > 0
-    use_worse_selection = worse_selection_temperature > 0
-    use_trim_grace = trim_grace_period > 0
-    # Early-stopping bookkeeping. BCO's best_raw_costs is monotonic by
-    # construction (only the lowest cost ever seen replaces it), so a strict
-    # drop > `min_delta` resets the patience counter.
-    use_early_stop = (early_stop_patience is not None
-                      and early_stop_patience > 0)
-    iters_since_best_improved = 0
-    best_cost_tracker = float(best_raw_costs.min().item())
-    # Per-bee countdown: > 0 means the bee was recently trimmed and is
-    # protected from cost-based selection until the counter expires.
-    trim_grace = torch.zeros((batch_size, n_bees), dtype=torch.long,
-                             device=dev)
 
     for iteration in tqdm(range(n_iterations), disable=silent):
-        if use_worse_accept:
-            current_worse_accept_temperature = max(
-                worse_accept_min_temperature,
-                worse_accept_temperature * (worse_accept_decay ** iteration),
-            )
-        else:
-            current_worse_accept_temperature = 0.0
-        if use_worse_selection:
-            current_worse_selection_temperature = max(
-                worse_selection_min_temperature,
-                worse_selection_temperature *
-                (worse_selection_decay ** iteration),
-            )
-        else:
-            current_worse_selection_temperature = 0.0
         for pi in range(passes_per_it):
             for mi in range(mod_steps_per_pass):
 
@@ -687,13 +496,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                 # chosen_route_idxs = flat_chosen_route_idxs.reshape(batch_size, 
                 #                                                    n_bees)                
 
-                chosen_route_idxs = _choose_route_indices(
-                    bee_networks,
-                    demand,
-                    n_routes,
-                    use_demand_weighted_route_selection=
-                    use_demand_weighted_route_selection,
-                )
+                chosen_route_idxs = _choose_route_indices(bee_networks, n_routes)
                 gather_idx = chosen_route_idxs[..., None, None]
                 gather_idx = gather_idx.expand(-1, -1, -1, max_n_nodes)
                 old_modified_routes = bee_networks.gather(2, gather_idx).squeeze(2)
@@ -745,51 +548,14 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                 # adj already included in new_bee_raw_costs via cost_obj
                 new_bee_objective_costs = new_bee_raw_costs
 
-                objective_delta = new_bee_objective_costs - bee_objective_costs
-                better_idxs = objective_delta < 0
-                if use_worse_accept and current_worse_accept_temperature > 0:
-                    worse_candidates = objective_delta > 0
-                    worse_probs = torch.zeros_like(objective_delta)
-                    worse_probs[worse_candidates] = torch.exp(
-                        -objective_delta[worse_candidates] /
-                        current_worse_accept_temperature)
-                    worse_accepted = worse_candidates & (
-                        torch.rand_like(worse_probs) < worse_probs)
-                    accepted_idxs = better_idxs | worse_accepted
-                else:
-                    worse_accepted = torch.zeros_like(better_idxs)
-                    accepted_idxs = better_idxs
+                # greedy acceptance: keep only strict improvements
+                accepted_idxs = (new_bee_objective_costs - bee_objective_costs) < 0
 
-                # Trim-grace: a mutation that shrinks its chosen route is a
-                # setup move. Force-accept it (one per grace window) so the
-                # trimmed network reaches the next generation, where a
-                # follow-up extend can recover and improve on it.
-                forced_trim_accepts = torch.zeros_like(better_idxs)
-                if use_trim_grace:
-                    new_modified_routes = new_bee_networks.gather(
-                        2, gather_idx).squeeze(2)
-                    old_route_lens = (old_modified_routes > -1).sum(-1)
-                    new_route_lens = (new_modified_routes > -1).sum(-1)
-                    is_trim_mutation = new_route_lens < old_route_lens
-                    forced_trim_accepts = is_trim_mutation & \
-                        (trim_grace == 0) & ~accepted_idxs
-                    accepted_idxs = accepted_idxs | forced_trim_accepts
-                    _record_trim_grace_stats(
-                        mutation_counts_out,
-                        forced_accepts=int(forced_trim_accepts.sum().item()))
-
-                bee_names = plan.group_names()
                 _record_accepted_mutations(
                     mutation_counts_out,
                     mutation_types,
                     accepted_idxs,
-                    bee_names,
-                )
-                _record_worse_accepted_mutations(
-                    mutation_counts_out,
-                    mutation_types,
-                    worse_accepted,
-                    bee_names,
+                    plan.group_names(),
                 )
                 bee_networks[accepted_idxs] = new_bee_networks[accepted_idxs]
                 bee_raw_costs[accepted_idxs] = new_bee_raw_costs[accepted_idxs]
@@ -800,12 +566,6 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                 bee_adjustment_penalties[accepted_idxs] = \
                     new_bee_adjustment_penalties[accepted_idxs]
                 bee_metrics[accepted_idxs] = new_bee_metrics[accepted_idxs]
-
-                if use_trim_grace:
-                    # Arm the grace counter for any bee whose accepted
-                    # mutation trimmed its route.
-                    graced_now = accepted_idxs & is_trim_mutation
-                    trim_grace[graced_now] = trim_grace_period
 
             # do "backward pass"
 
@@ -840,35 +600,6 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                 except Exception as _cb_exc:
                     log.warning(f"bee_colony iteration_callback failed: {_cb_exc}")
 
-            if use_worse_selection and current_worse_selection_temperature > 0:
-                parent_idxs = _sample_soft_selection_parents(
-                    bee_objective_costs,
-                    current_worse_selection_temperature,
-                    uniform_mix=worse_selection_uniform_mix,
-                    elite_count=worse_selection_elite_count,
-                )
-                if use_trim_grace:
-                    parent_idxs, n_protected = _apply_trim_grace_to_parents(
-                        parent_idxs, trim_grace, bee_idxs)
-                    _record_trim_grace_stats(
-                        mutation_counts_out, protected=n_protected)
-                _record_selection_stats(
-                    mutation_counts_out, parent_idxs, bee_objective_costs)
-
-                bee_networks = bee_networks[batch_idxs[:, None], parent_idxs]
-                bee_raw_costs = bee_raw_costs[batch_idxs[:, None], parent_idxs]
-                bee_objective_costs = \
-                    bee_objective_costs[batch_idxs[:, None], parent_idxs]
-                bee_adjustment_degrees = \
-                    bee_adjustment_degrees[batch_idxs[:, None], parent_idxs]
-                bee_adjustment_penalties = \
-                    bee_adjustment_penalties[batch_idxs[:, None], parent_idxs]
-                bee_metrics = bee_metrics[batch_idxs[:, None], parent_idxs]
-                if use_trim_grace:
-                    trim_grace = trim_grace[batch_idxs[:, None], parent_idxs]
-                    trim_grace = (trim_grace - 1).clamp_min(0)
-                continue
-
             # decide whether each bee is a recruiter or follower
             max_bee_costs, _ = bee_objective_costs.max(dim=1)
             min_bee_costs, _ = bee_objective_costs.min(dim=1)
@@ -884,8 +615,6 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
 
             if not are_recruiters.any():
                 # no recruiters, so make everyone keep their own network.
-                if use_trim_grace:
-                    trim_grace = (trim_grace - 1).clamp_min(0)
                 continue
 
             # decide which recruiter each follower will follow
@@ -902,11 +631,6 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
             recruiters[no_valid_recruiters] = bee_idxs
             recruiters[are_recruiters] = \
                 bee_idxs[None].expand(batch_size, -1)[are_recruiters]
-            if use_trim_grace:
-                recruiters, n_protected = _apply_trim_grace_to_parents(
-                    recruiters, trim_grace, bee_idxs)
-                _record_trim_grace_stats(
-                    mutation_counts_out, protected=n_protected)
             _record_selection_stats(
                 mutation_counts_out, recruiters, bee_objective_costs)
 
@@ -920,9 +644,6 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
             bee_adjustment_penalties = \
                 bee_adjustment_penalties[batch_idxs[:, None], recruiters]
             bee_metrics = bee_metrics[batch_idxs[:, None], recruiters]
-            if use_trim_grace:
-                trim_grace = trim_grace[batch_idxs[:, None], recruiters]
-                trim_grace = (trim_grace - 1).clamp_min(0)
 
         if sum_writer is not None:
             # log the various metrics
@@ -935,31 +656,6 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                 sum_writer.add_scalar('best adjustment penalty',
                                       best_adjustment_penalties.mean(),
                                       iteration + 1)
-            if use_worse_accept:
-                sum_writer.add_scalar('worse accept temperature',
-                                      current_worse_accept_temperature,
-                                      iteration + 1)
-            if use_worse_selection:
-                sum_writer.add_scalar('worse selection temperature',
-                                      current_worse_selection_temperature,
-                                      iteration + 1)
-
-        # Early-stopping check (post-iteration: cost_history[iteration+1] is
-        # the freshly written best_raw_costs).
-        new_best = float(best_raw_costs.min().item())
-        if best_cost_tracker - new_best > early_stop_min_delta:
-            best_cost_tracker = new_best
-            iters_since_best_improved = 0
-        else:
-            iters_since_best_improved += 1
-        if use_early_stop and iters_since_best_improved >= early_stop_patience:
-            cost_history = cost_history[:, :iteration + 2].clone()
-            if not silent:
-                log.info(
-                    f"[BCO] early stop at iter {iteration + 1}/{n_iterations}: "
-                    f"no >{early_stop_min_delta:g} best improvement in "
-                    f"{iters_since_best_improved} iters")
-            break
 
     # return the best solution
     state.replace_routes(best_networks)

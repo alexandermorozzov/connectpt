@@ -11,8 +11,7 @@ from __future__ import annotations
 
 import argparse
 
-from connectpt.routes_generator.core import ExperimentRunFactory
-from connectpt.routes_generator.training.dataset_build import load_train_config
+from connectpt.routes_generator.core import ExperimentRunFactory, load_experiment
 
 
 def main() -> None:
@@ -26,7 +25,7 @@ def main() -> None:
     overrides = list(args.overrides)
     if args.force:
         overrides.append("dataset_build.force_regen=true")
-    cfg = load_train_config(args.config_name, overrides=overrides)
+    cfg = load_experiment(args.config_name, overrides=overrides)
     artifact = ExperimentRunFactory.from_cfg(cfg).run()
     ds = artifact.metadata["dataset"]
 

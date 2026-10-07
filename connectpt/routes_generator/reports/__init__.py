@@ -5,9 +5,6 @@ figures. It must NOT import the training/ or search/ layers -- it works only off
 persisted data + evaluation result schemas, so figures can be rebuilt from disk.
 """
 
-from .artifact_loaders import (
-    load_evaluation_result, load_table, load_routes, load_search_summary,
-)
 from .search_tables import make_search_plan_table, make_search_comparison_table
 from .comparison_tables import make_comparison_table
 from .figures import (plot_geo_map_panels, plot_routes_grid, plot_pareto,
@@ -21,14 +18,9 @@ from .geo import (project_coords, project_coords_3857, route_adjustments,
                  street_underlay_adj, route_underlay_adj)
 from .paper_io import (paper_row, save_paper_table, save_paper_routes,
                        save_paper_fig, ravel_hist)
-from .report_run import ReportRun
 
 
 __all__ = [
-    "load_evaluation_result",
-    "load_table",
-    "load_routes",
-    "load_search_summary",
     "make_search_plan_table",
     "make_search_comparison_table",
     "make_comparison_table",
@@ -57,5 +49,4 @@ __all__ = [
     "save_paper_routes",
     "save_paper_fig",
     "ravel_hist",
-    "ReportRun",
 ]

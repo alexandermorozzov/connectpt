@@ -18,6 +18,10 @@ paths:
   runs_dir: artifacts/runs
   output_dir: ${paths.runs_dir}/${run.name}
 
+cost:
+  kwargs:
+    ignore_stops_oob: false
+
 models: {}
 search:
   process_neural_bees_sequentially: false

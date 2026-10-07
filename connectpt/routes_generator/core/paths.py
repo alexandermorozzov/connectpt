@@ -45,6 +45,14 @@ EDIT_MODEL_WEIGHTS_PATH = (
 )
 
 
+def safe_run_name(run_name: str) -> str:
+    """Filesystem/run-name-safe slug (ascii alnum + ._-, collapsed underscores)."""
+    safe = "".join(c if (c.isascii() and (c.isalnum() or c in "._-")) else "_"
+                   for c in str(run_name))
+    safe = "_".join(part for part in safe.split("_") if part)
+    return safe.strip("._-") or "run"
+
+
 def resolve_under_root(path) -> Path:
     """Resolve a config path against the repo root when it is relative.
 

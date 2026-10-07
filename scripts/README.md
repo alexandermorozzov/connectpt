@@ -20,12 +20,13 @@
 
 ```
 python scripts/run_search.py [--methods ...] [--instances ...] [--alpha ...] [--seeds ...]
-                             [--iters N] [--adj-weight W] [--adj-target T]
+                             [--iters N] [--adj-weight W] [--adj-target T ...]
                              [--out-dir DIR] [--runs-dir DIR] [--weights-dir DIR]
                              [--log-dir DIR] [--log FILE] [--cpu] [--no-initial] [--dry-run]
 ```
 
-Без аргументов скрипт делает один короткий прогон.
+Без аргументов скрипт делает один короткий прогон. Один запуск `SearchRun` считает одну
+точку (метод, инстанс, seed, α, цель adjustment); перебор сетки делает скрипт.
 
 | Флаг | По умолчанию |
 |---|---|
@@ -37,7 +38,8 @@ python scripts/run_search.py [--methods ...] [--instances ...] [--alpha ...] [--
 | `--adj-weight`, `--adj-target` | из `cfg/adjustment/cap.yaml` (вес 10, цель 0.2) |
 | `--out-dir` | `artifacts/results/search` |
 
-`--adj-weight 0` выключает штраф за изменение сети. `--adj-target` — доля, а не проценты.
+`--adj-weight 0` выключает штраф за изменение сети. `--adj-target` — доля, а не проценты;
+можно задать несколько значений: сетка α × цель.
 
 Валидация статьи — сетку задайте явно:
 

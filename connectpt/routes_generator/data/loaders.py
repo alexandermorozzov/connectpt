@@ -40,9 +40,6 @@ def instance_spec(name: str):
     return OmegaConf.load(path)
 
 
-# Compatibility for callers outside the new run/config layer.
-eval_spec = instance_spec
-
 
 def load_benchmark_tensors(city: str) -> dict:
     """Load a benchmark city's coords / travel-times / demand text files."""

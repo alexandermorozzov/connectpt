@@ -7,7 +7,6 @@ import logging as log
 import torch
 from torch_geometric.data import Batch
 from omegaconf import DictConfig, OmegaConf
-import hydra
 
 from torch_geometric.loader import DataLoader
 from .citygraph_dataset import CityGraphData, \
@@ -109,12 +108,6 @@ def sample_from_model(model, state, cost_obj, n_samples=20,
         all_costs.append(batch_costs)
 
     all_costs = torch.cat(all_costs, dim=0).reshape(n_samples, -1)
-
-    # # plot a histogram of the costs, with 1/10th as many bins as samples
-    # import matplotlib.pyplot as plt
-    # plt.hist(all_costs.cpu().numpy().flatten(), bins= n_samples // 1)
-    # plt.savefig("cost_hist.png")
-    # print(f"Average cost of samples: {all_costs.mean()}")
 
     _, min_indices = all_costs.min(0)
     batch_size = len(flat_sample_inputs) // n_samples
@@ -237,8 +230,6 @@ def eval_model(model, eval_dataloader, eval_cfg, cost_obj, sum_writer=None,
         return cost, metrics
 
 
-# @hydra.main(version_base=None, config_path="../cfg", 
-#             config_name="construct")
 def main(cfg: DictConfig, tensors:dict):
     global DEVICE
     assert 'model' in cfg, "Must provide config for model!"

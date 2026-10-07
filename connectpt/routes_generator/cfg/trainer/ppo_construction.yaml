@@ -23,9 +23,7 @@ ppo:
   epsilon: 0.2
   use_gae: true
   gae_lambda: 0.95
-  # Holliday retains preferences through episode resets within a graph batch.
   resample_preferences_on_terminal: false
   holliday_critic_features: true
   advantage_normalization: minibatch
-  # Upstream: one initial validation pass, then update/freeze FeatureNorm.
   calibrate_before_validation: false

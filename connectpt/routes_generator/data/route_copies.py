@@ -349,8 +349,7 @@ REALISTIC_TIER_CFG = {
 
 def try_detour_mutation(routes, rng, street_adj, min_len, max_len,
                         min_stretch=1.3, max_stretch=2.5, attempts=120,
-                        demand=None, n_nodes=None, max_redundancy_gain=0.05,
-                        block_all_interior=False):
+                        demand=None, n_nodes=None, max_redundancy_gain=0.05):
     """Replace a route segment with a longer street path (a "detour").
 
     Picks two anchor stops >= 2 legs apart and reroutes between them via a
@@ -359,11 +358,8 @@ def try_detour_mutation(routes, rng, street_adj, min_len, max_len,
     detour models a *suboptimal* route, not coverage loss or duplication:
     when ``demand``/``n_nodes`` are given, candidates that disconnect served
     demand are rejected, and the network redundancy may grow by at most
-    ``max_redundancy_gain``. ``block_all_interior=True`` forbids the WHOLE old
-    corridor (not one random stop), forcing a topologically long bypass --
-    used by the gross training tier to make detours expensive enough that
-    straightening them carries a real reward. Returns ``(route_idx,
-    new_nodes, old_time, new_time)`` or None.
+    ``max_redundancy_gain``. Returns ``(route_idx, new_nodes, old_time,
+    new_time)`` or None.
     """
     n_routes = routes.shape[0]
     base_d_un = (uncovered_demand_pct(routes, demand, n_nodes)
@@ -380,13 +376,10 @@ def try_detour_mutation(routes, rng, street_adj, min_len, max_len,
         old_t = segment_time(old_seg, street_adj)
         if old_t <= 0:
             continue
-        # Block interior stop(s) of the segment ("closed street") so the path
+        # Block an interior stop of the segment ("closed street") so the path
         # MUST go around -- a plain noised Dijkstra almost always returns the
         # direct segment again, since fewer hops usually beats the noise.
-        if block_all_interior:
-            blocked = set(old_seg[1:-1])
-        else:
-            blocked = {rng.choice(old_seg[1:-1])}
+        blocked = {rng.choice(old_seg[1:-1])}
         forbidden = ((set(ns[:i]) | set(ns[j + 1:])) - {ns[i], ns[j]}) | blocked
         path = street_path(street_adj, ns[i], ns[j], rng=rng, noise=1.0,
                            forbidden=forbidden)
@@ -494,177 +487,3 @@ def inject_realistic_tier(routes, rng, min_len, max_len, *, street_adj,
         applied["drop_cover"] += 1
 
     return routes, applied
-
-
-# --- graded training curriculum ----------------------------------------------
-# Difficulty ladder for the edit-model training data (paper_combined PART 1).
-# Each tier produces a defect that is FIXABLE BY CONSTRUCTION with a known
-# reward direction, graded from gross to subtle:
-#   dup_gross     -> trim an obvious full duplicate,
-#   stub_routes   -> rebuild truncated route tails (the original clean route
-#                    is an existence proof of a better network),
-#   detour_gross  -> straighten a blatant 2-3x detour,
-#   drop_cover    -> extend to re-cover dropped stops (big WMC jump),
-#   detour_subtle -> 1.3-1.6x detours + partial duplicates,
-#   realistic_mix -> the exact eval-init distribution (REALISTIC_TIER_CFG),
-#   lc_clean      -> nothing to fix (calibrated halt).
-# All street-graph tiers are phantom-leg free (street_adj is threaded through).
-
-CURRICULUM_TIER_CFG = {
-    "dup_gross":     {"kind": "copies", "events": 3, "max_multiplicity": 3,
-                      "kinds": ("full_copy",)},
-    "stub_routes":   {"kind": "stub", "frac_range": (0.3, 0.5)},
-    # Detours must be EXPENSIVE enough that straightening them pays: with only
-    # 3 events at 2-3x stretch the whole tier costs ~0.05 in unified cost (the
-    # repair reward is ~zero), so the agent never learns the fix. 8 events at
-    # up to 4.5x puts the available repair profit on the same scale as the
-    # other tiers.
-    "detour_gross":  {"kind": "detours", "events": 6,
-                      "min_stretch": 1.8, "max_stretch": 6.0,
-                      "max_redundancy_gain": 0.20,
-                      "block_all_interior": True},
-    "drop_cover":    {"kind": "drops", "events": 4, "d_un_target_pct": 10.0},
-    "detour_subtle": {"kind": "mix",
-                      "dup":    {"events": 1, "max_multiplicity": 2,
-                                 "kinds": ("prefix_copy", "suffix_copy",
-                                           "middle_copy"),
-                                 "covered": True, "d_un_cap": D_UN_CAP_PCT},
-                      "detour": {"events": 2, "min_stretch": 1.3,
-                                 "max_stretch": 1.6,
-                                 "max_redundancy_gain": 0.05},
-                      "drop_cover": {"events": 0, "d_un_target_pct": 0.0}},
-    "realistic_mix": {"kind": "mix", **REALISTIC_TIER_CFG},
-    "lc_clean":      {"kind": "clean"},
-}
-
-
-def truncate_route_tails(routes, rng, min_len, max_len, frac_range=(0.3, 0.5)):
-    """Stub tier: cut a random fraction off the tail of every route.
-
-    The optimal fix is pure re-extension and the untruncated route proves a
-    better network exists, so the construction headroom is guaranteed.
-    Routes already at ``min_len`` are left alone. Returns
-    ``(routes, n_cut_stops)``.
-    """
-    routes = routes.clone()
-    cut_total = 0
-    for i in range(routes.shape[0]):
-        ns = route_nodes(routes[i])
-        if len(ns) <= min_len:
-            continue
-        frac = rng.uniform(*frac_range)
-        keep = max(min_len, int(round(len(ns) * (1.0 - frac))))
-        if keep >= len(ns):
-            continue
-        cut_total += len(ns) - keep
-        replace_route(routes, i, ns[:keep])
-    return routes, cut_total
-
-
-def force_corrupt_untouched(out, clean, rng, min_len, target,
-                            frac_range=(0.3, 0.5)):
-    """Truncate the tails of still-clean routes until at least ``target`` of
-    them differ from ``clean``. The ``corrupt all routes`` knob uses this to
-    guarantee every episode lands on a damaged route. Truncation is the
-    universal headroom-guaranteeing corruption (pure re-extension repairs it,
-    and the untruncated original proves a better network exists); each forced
-    cut is tagged ``forced_trunc`` in the event Counter. Returns the number of
-    routes this top-up truncated.
-    """
-    target = min(int(target), int(out.shape[0]))
-    forced = 0
-    order = list(range(int(out.shape[0])))
-    rng.shuffle(order)
-    for i in order:
-        if count_changed_routes(clean, out) >= target:
-            break
-        if route_nodes(out[i]) != route_nodes(clean[i]):
-            continue  # already corrupted by the tier itself
-        ns = route_nodes(out[i])
-        if len(ns) <= min_len:
-            continue  # nothing left to truncate
-        frac = rng.uniform(*frac_range)
-        keep = max(min_len, int(round(len(ns) * (1.0 - frac))))
-        if keep >= len(ns):
-            keep = len(ns) - 1
-        if keep < min_len:
-            continue
-        replace_route(out, i, ns[:keep])
-        forced += 1
-    return forced
-
-
-def inject_curriculum_tier(routes, tier_cfg, rng, min_len, max_len, *,
-                           street_adj, demand, n_nodes,
-                           target_corrupt_routes=None):
-    """Apply one curriculum tier to a clean network.
-
-    Dispatches on ``tier_cfg['kind']`` and returns ``(routes, applied)``
-    where ``applied`` is a Counter of injected events (kinds prefixed by
-    defect type, plus ``stub_cut_stops`` for the stub tier).
-
-    ``target_corrupt_routes`` (optional): after the tier's own injection,
-    truncate still-clean routes until at least this many routes differ from the
-    seed (capped at the number of routes). Pass the route count to corrupt
-    *every* route. ``None`` (default) leaves the tier behaviour unchanged.
-    """
-    kind = tier_cfg["kind"]
-    applied = Counter()
-    clean = routes.clone()
-
-    if kind == "clean":
-        out = routes.clone()
-    elif kind == "copies":
-        out, events, _ = inject_route_copies(
-            routes, tier_cfg, rng, min_len, max_len,
-            demand=demand, n_nodes=n_nodes, street_adj=street_adj)
-        for k, v in events.items():
-            applied[f"dup_{k}"] += v
-    elif kind == "stub":
-        out, cut = truncate_route_tails(routes, rng, min_len, max_len,
-                                        tier_cfg["frac_range"])
-        applied["stub_cut_stops"] = cut
-    elif kind == "detours":
-        out = routes.clone()
-        for _ in range(int(tier_cfg["events"])):
-            res = try_detour_mutation(
-                out, rng, street_adj, min_len, max_len,
-                min_stretch=float(tier_cfg["min_stretch"]),
-                max_stretch=float(tier_cfg["max_stretch"]),
-                demand=demand, n_nodes=n_nodes,
-                max_redundancy_gain=float(
-                    tier_cfg.get("max_redundancy_gain", 0.05)),
-                block_all_interior=bool(
-                    tier_cfg.get("block_all_interior", False)))
-            if res is not None:
-                ri, candidate, _, _ = res
-                replace_route(out, ri, candidate)
-                applied["detour"] += 1
-    elif kind == "drops":
-        out = routes.clone()
-        for _ in range(int(tier_cfg["events"])):
-            if uncovered_demand_pct(out, demand, n_nodes) >= \
-                    float(tier_cfg["d_un_target_pct"]):
-                break
-            res = try_drop_cover_mutation(out, rng, demand, street_adj,
-                                          min_len, max_len)
-            if res is None:
-                break
-            ri, candidate, _ = res
-            replace_route(out, ri, candidate)
-            applied["drop_cover"] += 1
-    elif kind == "mix":
-        sub_cfg = {k: v for k, v in tier_cfg.items() if k != "kind"}
-        out, applied = inject_realistic_tier(
-            routes, rng, min_len, max_len, street_adj=street_adj,
-            demand=demand, n_nodes=n_nodes, tier_cfg=sub_cfg)
-    else:
-        raise ValueError(f"unknown curriculum tier kind: {kind}")
-
-    if target_corrupt_routes is not None:
-        forced = force_corrupt_untouched(
-            out, clean, rng, min_len, int(target_corrupt_routes))
-        if forced:
-            applied["forced_trunc"] += forced
-
-    return out, applied

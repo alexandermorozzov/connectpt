@@ -25,21 +25,6 @@ from connectpt.routes_generator.core.paths import (CFG_DIR, LOGS_DIR,
                                                    resolve_under_root)
 
 
-def setup_logging(log_path: Path) -> logging.Logger:
-    """Log INFO+ to both ``log_path`` and stdout, so a detached run is followable
-    through the file and, live, through the console."""
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    file_handler = logging.FileHandler(log_path, encoding="utf-8")
-    file_handler.setFormatter(fmt)
-    console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(fmt)
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    root.handlers[:] = [file_handler, console]
-    return logging.getLogger("connectpt.cli")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -72,7 +57,12 @@ def main() -> None:
     else:
         log_dir = resolve_under_root(args.log_dir) if args.log_dir else LOGS_DIR
         log_path = log_dir / f"{stem}_{datetime.now():%Y%m%d_%H%M%S}.log"
-    log = setup_logging(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.FileHandler(log_path, encoding="utf-8"),
+                  logging.StreamHandler(sys.stdout)], force=True)
+    log = logging.getLogger("connectpt.cli")
     log.info("config=%s | dry_run=%s | overrides=%s",
              args.config_name, args.dry_run, args.overrides or "-")
 
