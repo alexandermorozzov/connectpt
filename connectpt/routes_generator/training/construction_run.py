@@ -50,7 +50,7 @@ class ConstructionTrainingRun(ExperimentRun):
         )
 
     def execute(self) -> TrainingArtifact:
-        from ..citygraph_dataset import CityGraphDataset
+        from ..city.synthetic import CityGraphDataset
         from ..inductive_route_learning import setup_and_train
         from .construction_experiment import evaluate_test, log_pareto_metrics
 

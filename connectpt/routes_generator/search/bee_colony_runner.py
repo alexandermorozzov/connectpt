@@ -44,7 +44,7 @@ class BeeColonyRunner:
         from torch_geometric.loader import DataLoader
 
         from ..bee_colony import run_bee_colony_plan
-        from ..citygraph_dataset import get_dataset_from_config
+        from ..city.graph import to_batch
         from ..run.context import seed_everything
         from ..utils import test_method
 
@@ -58,7 +58,7 @@ class BeeColonyRunner:
             adjustment["adjustment_degree_target"] = float(adj_target)
 
         dataloader = DataLoader(
-            get_dataset_from_config(OmegaConf.create({"type": "tensor"}), tensors=tensors),
+            to_batch(tensors).to_data_list(),
             batch_size=1)
         # csv default: the non-silent eval path reads eval_cfg.csv strictly.
         eval_cfg = OmegaConf.create({"csv": False, **dict(eval_dims)})

@@ -1,136 +1,13 @@
 import logging as log
-from numbers import Integral
 
 import torch
 from tqdm import tqdm
 import networkx as nx
 
-from .torch_utils import get_batch_tensor_from_routes, \
-    get_tensor_from_varlen_lists, load_routes_tensor, \
-    aggr_edges_over_sequences, reconstruct_all_paths
+from .network.routes import to_routes
+from .common.tensors import aggr_edges_over_sequences
+from .city.shortest_paths import reconstruct_all_paths
 from .transit_time_estimator import RouteGenBatchState
-
-
-def prepare_init_network(init_network, batch_size, n_routes, device=None):
-    """Validate, batch, and broadcast an initial network tensor if needed."""
-    if init_network is None:
-        return None
-
-    if init_network.ndim == 2:
-        init_network = init_network.unsqueeze(0)
-    elif init_network.ndim != 3:
-        raise ValueError(
-            "Expected 2D or 3D tensor with shape "
-            "(n_routes, max_route_len) or "
-            f"(batch, n_routes, max_route_len), got {init_network.shape}"
-        )
-
-    if init_network.shape[0] == 1 and batch_size > 1:
-        init_network = init_network.expand(batch_size, -1, -1)
-    elif init_network.shape[0] != batch_size:
-        raise ValueError(
-            "Initial network batch size does not match evaluation batch size: "
-            f"{init_network.shape[0]} vs {batch_size}"
-        )
-
-    if init_network.shape[1] > n_routes:
-        raise ValueError(
-            "Initial network has too many routes: "
-            f"{init_network.shape[1]} vs allowed {n_routes}"
-        )
-
-    if device is not None and init_network.device != device:
-        init_network = init_network.to(device)
-
-    return init_network
-
-
-def prepare_current_routes(current_routes, batch_size, max_n_nodes, device=None):
-    """Validate and broadcast an in-progress route tensor if needed."""
-    if current_routes is None:
-        return None
-
-    if type(current_routes) is list:
-        is_single_route = len(current_routes) == 0 or \
-            isinstance(current_routes[0], Integral) or \
-            (isinstance(current_routes[0], torch.Tensor) and
-             current_routes[0].ndim == 0)
-        if is_single_route:
-            current_routes = [current_routes]
-        current_routes, _ = get_tensor_from_varlen_lists(current_routes,
-                                                         device=device)
-
-    if current_routes.ndim == 1:
-        current_routes = current_routes.unsqueeze(0)
-    elif current_routes.ndim == 3 and current_routes.shape[1] == 1:
-        current_routes = current_routes.squeeze(1)
-    elif current_routes.ndim != 2:
-        raise ValueError(
-            "Expected current_routes to have shape "
-            f"(batch, max_route_len), got {current_routes.shape}"
-        )
-
-    if current_routes.shape[0] == 1 and batch_size > 1:
-        current_routes = current_routes.expand(batch_size, -1)
-    elif current_routes.shape[0] != batch_size:
-        raise ValueError(
-            "Current-route batch size does not match evaluation batch size: "
-            f"{current_routes.shape[0]} vs {batch_size}"
-        )
-
-    if current_routes.shape[-1] > max_n_nodes:
-        raise ValueError(
-            "Current route is longer than the scenario node capacity: "
-            f"{current_routes.shape[-1]} vs allowed {max_n_nodes}"
-        )
-
-    if current_routes.shape[-1] < max_n_nodes:
-        pad_len = max_n_nodes - current_routes.shape[-1]
-        current_routes = torch.nn.functional.pad(current_routes, (0, pad_len),
-                                                 value=-1)
-
-    current_routes = current_routes.to(device=device, dtype=torch.long)
-    invalid_nodes = (current_routes < -1) | (current_routes >= max_n_nodes)
-    invalid_nodes &= current_routes != -1
-    if invalid_nodes.any():
-        raise ValueError("Current routes contain invalid node indices")
-
-    return current_routes
-
-
-def init_from_cfg(state, init_cfg, routes_tensor):
-    """Initializes the network according to the configuration.
-    
-    Args:
-        state: The initial state of the system, not including the routes.
-        init_cfg: The configuration for the initialization method.
-    
-    Returns:
-        The initial network.
-    """
-    if init_cfg is None:
-        return None
-
-    if init_cfg.method == 'load':
-        init_network = load_routes_tensor(init_cfg.path, state.device)
-    elif init_cfg.method == 'tensor' and routes_tensor is not None:
-        init_network = routes_tensor
-    elif init_cfg.method == 'john':
-        alpha = init_cfg.get('alpha', state.alpha)
-        init_network = john_init(state, alpha, init_cfg.prioritize_direct_connections)
-    elif init_cfg.method == 'nikolic':
-        init_network = nikolic_init(state)
-    else:
-        raise ValueError(f'Unknown initialization method: {init_cfg.method}')
-
-    max_routes = int(state.n_routes_to_plan.min().item())
-    return prepare_init_network(
-        init_network,
-        batch_size=state.batch_size,
-        n_routes=max_routes,
-        device=state.device,
-    )
-
 
 
 def john_init(state: RouteGenBatchState, alpha=None, 
@@ -321,8 +198,7 @@ def john_init(state: RouteGenBatchState, alpha=None,
     if len(networks) == 0:
         raise RuntimeError('John init failed to find any valid networks')
         
-    networks = get_batch_tensor_from_routes(networks, state.device, 
-                                            state.max_route_len[0])
+    networks = to_routes(networks, width=state.max_route_len[0]).to(state.device)
     return networks      
     
 

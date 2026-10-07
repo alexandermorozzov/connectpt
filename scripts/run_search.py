@@ -20,7 +20,7 @@ from connectpt.routes_generator.run.factory import ExperimentRunFactory
 from connectpt.routes_generator.run.config import build_experiment
 from connectpt.routes_generator.run.context import LOGS_DIR, RESULTS_DIR, resolve_under_root
 from connectpt.routes_generator.evaluation import initial_row
-from connectpt.routes_generator.reports import save_paper_routes
+from connectpt.routes_generator.run.artifacts import save_routes
 
 CONFIG = "search"
 METHODS = ["ea", "nea", "nea_edit", "nea_combined"]
@@ -97,11 +97,10 @@ def main() -> None:
                 if args.dry_run:
                     continue
 
-                save_paper_routes(f"{args.config}_{name}_{method}_seed{seed}",
-                                  routes, artifact.instance.coords,
-                                  artifact.instance.street_adj,
-                                  meta={"instance": name, "method": method, "seed": seed},
-                                  out_dir=out_dir)
+                save_routes(out_dir / f"{args.config}_{name}_{method}_seed{seed}_routes.pt",
+                                  routes, coords=artifact.instance.coords,
+                                  street_adj=artifact.instance.street_adj,
+                                  meta={"instance": name, "method": method, "seed": seed})
 
                 if not args.no_initial and name not in seen_initial:
                     seen_initial.add(name)

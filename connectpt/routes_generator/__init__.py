@@ -42,18 +42,8 @@ import importlib
 __version__ = importlib.metadata.version("connectpt")
 
 # === Dataset & Graph Utilities ===
-from .citygraph_dataset import (
-    CityGraphDataset,
-    DynamicCityGraphDataset,
-    InsertPosFeatures,
-    RandomFlipCity,
-    SpaceScaleTransform,
-    DemandScaleTransform,
-    CityGraphData,
-    get_default_train_and_eval_split,
-    get_dataset_from_config,
-    get_dynamic_training_set,
-)
+from .city.synthetic import CityGraphDataset, DynamicCityGraphDataset, get_default_train_and_eval_split, get_dynamic_training_set
+from .city.graph import InsertPosFeatures, RandomFlipCity, SpaceScaleTransform, DemandScaleTransform, CityGraphData
 
 # === Transit Time & Cost Estimation ===
 from .transit_time_estimator import (
@@ -75,7 +65,6 @@ from .transit_time_estimator import (
 
 # === Initialization Methods ===
 from .initialization import (
-    init_from_cfg,
     john_init,
     nikolic_init,
 )
@@ -124,17 +113,11 @@ from .utils import (
 )
 
 # === Torch Utilities ===
-from .torch_utils import (
-    load_routes_tensor,
-    dump_routes,
-    get_batch_tensor_from_routes,
-    cat_var_size_tensors,
-    get_update_at_mask,
-    get_indices_from_mask,
-    get_variable_slice_mask,
-    unravel_indices,
-    AllShortestPaths,
-)
+from .run.artifacts import load_routes, save_routes
+from .network.routes import to_routes
+from .common.tensors import cat_var_size_tensors, get_update_at_mask, get_variable_slice_mask, unravel_indices
+from .models import get_indices_from_mask
+from .city.shortest_paths import AllShortestPaths
 
 # === Experiment orchestration API (M010 stage 6) ===
 # The narrow public surface the notebook uses: name an experiment, run it,

@@ -14,9 +14,9 @@ import argparse
 
 from connectpt.routes_generator.run.context import resolve_under_root
 from connectpt.routes_generator.run.context import resolve_device, seed_everything
-from connectpt.routes_generator.data import (INSTANCES_DIR, build_init_routes,
-                                             instance_spec, load_matrices,
-                                             write_routes_txt)
+from connectpt.routes_generator.data.init import build_init_routes
+from connectpt.routes_generator.city.instances import INSTANCES_DIR, load_instance
+from connectpt.routes_generator.network.routes import write_routes_txt
 
 INSTANCES = ["mandl", "mumford0", "mumford1", "mumford2", "mumford3"]
 
@@ -39,11 +39,10 @@ def main() -> None:
 
     for name in args.instances:
         d = root / name
-        cfg = instance_spec(name)
-        spec = {"city": name, **{k: int(cfg[k]) for k in
-                                 ("n_routes", "min_route_len", "max_route_len")}}
+        instance = load_instance(d, require_routes=False)
+        spec = instance.spec
         seed_everything(args.seed)
-        routes = build_init_routes(spec, load_matrices(d), seed=args.seed,
+        routes = build_init_routes(spec, instance.tensors, seed=args.seed,
                                    device=device, clean=args.clean)
         tier = "construction only" if args.clean else "+ realistic tier"
         n = write_routes_txt(

@@ -9,7 +9,7 @@ import torch
 from pyproj import Transformer
 
 from ..run.context import ARTIFACTS_DIR, DATASETS_DIR
-from ..data.routes import as_route_tensor
+from ..network.routes import to_routes
 
 
 EKB_DATA_DIR = DATASETS_DIR / "EKB"
@@ -19,8 +19,7 @@ EKB_STATIC_MAP_PATH = ARTIFACTS_DIR / "paper_results" / "ekb_seed_routes_static.
 # EKB data loading moved to the library -- single implementation.
 # EKB data loading + the coordinate CRS live with the data layer -- single
 # implementation; re-exported here so ``reports.ekb`` stays the EKB entry point.
-from connectpt.routes_generator.data.loaders import (  # noqa: F401
-    EKB_CITY_NAME, EKB_COORD_CRS, load_ekb_tensors, load_ekb_routes, ekb_spec)
+from ..city.instances import EKB_COORD_CRS
 
 
 def make_ekb_crop_case(
@@ -81,7 +80,7 @@ def make_ekb_crop_case(
             else:
                 cropped_tensors[key] = arr.copy()
 
-    rr_in = as_route_tensor(routes).long()
+    rr_in = to_routes(routes).long()
     batched = rr_in.ndim == 3
     rr = rr_in[0] if batched else rr_in
     route_lens = (rr > -1).sum(dim=-1)
@@ -154,7 +153,7 @@ from .geo import (  # noqa: F401
     network_connectivity_stats as ekb_connectivity_stats,
     project_coords, route_stats as ekb_route_stats,
     route_underlay_adj as make_ekb_plot_street_adj,
-    street_underlay_adj as make_ekb_street_underlay_adj, _route_nodes)
+    street_underlay_adj as make_ekb_street_underlay_adj)
 
 
 def project_ekb_coords(coords, source_crs=EKB_COORD_CRS):

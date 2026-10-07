@@ -5,12 +5,11 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import torch
-from omegaconf import OmegaConf
-from torch_geometric.loader import DataLoader
 
-from connectpt.routes_generator.citygraph_dataset import get_dataset_from_config
+from connectpt.routes_generator.city.graph import to_batch
 from connectpt.routes_generator.run.context import resolve_under_root
-from connectpt.routes_generator.data import as_route_tensor, load_matrices
+from connectpt.routes_generator.network.routes import to_routes
+from connectpt.routes_generator.city.instances import load_instance
 from connectpt.routes_generator.objectives import CostFactory
 from connectpt.routes_generator.transit_time_estimator import RouteGenBatchState
 
@@ -45,8 +44,7 @@ def _matrix(routes: torch.Tensor, tensors: dict) -> np.ndarray:
         raise TypeError("tensors must be a dictionary of torch.Tensor values")
 
     cost_obj = CostFactory.build_cost()
-    data = next(iter(DataLoader(get_dataset_from_config(
-        OmegaConf.create({"type": "tensor"}), tensors=tensors), batch_size=1)))
+    data = to_batch(tensors)
     lens = (routes[0] >= 0).sum(-1)
     state = RouteGenBatchState(data, cost_obj, routes.shape[1], int(lens.min()), int(lens.max()))
     state.add_new_routes(routes)
@@ -60,7 +58,7 @@ def map_polygons(gdf: gpd.GeoDataFrame, instance_dir: str | Path) -> gpd.GeoData
     if not isinstance(instance_dir, (str, Path)):
         raise TypeError("instance_dir must be a string or Path")
 
-    xy = load_matrices(resolve_under_root(instance_dir))["node_locs"].numpy()
+    xy = load_instance(resolve_under_root(instance_dir)).tensors["node_locs"].numpy()
     out = gdf.copy()
     out["node"] = _bind(gdf, xy).astype("Int64")
     return out
@@ -88,9 +86,9 @@ def connectivity_gdf(
     if not isinstance(agg, str) and not callable(agg):
         raise TypeError("agg must be an aggregation name or callable")
 
-    routes = as_route_tensor(routes).long()
+    routes = to_routes(routes).long()
     routes = routes if routes.ndim == 3 else routes[None]
-    tensors = load_matrices(resolve_under_root(instance_dir))
+    tensors = load_instance(resolve_under_root(instance_dir)).tensors
     nodes = mapped["node"].dropna().astype(int)
     matrix = _matrix(routes, tensors)
 

@@ -1,22 +1,14 @@
-import pickle
 import math
 import random
 from pathlib import Path
 
 import numpy as np
 import torch
-from torch_geometric.data import Batch
 from tqdm import tqdm
 
 from .run.logger import flush, log as log_metrics
 from .training.records import EditTrainRecord, EditValRecord
-from .citygraph_dataset import (
-    DEMAND_KEY,
-    STOP_KEY,
-    DemandScaleTransform,
-    InsertPosFeatures,
-    SpaceScaleTransform,
-)
+from .city.graph import DEMAND_KEY, STOP_KEY, DemandScaleTransform, SpaceScaleTransform
 from .transit_time_estimator import (
     COST_WEIGHT_KEY_ORDER,
     ROUTE_ACTION_EXTEND,
@@ -26,7 +18,8 @@ from .transit_time_estimator import (
     RouteGenBatchState,
 )
 from .models import FeatureNorm, get_mlp, WEIGHT_FEATURE_KEYS
-from .torch_utils import get_batch_tensor_from_routes
+from .network.routes import to_routes
+from .city.graph import to_batch
 
 ROUTE_ACTION_NAMES = {
     ROUTE_ACTION_EXTEND: "extend",
@@ -51,94 +44,6 @@ def _edit_val_record(val):
         component_delta_route=val.get("component_delta_route", nan),
         component_delta_connectivity=val.get("component_delta_connectivity", nan))
 
-def _trim_route_padding(routes, max_route_len=None):
-    """Drop trailing all-padding route columns from a loaded route tensor."""
-    if routes.ndim == 1:
-        routes = routes.unsqueeze(0)
-    elif routes.ndim == 3:
-        routes = routes[0]
-
-    used_columns = (routes >= 0).any(dim=0).nonzero().flatten()
-    if used_columns.numel() == 0:
-        trim_len = 0
-    else:
-        trim_len = int(used_columns[-1].item()) + 1
-
-    if max_route_len is not None:
-        trim_len = min(trim_len, int(max_route_len))
-    trim_len = max(trim_len, 1)
-    return routes[:, :trim_len]
-
-
-def load_lc_result_routes(results_dir, n_graphs, max_route_len=None):
-    """Load per-graph LC route tensors from examples/lc_results."""
-    results_dir = Path(results_dir)
-    route_sets = []
-    for graph_idx in range(n_graphs):
-        route_path = results_dir / f"graph_{graph_idx:04d}" / \
-            f"lc_lc_graph_{graph_idx:04d}_routes_routes.pkl"
-        if not route_path.exists():
-            matches = sorted(
-                (results_dir / f"graph_{graph_idx:04d}").glob(
-                    "lc_*_routes_routes.pkl")
-            )
-            if not matches:
-                raise FileNotFoundError(route_path)
-            route_path = matches[0]
-        with route_path.open("rb") as file:
-            routes = pickle.load(file)
-        if isinstance(routes, list):
-            routes = routes[0]
-        if routes.ndim == 3 and routes.shape[0] == 1:
-            routes = routes.squeeze(0)
-        routes = _trim_route_padding(routes, max_route_len)
-        route_sets.append(routes.long())
-
-    max_n_routes = max(route_set.shape[0] for route_set in route_sets)
-    max_route_len = max(route_set.shape[1] for route_set in route_sets)
-    padded_routes = torch.full(
-        (len(route_sets), max_n_routes, max_route_len),
-        -1, dtype=torch.long)
-    for graph_idx, routes in enumerate(route_sets):
-        padded_routes[
-            graph_idx, :routes.shape[0], :routes.shape[1]
-        ] = routes
-    return padded_routes
-
-
-def load_raw_graphs_and_lc_routes(raw_graphs_path, lc_results_dir):
-    with Path(raw_graphs_path).open("rb") as file:
-        graphs = pickle.load(file)
-    max_route_len = max(int(graph[STOP_KEY].num_nodes) for graph in graphs)
-    seed_routes = load_lc_result_routes(
-        lc_results_dir, len(graphs), max_route_len=max_route_len)
-    return graphs, seed_routes
-
-
-def pad_seed_routes_to_n_routes(route_batch, target_n_routes=None):
-    """Append empty route slots so improvement can plan extra routes."""
-    if target_n_routes is None:
-        return route_batch
-
-    target_n_routes = int(target_n_routes)
-    current_n_routes = int(route_batch.shape[1])
-    if target_n_routes < current_n_routes:
-        raise ValueError(
-            "target_n_routes must be at least the number of seed routes: "
-            f"{target_n_routes} < {current_n_routes}"
-        )
-    if target_n_routes == current_n_routes:
-        return route_batch
-
-    empty_shape = (
-        route_batch.shape[0],
-        target_n_routes - current_n_routes,
-        route_batch.shape[2],
-    )
-    empty_routes = torch.full(
-        empty_shape, -1, dtype=route_batch.dtype, device=route_batch.device)
-    return torch.cat((route_batch, empty_routes), dim=1)
-
 
 def _get_graph_batch_max_n_nodes(graph_batch):
     stop_data = graph_batch[STOP_KEY]
@@ -146,51 +51,6 @@ def _get_graph_batch_max_n_nodes(graph_batch):
         node_counts = stop_data.ptr[1:] - stop_data.ptr[:-1]
         return int(node_counts.max().item())
     return int(stop_data.num_nodes)
-
-
-def _trim_route_batch_to_graph_capacity(route_batch, graph_batch):
-    max_n_nodes = _get_graph_batch_max_n_nodes(graph_batch)
-    if route_batch.shape[-1] <= max_n_nodes:
-        return route_batch
-
-    route_tail = route_batch[..., max_n_nodes:]
-    if (route_tail >= 0).any():
-        raise ValueError(
-            "Loaded route has real stops beyond the scenario node "
-            "capacity. This is not just padding: "
-            f"route width {route_batch.shape[-1]}, "
-            f"batch max nodes {max_n_nodes}."
-        )
-    return route_batch[..., :max_n_nodes]
-
-
-def make_improvement_batch(graphs, seed_routes, indices, device, training=False,
-                           space_scale=None, demand_scale=None,
-                           insert_pos=None, target_n_routes=None):
-    if space_scale is None:
-        space_scale = SpaceScaleTransform(0.95, 1.05)
-    if demand_scale is None:
-        demand_scale = DemandScaleTransform(0.9, 1.1)
-    if insert_pos is None:
-        insert_pos = InsertPosFeatures()
-
-    batch_graphs = []
-    for idx in indices:
-        graph = graphs[int(idx)].clone()
-        if training:
-            graph = space_scale(graph)
-            graph = demand_scale(graph)
-        graph[STOP_KEY].x = graph[STOP_KEY].pos.clone()
-        graph = insert_pos(graph)
-        batch_graphs.append(graph)
-
-    graph_batch = Batch.from_data_list(batch_graphs).to(device)
-    route_batch = seed_routes[torch.as_tensor(indices, dtype=torch.long)].to(
-        device)
-    route_batch = _trim_route_batch_to_graph_capacity(route_batch,
-                                                      graph_batch)
-    route_batch = pad_seed_routes_to_n_routes(route_batch, target_n_routes)
-    return graph_batch, route_batch
 
 
 def _clone_cost_weights(cost_weights):
@@ -203,8 +63,9 @@ def _clone_cost_weights(cost_weights):
 def _make_route_context_state(cost_obj, graph_batch, route_batch, route_idx,
                               min_route_len, max_route_len, cost_weights,
                               invalid_directly_connected=False):
-    route_batch = _trim_route_batch_to_graph_capacity(route_batch,
-                                                      graph_batch)
+    route_batch = to_routes(
+        route_batch,
+        width=min(route_batch.shape[-1], _get_graph_batch_max_n_nodes(graph_batch)))
     n_routes = route_batch.shape[1]
     state = RouteGenBatchState(
         graph_batch, cost_obj, n_routes, min_route_len, max_route_len,
@@ -256,7 +117,7 @@ def _assemble_routes_by_original_order(routes_by_route, device):
         batch_routes.append([
             route_set[batch_idx] for route_set in routes_by_route
         ])
-    return get_batch_tensor_from_routes(batch_routes, device)
+    return to_routes(batch_routes).to(device)
 
 
 def _get_default_max_route_edit_steps(max_route_len):
@@ -301,8 +162,9 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
         max_route_edit_steps = _get_default_max_route_edit_steps(max_route_len)
     max_trim_actions_per_route = _normalize_max_trim_actions_per_route(
         max_trim_actions_per_route)
-    route_batch = _trim_route_batch_to_graph_capacity(route_batch,
-                                                      graph_batch)
+    route_batch = to_routes(
+        route_batch,
+        width=min(route_batch.shape[-1], _get_graph_batch_max_n_nodes(graph_batch)))
 
     n_routes = route_batch.shape[1]
     seed_state = RouteGenBatchState(
@@ -370,11 +232,10 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
         # Write the planned route back so subsequent slots see it as part of
         # their context, regardless of whether the seed slot was empty or
         # partial. This unifies the empty/partial code paths.
-        planned_tensor = get_batch_tensor_from_routes(
+        planned_tensor = to_routes(
             [[planned_current_routes[batch_idx]]
              for batch_idx in range(len(planned_current_routes))],
-            route_batch.device,
-            max_route_len=working_route_batch.shape[-1])
+            width=working_route_batch.shape[-1]).to(route_batch.device)
         working_route_batch[:, route_idx] = planned_tensor[:, 0]
         if return_actions:
             route_actions.append(actions.detach().clone())
@@ -1774,9 +1635,12 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
 
     for batch_indices in tqdm(list(indices.split(batch_size)),
                               desc="eval", leave=False):
-        graph_batch, route_batch = make_improvement_batch(
-            graphs, seed_routes, batch_indices, device, training=False,
-            target_n_routes=target_n_routes)
+        graph_batch = to_batch([graphs[int(i)] for i in batch_indices], device, edit_features=True)
+        route_batch = to_routes(
+            seed_routes[torch.as_tensor(batch_indices, dtype=torch.long)],
+            n_routes=target_n_routes,
+            width=min(seed_routes.shape[-1], _get_graph_batch_max_n_nodes(graph_batch)),
+        ).to(device)
 
         # Build the seed state explicitly so we can pull its component
         # breakdown — rollout_lc_improvement constructs the same state
@@ -1820,7 +1684,7 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
         final_components_list.append(
             cost_obj.get_cost_components(
                 state, result=final_result).detach().cpu())
-        final_routes = get_batch_tensor_from_routes(state.routes).cpu()
+        final_routes = to_routes(state.routes).cpu()
         route_outputs.append(final_routes)
         route_change_masks.append(
             _route_change_mask(route_batch.cpu(), final_routes).cpu())
@@ -1864,7 +1728,6 @@ def evaluate_lc_improvement(model, cost_obj, graphs, seed_routes, indices,
     if return_action_stats:
         result["action_stats"] = _finalize_action_stats(action_counts)
     return result
-
 
 
 def train_lc_improvement_cfg_ppo(
@@ -2061,9 +1924,17 @@ def train_lc_improvement_cfg_ppo(
         warmup = list(train_indices.split(effective_batch_size))[
             :warmup_batches]
         for batch_indices in tqdm(warmup, desc="feature norm"):
-            graph_batch, route_batch = make_improvement_batch(
-                graphs, seed_routes, batch_indices, device, training=True,
-                target_n_routes=target_n_routes)
+            graph_batch = to_batch(
+                [graphs[int(i)] for i in batch_indices],
+                device,
+                transforms=(SpaceScaleTransform(0.95, 1.05), DemandScaleTransform(0.9, 1.1)),
+                edit_features=True,
+            )
+            route_batch = to_routes(
+                seed_routes[torch.as_tensor(batch_indices, dtype=torch.long)],
+                n_routes=target_n_routes,
+                width=min(seed_routes.shape[-1], _get_graph_batch_max_n_nodes(graph_batch)),
+            ).to(device)
             rollout_lc_improvement(
                 model, cost_obj, graph_batch, route_batch,
                 min_route_len, max_route_len, greedy=False,
@@ -2147,10 +2018,9 @@ def train_lc_improvement_cfg_ppo(
                 or cur_working_routes is None or base_adj is None:
             return None
         cur_list = _get_current_routes_from_state(state)
-        cur_tensor = get_batch_tensor_from_routes(
+        cur_tensor = to_routes(
             [[cur_list[b]] for b in range(len(cur_list))],
-            cur_working_routes.device,
-            max_route_len=cur_working_routes.shape[-1])
+            width=cur_working_routes.shape[-1]).to(cur_working_routes.device)
         adj_cur = get_adjustment_degrees(
             cur_tensor,
             cur_seed_routes[:, route_idx:route_idx + 1, :],
@@ -2177,11 +2047,10 @@ def train_lc_improvement_cfg_ppo(
                 prev_state,
                 cur_working_routes[:, prev_route_idx],
                 prev_context_counts)
-            planned_tensor = get_batch_tensor_from_routes(
+            planned_tensor = to_routes(
                 [[finalized[batch_idx]]
                  for batch_idx in range(len(finalized))],
-                cur_working_routes.device,
-                max_route_len=cur_working_routes.shape[-1])
+                width=cur_working_routes.shape[-1]).to(cur_working_routes.device)
             cur_working_routes[:, prev_route_idx] = planned_tensor[:, 0]
 
         # 2. If we are starting fresh (first call this collect) or we have
@@ -2199,9 +2068,17 @@ def train_lc_improvement_cfg_ppo(
                 index_cursor:index_cursor + effective_batch_size]
             index_cursor += effective_batch_size
 
-            cur_graph_batch, route_batch = make_improvement_batch(
-                graphs, seed_routes, batch_indices, device, training=True,
-                target_n_routes=target_n_routes)
+            cur_graph_batch = to_batch(
+                [graphs[int(i)] for i in batch_indices],
+                device,
+                transforms=(SpaceScaleTransform(0.95, 1.05), DemandScaleTransform(0.9, 1.1)),
+                edit_features=True,
+            )
+            route_batch = to_routes(
+                seed_routes[torch.as_tensor(batch_indices, dtype=torch.long)],
+                n_routes=target_n_routes,
+                width=min(seed_routes.shape[-1], _get_graph_batch_max_n_nodes(cur_graph_batch)),
+            ).to(device)
             cur_cost_weights = cost_obj.sample_variable_weights(
                 cur_graph_batch.num_graphs, device)
 
@@ -2614,9 +2491,17 @@ def train_lc_improvement_cfg_d3po(
         warmup = list(train_indices.split(effective_batch_size))[
             :warmup_batches]
         for batch_indices in tqdm(warmup, desc="feature norm"):
-            graph_batch, route_batch = make_improvement_batch(
-                graphs, seed_routes, batch_indices, device, training=True,
-                target_n_routes=target_n_routes)
+            graph_batch = to_batch(
+                [graphs[int(i)] for i in batch_indices],
+                device,
+                transforms=(SpaceScaleTransform(0.95, 1.05), DemandScaleTransform(0.9, 1.1)),
+                edit_features=True,
+            )
+            route_batch = to_routes(
+                seed_routes[torch.as_tensor(batch_indices, dtype=torch.long)],
+                n_routes=target_n_routes,
+                width=min(seed_routes.shape[-1], _get_graph_batch_max_n_nodes(graph_batch)),
+            ).to(device)
             rollout_lc_improvement(
                 model, cost_obj, graph_batch, route_batch,
                 min_route_len, max_route_len, greedy=False,
@@ -2660,11 +2545,10 @@ def train_lc_improvement_cfg_d3po(
                 prev_state,
                 cur_working_routes[:, prev_route_idx],
                 prev_context_counts)
-            planned_tensor = get_batch_tensor_from_routes(
+            planned_tensor = to_routes(
                 [[finalized[batch_idx]]
                  for batch_idx in range(len(finalized))],
-                cur_working_routes.device,
-                max_route_len=cur_working_routes.shape[-1])
+                width=cur_working_routes.shape[-1]).to(cur_working_routes.device)
             cur_working_routes[:, prev_route_idx] = planned_tensor[:, 0]
 
         starting_fresh = prev_state is None or cur_working_routes is None
@@ -2679,9 +2563,17 @@ def train_lc_improvement_cfg_d3po(
                 index_cursor:index_cursor + effective_batch_size]
             index_cursor += effective_batch_size
 
-            cur_graph_batch, route_batch = make_improvement_batch(
-                graphs, seed_routes, batch_indices, device, training=True,
-                target_n_routes=target_n_routes)
+            cur_graph_batch = to_batch(
+                [graphs[int(i)] for i in batch_indices],
+                device,
+                transforms=(SpaceScaleTransform(0.95, 1.05), DemandScaleTransform(0.9, 1.1)),
+                edit_features=True,
+            )
+            route_batch = to_routes(
+                seed_routes[torch.as_tensor(batch_indices, dtype=torch.long)],
+                n_routes=target_n_routes,
+                width=min(seed_routes.shape[-1], _get_graph_batch_max_n_nodes(cur_graph_batch)),
+            ).to(device)
             cur_cost_weights = cost_obj.sample_variable_weights(
                 cur_graph_batch.num_graphs, device)
 

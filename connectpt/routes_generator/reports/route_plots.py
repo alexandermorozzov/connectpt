@@ -12,8 +12,8 @@ import matplotlib.pyplot as plt
 import torch
 from matplotlib.patches import FancyArrowPatch
 
-from connectpt.routes_generator.citygraph_dataset import STOP_KEY
-from connectpt.routes_generator.torch_utils import get_batch_tensor_from_routes
+from connectpt.routes_generator.city.graph import STOP_KEY
+from connectpt.routes_generator.network.routes import to_routes, route_lists
 
 
 # Palette cache — built lazily because matplotlib colormaps return RGBA tuples
@@ -43,11 +43,6 @@ def route_colors_for(routes, palette: str = "tab20") -> np.ndarray:
     return route_colors_for_n(routes.shape[0], palette=palette)
 
 
-def route_to_list(route_tensor):
-    """Convert a route tensor (with ``-1`` padding) to a python list of ints."""
-    return [int(node) for node in route_tensor.tolist() if int(node) >= 0]
-
-
 def route_edge_list(route):
     """Yield consecutive (u, v) edges along ``route``."""
     return [(route[idx], route[idx + 1]) for idx in range(len(route) - 1)]
@@ -67,7 +62,7 @@ def get_first_route_set(routes):
     if isinstance(routes, torch.Tensor):
         routes = routes.detach().cpu()
     else:
-        routes = get_batch_tensor_from_routes(routes).detach().cpu()
+        routes = to_routes(routes).detach().cpu()
     if routes.ndim == 3:
         return routes[0]
     return routes
@@ -241,7 +236,7 @@ def build_edge_overlap_map(*route_sets):
             continue
         route_set = get_first_route_set(route_set)
         for route_idx, route_tensor in enumerate(route_set):
-            route = route_to_list(route_tensor)
+            route = route_lists(route_tensor)
             for edge in route_edge_list(route):
                 edge_to_routes.setdefault(
                     undirected_edge_key(edge), set()).add(route_idx)
@@ -350,9 +345,9 @@ def summarize_route_changes(routes, reference_routes):
     }
 
     for route_idx in range(n_routes):
-        route = route_to_list(routes[route_idx]) \
+        route = route_lists(routes[route_idx]) \
             if route_idx < routes.shape[0] else []
-        reference = route_to_list(reference_routes[route_idx]) \
+        reference = route_lists(reference_routes[route_idx]) \
             if route_idx < reference_routes.shape[0] else []
 
         route_edges = {undirected_edge_key(edge)
@@ -409,7 +404,7 @@ def plot_plain_route_set(ax, routes, graph_or_coords, street_adj=None,
     overlap_map = build_edge_overlap_map(routes) \
         if with_overlap_curves else None
     for route_idx, route_tensor in enumerate(routes):
-        route = route_to_list(route_tensor)
+        route = route_lists(route_tensor)
         if len(route) < 2:
             continue
         color = colors[route_idx % len(colors)]
@@ -532,7 +527,7 @@ def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
     def _net_counts(route_set):
         counts, rep = Counter(), {}
         for route_tensor in route_set:
-            for edge in route_edge_list(route_to_list(route_tensor)):
+            for edge in route_edge_list(route_lists(route_tensor)):
                 key = undirected_edge_key(edge)
                 counts[key] += 1
                 rep.setdefault(key, edge)
@@ -573,7 +568,7 @@ def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
     # candidate edges, per route, classified added (new to the network) vs
     # shared (also in the seed network), coloured by route.
     for route_idx, route_tensor in enumerate(routes):
-        route = route_to_list(route_tensor)
+        route = route_lists(route_tensor)
         color = colors[route_idx % len(colors)]
         shared_edges = [e for e in route_edge_list(route)
                         if undirected_edge_key(e) in ref_edge_map]
@@ -589,8 +584,8 @@ def plot_route_diff(ax, routes, reference_routes, graph_or_coords,
                        zorder=4)
 
     # NETWORK-level node diff (added = new to the network, removed = gone).
-    ref_nodes = {n for r in reference_routes for n in route_to_list(r)}
-    cand_nodes = {n for r in routes for n in route_to_list(r)}
+    ref_nodes = {n for r in reference_routes for n in route_lists(r)}
+    cand_nodes = {n for r in routes for n in route_lists(r)}
     added_nodes = sorted(cand_nodes - ref_nodes)
     removed_nodes = sorted(ref_nodes - cand_nodes)
     if added_nodes:
@@ -652,10 +647,10 @@ def plot_changed_route_slots(ax, routes, reference_routes, graph_or_coords,
     colors = route_colors_for(routes, palette=palette)
     overlap_map = build_edge_overlap_map(routes) if with_overlap_curves else None
     for route_idx, route_tensor in enumerate(routes):
-        route = route_to_list(route_tensor)
+        route = route_lists(route_tensor)
         if len(route) < 2:
             continue
-        reference = (route_to_list(reference_routes[route_idx])
+        reference = (route_lists(reference_routes[route_idx])
                      if route_idx < reference_routes.shape[0] else [])
         changed = route != reference
         plot_edges(
@@ -706,7 +701,7 @@ def plot_route_adj_gradient(ax, routes, reference_routes, graph_or_coords,
 
     items = []
     for route_idx, route_tensor in enumerate(routes):
-        route = route_to_list(route_tensor)
+        route = route_lists(route_tensor)
         if len(route) < 2:
             continue
         value = float(adj_values[route_idx]) if route_idx < len(adj_values) else 0.0
@@ -781,7 +776,7 @@ def disabled_components(enabled):
 
 
 __all__ = [
-    "route_to_list",
+    "route_lists",
     "route_edge_list",
     "undirected_edge_key",
     "get_first_route_set",

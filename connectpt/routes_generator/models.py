@@ -14,11 +14,13 @@ from torch import nn
 from torch_geometric.data import Batch, Data
 from torch_geometric.nn import (GATv2Conv, GCNConv, MessagePassing, SGConv,
                                 BatchNorm, GraphNorm)
-from . import torch_utils as tu
+from .city.shortest_paths import reconstruct_all_paths
+from .common.tensors import (aggr_edges_over_sequences, get_update_at_mask,
+                             get_variable_slice_mask)
+from .network.routes import get_route_leg_times, to_routes
 from .trunc_normal import TruncatedNormal
 
-from .citygraph_dataset import \
-    DEMAND_KEY, STOP_KEY, STREET_KEY, ROUTE_KEY, CityGraphData
+from .city.graph import DEMAND_KEY, STOP_KEY, STREET_KEY, ROUTE_KEY, CityGraphData
 from .transit_time_estimator import (
     EPSILON,
     ROUTE_ACTION_EXTEND,
@@ -233,7 +235,7 @@ class RoutesEncoder(nn.Module):
         nodepair_descs: batch_size x n_nodepairs x embed_dim tensor
         """
         route_feats, pad_mask = \
-            tu.aggr_edges_over_sequences(routes_tensor, nodepair_descs, 'concat')
+            aggr_edges_over_sequences(routes_tensor, nodepair_descs, 'concat')
         
         # flatten multiple batch dimensions
         n_batch_dims = routes_tensor.ndim - 1
@@ -338,7 +340,7 @@ class SumRouteEncoder(RoutesEncoder):
         nodepair_descs: batch_size x n_nodepairs x embed_dim tensor
         """
         route_feats = \
-            tu.aggr_edges_over_sequences(routes_tensor, nodepair_descs, 'sum')
+            aggr_edges_over_sequences(routes_tensor, nodepair_descs, 'sum')
 
         return route_feats
 
@@ -1086,14 +1088,14 @@ class RouteGeneratorBase(nn.Module):
         has_direct_route = state.route_mat.isfinite()
         edge_feature_parts.append(has_direct_route)
         # time on direct route 
-        finite_direct_times = tu.get_update_at_mask(state.route_mat, 
+        finite_direct_times = get_update_at_mask(state.route_mat,
                                                     ~has_direct_route)
         edge_feature_parts.append(finite_direct_times)
         # has street
         has_street = state.graph_data.street_adj.isfinite()
         edge_feature_parts.append(has_street)
         # street time
-        street_times = tu.get_update_at_mask(state.graph_data.street_adj,
+        street_times = get_update_at_mask(state.graph_data.street_adj,
                                              ~has_street)
         edge_feature_parts.append(street_times)
         # has 1-transfer path, 2-transfer path, any path, shortest transit
@@ -1219,7 +1221,7 @@ class RouteGeneratorBase(nn.Module):
             all_entropy += entropy
     
         routes_tensor = \
-            tu.get_batch_tensor_from_routes(state.routes, state.device)
+            to_routes(state.routes).to(state.device)
         # TODO make this return a named tuple with names that actually make 
          # sense
         logits = torch.cat(all_logits, dim=1)
@@ -1431,8 +1433,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
         self._log_step_counts(_route_steps)
 
-        routes_tensor = tu.get_batch_tensor_from_routes(state.routes, 
-                                                        state.device)
+        routes_tensor = to_routes(state.routes).to(state.device)
         if len(all_logits) == 0:
             logits = torch.empty((state.batch_size, 0), device=state.device)
             entropy = torch.zeros((state.batch_size,), device=state.device)
@@ -1743,7 +1744,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
                 np_scores, nan=0.0, posinf=score_clip, neginf=-score_clip)
             np_scores = np_scores.clamp(-score_clip, score_clip)
 
-        path_scores = tu.aggr_edges_over_sequences(path_seqs,
+        path_scores = aggr_edges_over_sequences(path_seqs,
                                                    np_scores[..., None], 'sum')
         path_scores.squeeze_(-1)
 
@@ -1800,10 +1801,10 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         times_to_end = (times_from_start - final_times).abs()
         if before_or_after == 'after':
             # terminal is last node
-            mask = tu.get_variable_slice_mask(routes, 1, froms=lens_wo_term)
-            routes_but_terminal = tu.get_update_at_mask(routes, mask, -1)[:, :-1]
+            mask = get_variable_slice_mask(routes, 1, froms=lens_wo_term)
+            routes_but_terminal = get_update_at_mask(routes, mask, -1)[:, :-1]
             terminal_nodes = routes.gather(1, lens_wo_term[:, None]).squeeze(-1)
-            times_to_end = tu.get_update_at_mask(times_to_end, mask, 0)[:, :-1]
+            times_to_end = get_update_at_mask(times_to_end, mask, 0)[:, :-1]
         else:
             # terminal is first node
             routes_but_terminal = routes[:, 1:].clone()
@@ -1899,7 +1900,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             out_valids = out_valids.transpose(-2, -1)
 
         out_valids &= ~invalid_terms
-        out_scores = tu.get_update_at_mask(out_scores, ~out_valids, TORCH_FMIN)
+        out_scores = get_update_at_mask(out_scores, ~out_valids, TORCH_FMIN)
 
         log.debug("extension scores gotten")
 
@@ -2126,8 +2127,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
 
         self._log_step_counts(_route_steps)
 
-        routes_tensor = tu.get_batch_tensor_from_routes(state.routes,
-                                                        state.device)
+        routes_tensor = to_routes(state.routes).to(state.device)
         if len(all_logits) == 0:
             logits = torch.empty((state.batch_size, 0), device=state.device)
             entropy = torch.zeros((state.batch_size,), device=state.device)
@@ -2789,7 +2789,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         kept_excess_fraction = self._masked_candidate_fraction(
             excess_edges, kept_edge_pos, dtype)
 
-        leg_times = tu.get_route_leg_times(
+        leg_times = get_route_leg_times(
             state.current_routes, state.drive_times, state.mean_stop_time)
         redundant_leg_times = leg_times * excess_edges
         removed_excess_time = (
@@ -3045,7 +3045,7 @@ class UnbiasedPathCombiner(RouteGeneratorBase):
         if not hasattr(state.graph_data, '_seqs'):
             # compute the shortest paths and store them in the graph_data object
              # so we don't need to recompute them for each route.
-            seqs, _ = tu.reconstruct_all_paths(state.graph_data.nexts)
+            seqs, _ = reconstruct_all_paths(state.graph_data.nexts)
             state.graph_data._seqs = seqs
         else:
             seqs = state.graph_data._seqs        
@@ -3095,7 +3095,7 @@ class UnbiasedPathCombiner(RouteGeneratorBase):
             # zero out scores for paths that are too long
             cdt_lens = (candidates != -1).sum(dim=-1) + route_len[:, None]
             cdt_too_long = cdt_lens > state.max_route_len[:, None]
-            ext_probs = tu.get_update_at_mask(ext_probs, cdt_too_long)
+            ext_probs = get_update_at_mask(ext_probs, cdt_too_long)
             no_valid_ext = (ext_probs.sum(dim=-1) == 0)
             is_done |= no_valid_ext
             
@@ -3133,13 +3133,13 @@ class UnbiasedPathCombiner(RouteGeneratorBase):
             # enforce no extension if is_done
             chosen_ext_lens[is_done] = 0
             # compute mask for new stops on the routes
-            insert_mask = tu.get_variable_slice_mask(
+            insert_mask = get_variable_slice_mask(
                 route, dim=1, froms=route_len, tos=route_len + chosen_ext_lens)
             # select the chosen extensions
             exp_sel = selection[..., None].expand(-1, -1, candidates.shape[-1])
             chosen_seqs = candidates.gather(1, exp_sel).squeeze(1)
             # insert the chosen extensions
-            select_mask = tu.get_variable_slice_mask(
+            select_mask = get_variable_slice_mask(
                 chosen_seqs, dim=1, tos=chosen_ext_lens)
             # route[insert_mask] = chosen_seqs[select_mask]
             chosen_seqs_inplace = torch.zeros_like(route)
@@ -3278,7 +3278,7 @@ class NodeWalker(RouteGeneratorBase):
             # assemble query vector: adjacent nodes and the halt option
             is_valid = is_adj[batch_idxs, cur_node] & ~node_on_route[..., :-1]
             is_valid = is_valid & ~is_done[:, None]
-            valid_idxs = tu.get_indices_from_mask(is_valid, dim=-1)
+            valid_idxs = get_indices_from_mask(is_valid, dim=-1)
             cdt_feats = node_descs[batch_idxs[:, None], valid_idxs]
             if route.shape[-1] > 1:
                 # don't enable halt option unless we have at least two stops
@@ -3293,7 +3293,7 @@ class NodeWalker(RouteGeneratorBase):
                 key_padding_mask=route_pad_mask, need_weights=False)
             cdt_descs = torch.cat((cdt_descs, cdt_feats), dim=-1)
             scores = self.next_node_scorer(cdt_descs).squeeze(-1)
-            scores = tu.get_update_at_mask(scores, valid_idxs == -1, TORCH_FMIN)
+            scores = get_update_at_mask(scores, valid_idxs == -1, TORCH_FMIN)
             cur_node, next_logit = select(scores, not greedy)
             cur_node = cur_node.squeeze(-1)
 
@@ -3301,7 +3301,7 @@ class NodeWalker(RouteGeneratorBase):
             if route.shape[-1] > 1:
                 chose_halt = cur_node == cdt_feats.shape[-2] - 1
                 is_done = is_done | chose_halt
-                cur_node = tu.get_update_at_mask(cur_node, chose_halt, -1)
+                cur_node = get_update_at_mask(cur_node, chose_halt, -1)
                 next_logit[chose_halt] = 0.0
                 
             route = torch.cat((route, cur_node[:, None]), dim=1)
@@ -3747,7 +3747,7 @@ def get_node_pair_descs(node_descs):
 def check_extensions_add_connections(is_linked, extensions):
     # determine if any path on its own makes new connections
     path_makes_new_connection = \
-        tu.aggr_edges_over_sequences(extensions, (~is_linked[..., None]))
+        aggr_edges_over_sequences(extensions, (~is_linked[..., None]))
     path_makes_new_connection = path_makes_new_connection.bool().squeeze(-1)
 
     # if a graph is not fully connected, then any path that doesn't make a 
@@ -3909,7 +3909,7 @@ def select(scores, scores_as_logits=False, softmax_temp=1,
     logits = logsoftmax(scores, softmax_temp).to(dtype=torch.float64)
 
     # do this to avoid nans from 0 * -inf
-    ent_logits = tu.get_update_at_mask(logits, logits.isinf(), 0)
+    ent_logits = get_update_at_mask(logits, logits.isinf(), 0)
     entropy = -(ent_logits.exp() * ent_logits).sum(dim=-1)
     assert not entropy.isnan().any()
 
@@ -3967,6 +3967,27 @@ def select(scores, scores_as_logits=False, softmax_temp=1,
 
 def logsoftmax(energies, softmax_temp=1):
     return nn.functional.log_softmax(energies / softmax_temp, dim=-1)    
+
+
+def get_indices_from_mask(mask, dim=0, pad_value=-1):
+    """Given a boolean mask, return the a tensor of indices of the True
+       elements."""
+    n_indices = mask.sum(dim=dim)
+    shape = list(mask.shape)
+    shape[dim] = n_indices.max().item()
+    dev = mask.device
+    indices = torch.full(shape, pad_value, dtype=int, device=dev)
+
+    dims = [1] * len(shape)
+    dims[dim] = -1
+    # add a 1-length dim for each other dimension of the mask
+    indices_source = torch.arange(mask.shape[dim], device=dev).reshape(*dims)
+    indices_source = indices_source.expand_as(mask)
+
+    var_slice_mask = get_variable_slice_mask(indices, dim, tos=n_indices)
+    indices[var_slice_mask] = indices_source[mask]
+
+    return indices
 
 
 def expand_batch_dim(tnsr_to_expand, batch_size, dim=0):

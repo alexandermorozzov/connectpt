@@ -12,11 +12,7 @@ import numpy as np
 import torch
 from pyproj import Transformer
 
-from ..data.routes import as_route_tensor
-
-
-def _route_nodes(route_tensor):
-    return [int(node) for node in route_tensor.tolist() if int(node) >= 0]
+from ..network.routes import to_routes, route_lists
 
 
 def project_coords(coords, source_crs):
@@ -60,7 +56,7 @@ def route_adjustments(routes, reference_routes):
 
 def route_stats(routes):
     """Compact route-set statistics for map titles and notebook tables."""
-    rr = as_route_tensor(routes)
+    rr = to_routes(routes)
     if rr.ndim == 3:
         rr = rr[0]
     route_lens = (rr > -1).sum(dim=-1)
@@ -116,12 +112,12 @@ def network_connectivity_stats(tensors, routes=None):
     route_self_loops = []
     routes_with_repeats = []
     if routes is not None:
-        rr = as_route_tensor(routes)
+        rr = to_routes(routes)
         if rr.ndim == 3:
             rr = rr[0]
         giant = set(components[0]) if components else set()
         for route_idx, route_tensor in enumerate(rr):
-            nodes = _route_nodes(route_tensor)
+            nodes = route_lists(route_tensor)
             route_nodes.update(nodes)
             if len(nodes) != len(set(nodes)):
                 routes_with_repeats.append(route_idx)
@@ -170,7 +166,7 @@ def route_underlay_adj(*route_sets, n_nodes=None, source_adj=None):
     for route_set in route_sets:
         if route_set is None:
             continue
-        rr = as_route_tensor(route_set)
+        rr = to_routes(route_set)
         if rr.ndim == 3:
             rr = rr[0]
         route_sets_2d.append(rr)
@@ -184,7 +180,7 @@ def route_underlay_adj(*route_sets, n_nodes=None, source_adj=None):
 
     for rr in route_sets_2d:
         for route_tensor in rr:
-            nodes = _route_nodes(route_tensor)
+            nodes = route_lists(route_tensor)
             for start, end in zip(nodes[:-1], nodes[1:]):
                 if start < 0 or end < 0 or start >= n_nodes or end >= n_nodes:
                     continue

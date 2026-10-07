@@ -12,7 +12,7 @@ def copytier_config(dg, data, connectivity_mode) -> "CopyTierConfig":
     """The dataset-generation config from the ``dataset_build`` and ``dataset``
     parameters."""
     from connectpt.routes_generator.run.context import DATASETS_DIR
-    from connectpt.routes_generator.data.route_copies import COPY_TIER_CFG
+    from connectpt.routes_generator.network.corruption import COPY_TIER_CFG
 
     ddir = DATASETS_DIR / data.dataset_dirname
     tiers = list(dg.tiers) if dg.tiers else list(COPY_TIER_CFG)
@@ -31,7 +31,7 @@ def copytier_config(dg, data, connectivity_mode) -> "CopyTierConfig":
 
 def _graph_tensors(g):
     """node_locs / street_adj / demand dict for one graph (shared helper)."""
-    from connectpt.routes_generator.citygraph_dataset import STOP_KEY
+    from connectpt.routes_generator.city.graph import STOP_KEY
 
     return {"node_locs": g[STOP_KEY].pos.detach().cpu().clone(),
             "street_adj": g.street_adj.detach().cpu().clone(),
@@ -80,16 +80,14 @@ def build_copytier_dataset(cfg: CopyTierConfig):
     import torch
     from tqdm.auto import tqdm
 
-    from connectpt.routes_generator.citygraph_dataset import DynamicCityGraphDataset
+    from connectpt.routes_generator.city.synthetic import DynamicCityGraphDataset
     from connectpt.routes_generator.lc_eval import build_lc_cfg, run_lc_batch
-    from connectpt.routes_generator.torch_utils import dump_routes
-    from connectpt.routes_generator.data.routes import pad_routes_to
-    from connectpt.routes_generator.data.route_copies import (
-        count_changed_routes, inject_route_copies, redundancy_stats,
-        uncovered_demand_pct)
+    from connectpt.routes_generator.run.artifacts import save_routes
+    from connectpt.routes_generator.network.routes import to_routes
+    from connectpt.routes_generator.network.corruption import count_changed_routes, inject_route_copies, redundancy_stats, uncovered_demand_pct
 
     def _to_fixed(routes):
-        return pad_routes_to(routes, cfg.target_n_routes, cfg.max_route_len)
+        return to_routes(routes, n_routes=cfg.target_n_routes, width=cfg.max_route_len)[0]
 
     _tensors = _graph_tensors
 
@@ -148,7 +146,7 @@ def build_copytier_dataset(cfg: CopyTierConfig):
             after = redundancy_stats(routes)
             n_corrupted = count_changed_routes(clean_routes, routes)
             gdir = cfg.new_dataset_dir / f"graph_{gi:04d}"; gdir.mkdir(parents=True, exist_ok=True)
-            dump_routes(f"lc_copy_cur_graph_{gi:04d}_routes", routes, out_dir=gdir)
+            save_routes(gdir / f"lc_copy_cur_graph_{gi:04d}_routes_routes.pkl", routes)
             subset.append(g)
             meta.append({
                 "graph_index": gi, "tier": tier, "tier_kind": ("clean" if not tier_cfg["kinds"] else "copies"),

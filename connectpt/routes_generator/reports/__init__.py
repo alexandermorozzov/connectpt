@@ -16,7 +16,7 @@ from .render import render_report, figure_key_slug, ReportArtifact
 from .geo import (project_coords, project_coords_3857, route_adjustments,
                  route_stats, network_connectivity_stats,
                  street_underlay_adj, route_underlay_adj)
-from .paper_io import (paper_row, save_paper_table, save_paper_routes,
+from .paper_io import (paper_row, save_paper_table,
                        save_paper_fig, ravel_hist)
 
 
@@ -46,7 +46,6 @@ __all__ = [
     "route_underlay_adj",
     "paper_row",
     "save_paper_table",
-    "save_paper_routes",
     "save_paper_fig",
     "ravel_hist",
 ]

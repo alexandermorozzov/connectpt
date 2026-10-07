@@ -2,9 +2,9 @@
 
 Encapsulates the data plumbing the training notebook did inline: loading the
 raw graphs + LC seed routes, the tier-stratified train/val split, the
-curriculum schedule functions, and the make_batch wrapper. The batching and
-loading delegate to the existing ``improvement_learning`` functions so behaviour
-is unchanged; only the orchestration moves here.
+curriculum schedule functions, and the make_batch wrapper. City batching lives
+in ``city.graph``; route loading and fitting use ``run.artifacts`` and
+``network.routes``.
 """
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from typing import Callable, Sequence
 
 import torch
 
-from ..improvement_learning import (
-    load_raw_graphs_and_lc_routes,
-    make_improvement_batch,
-)
+from ..city.graph import STOP_KEY, to_batch, SpaceScaleTransform, DemandScaleTransform
+from ..city.synthetic import load_graphs
+from ..run.artifacts import load_routes
+from ..network.routes import to_routes
 
 
 @dataclass
@@ -43,9 +43,13 @@ class TrainingDataModule:
                 f"Build it once with `python scripts/run.py --config-name runs/prepare_dataset` "
                 f"(about an hour for the default 1000 graphs)."
             )
-        self.graphs, self.seed_routes = load_raw_graphs_and_lc_routes(
-            self.raw_graphs_path, self.lc_results_dir
-        )
+        self.graphs = load_graphs(self.raw_graphs_path)
+        self.seed_routes = load_routes(self.lc_results_dir)
+        if len(self.graphs) != self.seed_routes.shape[0]:
+            raise ValueError('graph count does not match seed network count')
+        self.seed_routes = to_routes(
+            self.seed_routes, width=min(self.seed_routes.shape[-1],
+                                       max(int(g[STOP_KEY].num_nodes) for g in self.graphs)))
         return self
 
     def __len__(self) -> int:
@@ -54,11 +58,16 @@ class TrainingDataModule:
     # --- batching (delegates to the existing builder) -----------------------
     def make_batch(self, indices, *, training: bool = False, **kwargs):
         """Build a (graph_batch, route_batch) for ``indices``."""
-        kwargs.setdefault("target_n_routes", self.target_n_routes)
-        return make_improvement_batch(
-            self.graphs, self.seed_routes, indices, self.device,
-            training=training, **kwargs
-        )
+        transforms = (kwargs.get("space_scale", SpaceScaleTransform(0.95, 1.05)),
+                      kwargs.get("demand_scale", DemandScaleTransform(0.9, 1.1))) if training else ()
+        graph_batch = to_batch([self.graphs[int(i)] for i in indices], self.device,
+                              transforms=transforms, edit_features=True)
+        node_capacity = int((graph_batch[STOP_KEY].ptr[1:] - graph_batch[STOP_KEY].ptr[:-1]).max())
+        routes = to_routes(
+            self.seed_routes[torch.as_tensor(indices, dtype=torch.long)],
+            n_routes=kwargs.get("target_n_routes", self.target_n_routes),
+            width=min(self.seed_routes.shape[-1], node_capacity)).to(self.device)
+        return graph_batch, routes
 
     # --- splits -------------------------------------------------------------
     def random_split(self, train_fraction: float = 0.9, seed: int = 0):

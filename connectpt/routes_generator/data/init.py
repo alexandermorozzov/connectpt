@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import torch
 
-from .routes import as_route_tensor
+from ..network.routes import to_routes
 
 
 def build_init_routes(spec, tensors, *, seed: int = 0, device=None,
@@ -16,21 +16,21 @@ def build_init_routes(spec, tensors, *, seed: int = 0, device=None,
     construction model, plus the realistic corruption tier unless ``clean``."""
     import random
 
-    from .route_copies import inject_realistic_tier, pad_routes
+    from ..network.corruption import inject_realistic_tier
 
     if device is None:
         from ..run.context import resolve_device
         device = resolve_device()
 
     routes = _lc_construct(spec, tensors, device=device)
-    routes = pad_routes(routes, spec["n_routes"], spec["max_route_len"])
+    routes = to_routes(routes, n_routes=spec["n_routes"], width=spec["max_route_len"])[0]
     if not clean:
         rng = random.Random(seed)
         routes, _ = inject_realistic_tier(
             routes, rng, spec["min_route_len"], spec["max_route_len"],
             street_adj=tensors["street_adj"], demand=tensors["demand"],
             n_nodes=tensors["node_locs"].shape[0])
-    routes = as_route_tensor(routes)
+    routes = to_routes(routes)
     return routes[None] if routes.ndim == 2 else routes
 
 
@@ -39,7 +39,7 @@ def _lc_construct(spec, tensors, *, device) -> torch.Tensor:
     from omegaconf import OmegaConf
     from torch_geometric.loader import DataLoader
 
-    from ..citygraph_dataset import get_dataset_from_config
+    from ..city.graph import to_batch
     from ..run.checkpoints import CheckpointStore
     from ..run.context import CFG_DIR, CONSTRUCTION_MODEL_WEIGHTS_PATH
     from ..run.context import seed_everything
@@ -70,7 +70,7 @@ def _lc_construct(spec, tensors, *, device) -> torch.Tensor:
 
     seed_everything(cfg.experiment.get("seed"))
     dataloader = DataLoader(
-        get_dataset_from_config(cfg.eval.dataset, tensors=tensors), batch_size=1)
+        to_batch(tensors).to_data_list(), batch_size=1)
     cost_obj = CostFactory.build(
         cfg.cost,
         symmetric_routes=bool(cfg.experiment.symmetric_routes))
@@ -82,4 +82,4 @@ def _lc_construct(spec, tensors, *, device) -> torch.Tensor:
     _, _unserved, _metrics, routes = eval_model(
         model, dataloader, cfg.eval, cost_obj, n_samples=1,
         return_routes=True, silent=True, device=device)
-    return as_route_tensor(routes)
+    return to_routes(routes)

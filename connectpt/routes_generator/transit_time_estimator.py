@@ -15,8 +15,12 @@ from dataclasses import dataclass
 from typing import Optional
 from omegaconf import DictConfig
 
-from .citygraph_dataset import STOP_KEY
-from . import torch_utils as tu
+from .city.graph import STOP_KEY
+from .city.shortest_paths import (aggregate_edge_features, count_path_nodes,
+                                  floyd_warshall, reconstruct_all_paths)
+from .common.tensors import get_variable_slice_mask
+from .network.routes import (get_nodes_on_routes_mask, get_route_edge_matrix,
+                             get_route_leg_times, to_routes)
 
 import geopandas as gpd
 import numpy as np
@@ -364,9 +368,9 @@ class RouteGenBatchState:
         first_part_lens = (first_parts > -1).sum(dim=-1)
         scnd_part_lens = (second_parts > -1).sum(dim=-1)
         new_route_lens = first_part_lens + scnd_part_lens
-        scnd_part_mask = tu.get_variable_slice_mask(
+        scnd_part_mask = get_variable_slice_mask(
             updated_routes, dim=1, froms=first_part_lens, tos=new_route_lens)
-        scnd_part_len_mask = tu.get_variable_slice_mask(
+        scnd_part_len_mask = get_variable_slice_mask(
             second_parts, dim=1, tos=scnd_part_lens)
         updated_routes[scnd_part_mask] = second_parts[scnd_part_len_mask]
         assert updated_routes.max() < self.max_n_nodes
@@ -408,7 +412,7 @@ class RouteGenBatchState:
 
         ncr_times_from_start = torch.zeros_like(self.current_routes, 
                                                 dtype=torch.float32)
-        ncr_leg_times = tu.get_route_leg_times(self.current_routes,
+        ncr_leg_times = get_route_leg_times(self.current_routes,
                                                self.drive_times,
                                                self.mean_stop_time)
         # keep zeros at the start for the first stop
@@ -530,9 +534,9 @@ class RouteGenBatchState:
         first_part_lens = (first_parts > -1).sum(dim=-1)
         scnd_part_lens = (second_parts > -1).sum(dim=-1)
         new_route_lens = first_part_lens + scnd_part_lens
-        scnd_part_mask = tu.get_variable_slice_mask(
+        scnd_part_mask = get_variable_slice_mask(
             updated_routes, dim=1, froms=first_part_lens, tos=new_route_lens)
-        scnd_part_len_mask = tu.get_variable_slice_mask(
+        scnd_part_len_mask = get_variable_slice_mask(
             second_parts, dim=1, tos=scnd_part_lens)
         updated_routes[scnd_part_mask] = second_parts[scnd_part_len_mask]
         assert updated_routes.max() < self.max_n_nodes
@@ -582,9 +586,7 @@ class RouteGenBatchState:
             has_finished_routes = any(len(routes) > 0
                                       for routes in finished_routes)
             if has_finished_routes:
-                finished_tensor = tu.get_batch_tensor_from_routes(
-                    finished_routes, self.device
-                )
+                finished_tensor = to_routes(finished_routes).to(self.device)
                 self.add_new_routes(finished_tensor)
             else:
                 self._update_route_data()
@@ -633,7 +635,7 @@ class RouteGenBatchState:
         # incorporate new routes into the route graphs
         batch_new_routes = self._prepare_batch_route_tensor(batch_new_routes)
         # add new routes to the route matrix.
-        new_route_mat = tu.get_route_edge_matrix(batch_new_routes, 
+        new_route_mat = get_route_edge_matrix(batch_new_routes,
             self.drive_times, self.mean_stop_time, self.symmetric_routes)
         self.extra_data.route_mat = \
             torch.minimum(self.route_mat, new_route_mat)
@@ -761,10 +763,8 @@ class RouteGenBatchState:
                  batch_current_routes[0].ndim == 0)
             if is_single_route:
                 batch_current_routes = [batch_current_routes]
-            batch_current_routes, _ = tu.get_tensor_from_varlen_lists(
-                batch_current_routes,
-                self.device,
-            )
+            batch_current_routes = to_routes(
+                [[route] for route in batch_current_routes])[:, 0].to(self.device)
 
         if batch_current_routes.ndim == 1:
             batch_current_routes = batch_current_routes.unsqueeze(0)
@@ -785,23 +785,8 @@ class RouteGenBatchState:
                 f"{batch_current_routes.shape[0]} vs {self.batch_size}"
             )
 
-        if batch_current_routes.shape[-1] > self.max_n_nodes:
-            raise ValueError(
-                "Current route is longer than the scenario node capacity: "
-                f"{batch_current_routes.shape[-1]} vs allowed "
-                f"{self.max_n_nodes}"
-            )
-
-        if batch_current_routes.shape[-1] < self.max_n_nodes:
-            pad_len = self.max_n_nodes - batch_current_routes.shape[-1]
-            batch_current_routes = torch.nn.functional.pad(
-                batch_current_routes, (0, pad_len), value=-1
-            )
-
-        batch_current_routes = batch_current_routes.to(
-            device=self.device,
-            dtype=torch.long,
-        )
+        batch_current_routes = to_routes(
+            batch_current_routes, width=self.max_n_nodes)[0].to(self.device)
         invalid_nodes = (batch_current_routes < -1) | \
             (batch_current_routes >= self.max_n_nodes)
         invalid_nodes &= batch_current_routes != -1
@@ -814,7 +799,7 @@ class RouteGenBatchState:
 
         ncr_times_from_start = torch.zeros_like(self.current_routes,
                                                 dtype=torch.float32)
-        ncr_leg_times = tu.get_route_leg_times(self.current_routes,
+        ncr_leg_times = get_route_leg_times(self.current_routes,
                                                self.drive_times,
                                                self.mean_stop_time)
         ncr_times_from_start[:, 1:] = ncr_leg_times.cumsum(dim=1)
@@ -834,14 +819,14 @@ class RouteGenBatchState:
         self._add_routes_to_list(batch_new_routes)
 
         # finally, update the total route times with the new routes
-        leg_times = tu.get_route_leg_times(batch_new_routes, 
+        leg_times = get_route_leg_times(batch_new_routes,
                                            self.graph_data.drive_times,
                                            self.mean_stop_time)
         total_new_time = leg_times.sum(dim=(1,2))
 
         if self.symmetric_routes:                                           
             transpose_dtm = self.graph_data.drive_times.transpose(1, 2)
-            return_leg_times = tu.get_route_leg_times(batch_new_routes, 
+            return_leg_times = get_route_leg_times(batch_new_routes,
                                                       transpose_dtm,
                                                       self.mean_stop_time)
             total_new_time += return_leg_times.sum(dim=(1,2))
@@ -849,25 +834,9 @@ class RouteGenBatchState:
         self.extra_data.total_route_time += total_new_time        
 
     def _prepare_batch_route_tensor(self, batch_routes):
-        if type(batch_routes) is list:
-            batch_routes = tu.get_batch_tensor_from_routes(batch_routes,
-                                                           self.device)
-        if batch_routes.device != self.device:
-            batch_routes = batch_routes.to(self.device)
-        batch_routes = batch_routes.to(dtype=torch.long)
-        if batch_routes.ndim == 1:
-            batch_routes = batch_routes[None, None]
-        elif batch_routes.ndim == 2:
-            if self.batch_size == 1:
-                batch_routes = batch_routes[None]
-            else:
-                batch_routes = batch_routes[:, None]
-        elif batch_routes.ndim != 3:
-            raise ValueError(
-                "Expected route tensor with shape (route_len), "
-                "(batch, route_len), (n_routes, route_len), or "
-                f"(batch, n_routes, route_len), got {batch_routes.shape}"
-            )
+        if isinstance(batch_routes, torch.Tensor) and batch_routes.ndim == 2 and self.batch_size > 1:
+            batch_routes = batch_routes[:, None]
+        batch_routes = to_routes(batch_routes).to(self.device)
         if batch_routes.shape[0] == 1 and self.batch_size > 1:
             batch_routes = batch_routes.expand(self.batch_size, -1, -1)
         elif batch_routes.shape[0] != self.batch_size:
@@ -925,11 +894,11 @@ class RouteGenBatchState:
             return
         # do things that have to be done whether we added or removed routes
         fw_mat = self.route_mat + self.transfer_time_s[:, None, None]
-        nexts, transit_times = tu.floyd_warshall(fw_mat)
+        nexts, transit_times = floyd_warshall(fw_mat)
         # node counts of the shortest paths; identical to
         # reconstruct_all_paths(nexts)[1] but without materializing the full
         # (B, N, N, max_len) path tensor (only the counts are needed here).
-        path_edge_counts = tu.count_path_nodes(nexts)
+        path_edge_counts = count_path_nodes(nexts)
         # subtract one transfer time from each transit time to avoid counting
          # a transfer for the first edge of a journey
         transit_times -= self.transfer_time_s[:, None, None]
@@ -1064,14 +1033,14 @@ class RouteGenBatchState:
     def get_total_route_time(self, batch_routes):
         batch_routes = self._prepare_batch_route_tensor(batch_routes)
 
-        leg_times = tu.get_route_leg_times(batch_routes, 
+        leg_times = get_route_leg_times(batch_routes,
                                            self.graph_data.drive_times,
                                            self.mean_stop_time)
         route_time = leg_times.sum(dim=(1,2))
 
         if self.symmetric_routes:
             transpose_dtm = self.graph_data.drive_times.transpose(1, 2)
-            return_leg_times = tu.get_route_leg_times(batch_routes, 
+            return_leg_times = get_route_leg_times(batch_routes,
                                                       transpose_dtm,
                                                       self.mean_stop_time)
             route_time += return_leg_times.sum(dim=(1,2))
@@ -1245,7 +1214,7 @@ class RouteGenBatchState:
                 copy_len = min(cur.shape[-1], route.shape[-1])
                 cur[bi, route_idx, :copy_len] = route[:copy_len]
         else:
-            cur = tu.get_batch_tensor_from_routes(self.routes, self.device)
+            cur = to_routes(self.routes).to(self.device)
         seed = self.adjustment_seed.to(self.device)
         if seed.dim() == 2:           # unbatched [n_routes, L]
             seed = seed.unsqueeze(0)
@@ -1272,7 +1241,7 @@ class RouteGenBatchState:
 
     def get_shortest_path_sequences(self):
         if self.extra_data.shortest_path_sequences.numel() == 0:
-            path_seqs, _ = tu.reconstruct_all_paths(self.nexts)
+            path_seqs, _ = reconstruct_all_paths(self.nexts)
             self.extra_data.shortest_path_sequences = path_seqs
         else:
             path_seqs = self.extra_data.shortest_path_sequences
@@ -1811,7 +1780,7 @@ class CostModule(torch.nn.Module):
         dev = drive_times_matrix.device
 
         # assemble route graph
-        batch_routes = tu.get_batch_tensor_from_routes(state.routes, dev)
+        batch_routes = to_routes(state.routes).to(dev)
         route_lens = (batch_routes > -1).sum(-1)
 
         log.debug("summing cost components")
@@ -1926,14 +1895,14 @@ class CostModule(torch.nn.Module):
 
         if return_per_route_riders:
             _, used_routes = \
-                tu.get_route_edge_matrix(batch_routes, drive_times_matrix,
+                get_route_edge_matrix(batch_routes, drive_times_matrix,
                                         self.mean_stop_time_s, 
                                         self.symmetric_routes, 
                                         self.low_memory_mode, 
                                         return_used_routes=True)
 
             used_routes.unsqueeze_(-1)
-            route_seqs = tu.aggregate_edge_features(state.route_nexts, 
+            route_seqs = aggregate_edge_features(state.route_nexts,
                                                     used_routes, 'concat')
             route_seqs.squeeze_(-1)
             per_route_riders = torch.zeros(batch_routes.shape[:2], device=dev)
@@ -2303,7 +2272,7 @@ class MyCostModule(CostModule):
             return cost.new_zeros(())
         from connectpt.routes_generator.bee_colony import (
             get_adjustment_degrees, get_adjustment_penalties)
-        cur = tu.get_batch_tensor_from_routes(state.routes, cost.device)
+        cur = to_routes(state.routes).to(cost.device)
         seed = self.adjustment_seed.to(cost.device)
         if seed.dim() == 2:
             seed = seed[None]
@@ -2402,7 +2371,7 @@ def count_duplicate_stops(n_nodes, networks):
         batch_size = networks.shape[0]
     # count duplicate stops in routes
     route_lens = (networks > -1).sum(dim=-1)
-    nodes_on_routes = tu.get_nodes_on_routes_mask(n_nodes, networks)
+    nodes_on_routes = get_nodes_on_routes_mask(n_nodes, networks)
     n_nodes_covered = nodes_on_routes[..., :-1].sum(-1)
     n_ntwk_duplicates = (route_lens - n_nodes_covered).sum(-1)
 
@@ -2412,6 +2381,6 @@ def count_duplicate_stops(n_nodes, networks):
 def count_skipped_stops(network, shortest_path_lens):
     path_n_skips = shortest_path_lens - 2
     path_n_skips.clamp_(min=0)
-    leg_n_skips = tu.get_route_leg_times(network, path_n_skips)
+    leg_n_skips = get_route_leg_times(network, path_n_skips)
     total_n_skips = leg_n_skips.sum(dim=(1, 2))
     return total_n_skips

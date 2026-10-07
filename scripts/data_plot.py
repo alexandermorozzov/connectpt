@@ -17,16 +17,16 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-import torch  # noqa: E402
+from connectpt.routes_generator.run.artifacts import load_routes as read_routes  # noqa: E402
 
 from connectpt.routes_generator.run.context import resolve_under_root  # noqa: E402
-from connectpt.routes_generator.data import INSTANCES_DIR, load_instance  # noqa: E402
+from connectpt.routes_generator.city.instances import INSTANCES_DIR, load_instance  # noqa: E402
 from connectpt.routes_generator.reports import plot_routes_grid  # noqa: E402
 
 
 def load_routes(path: Path):
     """-> ({label: routes}, coords | None, street_adj | None)."""
-    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload = read_routes(path)
     if not isinstance(payload, dict):
         return {path.stem: payload}, None, None
     routes = payload.get("routes", payload)

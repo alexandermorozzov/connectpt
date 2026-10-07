@@ -2,19 +2,20 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from pathlib import Path
+
 import logging as log
 
 import torch
-from torch_geometric.data import Batch
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 from torch_geometric.loader import DataLoader
-from .citygraph_dataset import CityGraphData, \
-    get_dataset_from_config, STOP_KEY
+from .city.graph import to_batch
+from .city.instances import load_instance
 from .transit_time_estimator import RouteGenBatchState
 from . import utils as lrnu
-from .initialization import prepare_current_routes, prepare_init_network
-from .torch_utils import get_batch_tensor_from_routes, dump_routes
+from .network.routes import to_routes
+from .run.artifacts import save_routes
 
 
 def sample_from_model(model, state, cost_obj, n_samples=20, 
@@ -40,11 +41,11 @@ def sample_from_model(model, state, cost_obj, n_samples=20,
     if init_network is not None:
         sampled_init_network = init_network.repeat(n_samples, 1, 1)
     if init_current_routes is not None:
-        prepared_current_routes = prepare_current_routes(
-            init_current_routes,
-            batch_size=state.batch_size,
-            max_n_nodes=state.max_n_nodes,
-            device=state.device,
+        prepared_current_routes = (
+            to_routes(init_current_routes, width=state.max_n_nodes)
+            .reshape(-1, state.max_n_nodes)
+            .expand(state.batch_size, -1)
+            .to(state.device)
         )
         sampled_current_routes = prepared_current_routes.repeat(n_samples, 1)
     if revisit_routes is not None:
@@ -66,29 +67,33 @@ def sample_from_model(model, state, cost_obj, n_samples=20,
                                          state.n_routes_to_plan,
                                          min_route_len, max_route_len)
         if sampled_init_network is not None:
-            init_chunk = prepare_init_network(
-                sampled_init_network[ii:ii+sample_batch_size],
-                batch_size=batch_state.batch_size,
-                n_routes=int(batch_state.n_routes_to_plan.min().item()),
-                device=batch_state.device,
+            init_chunk = (
+                to_routes(
+                    sampled_init_network[ii : ii + sample_batch_size],
+                    n_routes=int(batch_state.n_routes_to_plan.min().item()),
+                )
+                .expand(batch_state.batch_size, -1, -1)
+                .to(batch_state.device)
             )
             if init_chunk.shape[1] > 0:
                 batch_state.add_new_routes(init_chunk)
         if sampled_current_routes is not None:
-            current_chunk = prepare_current_routes(
-                sampled_current_routes[ii:ii+sample_batch_size],
-                batch_size=batch_state.batch_size,
-                max_n_nodes=batch_state.max_n_nodes,
-                device=batch_state.device,
+            current_chunk = (
+                to_routes(sampled_current_routes[ii : ii + sample_batch_size], width=batch_state.max_n_nodes)
+                .reshape(-1, batch_state.max_n_nodes)
+                .expand(batch_state.batch_size, -1)
+                .to(batch_state.device)
             )
             if (current_chunk > -1).any():
                 batch_state.set_current_routes(current_chunk)
         if sampled_revisit_routes is not None:
-            revisit_chunk = prepare_init_network(
-                sampled_revisit_routes[ii:ii+sample_batch_size],
-                batch_size=batch_state.batch_size,
-                n_routes=int(batch_state.n_routes_to_plan.min().item()),
-                device=batch_state.device,
+            revisit_chunk = (
+                to_routes(
+                    sampled_revisit_routes[ii : ii + sample_batch_size],
+                    n_routes=int(batch_state.n_routes_to_plan.min().item()),
+                )
+                .expand(batch_state.batch_size, -1, -1)
+                .to(batch_state.device)
             )
             if revisit_chunk.shape[1] > 0:
                 batch_state = _revisit_seeded_routes(
@@ -113,18 +118,17 @@ def sample_from_model(model, state, cost_obj, n_samples=20,
     batch_size = len(flat_sample_inputs) // n_samples
     best_plans = [all_plans[mi * batch_size + ii] \
                   for ii, mi in enumerate(min_indices)]
-    best_plans_tensor = get_batch_tensor_from_routes(best_plans)
+    best_plans_tensor = to_routes(best_plans)
     state.add_new_routes(best_plans_tensor)
     return state
 
 
 def _seed_state_with_init_network(state, init_network, init_current_routes=None):
     if init_network is not None:
-        init_network = prepare_init_network(
-            init_network,
-            batch_size=state.batch_size,
-            n_routes=int(state.n_routes_to_plan.min().item()),
-            device=state.device,
+        init_network = (
+            to_routes(init_network, n_routes=int(state.n_routes_to_plan.min().item()))
+            .expand(state.batch_size, -1, -1)
+            .to(state.device)
         )
         if init_network.shape[1] > 0:
             state.add_new_routes(init_network)
@@ -132,11 +136,11 @@ def _seed_state_with_init_network(state, init_network, init_current_routes=None)
     if init_current_routes is None:
         return state
 
-    init_current_routes = prepare_current_routes(
-        init_current_routes,
-        batch_size=state.batch_size,
-        max_n_nodes=state.max_n_nodes,
-        device=state.device,
+    init_current_routes = (
+        to_routes(init_current_routes, width=state.max_n_nodes)
+        .reshape(-1, state.max_n_nodes)
+        .expand(state.batch_size, -1)
+        .to(state.device)
     )
     if (init_current_routes > -1).any():
         state.set_current_routes(init_current_routes)
@@ -152,11 +156,10 @@ def _revisit_seeded_routes(model, state, revisit_routes, greedy=False):
             "This model does not support revisiting seeded routes"
         )
 
-    revisit_routes = prepare_init_network(
-        revisit_routes,
-        batch_size=state.batch_size,
-        n_routes=int(state.n_routes_to_plan.min().item()),
-        device=state.device,
+    revisit_routes = (
+        to_routes(revisit_routes, n_routes=int(state.n_routes_to_plan.min().item()))
+        .expand(state.batch_size, -1, -1)
+        .to(state.device)
     )
     if revisit_routes.shape[1] == 0:
         return state
@@ -223,7 +226,7 @@ def eval_model(model, eval_dataloader, eval_cfg, cost_obj,
                          device=device, silent=silent, return_routes=True,
                          routes_tensor=routes_tensor)
     if return_routes:
-        routes = get_batch_tensor_from_routes(routes)
+        routes = to_routes(routes)
         return cost, unserved_demand, metrics, routes
     else:
         return cost, metrics
@@ -237,7 +240,7 @@ def main(cfg: DictConfig, tensors:dict):
                                              weights_required=True)
 
     # load the data
-    test_ds = get_dataset_from_config(cfg.eval.dataset, tensors=tensors)
+    test_ds = to_batch(tensors if tensors is not None else load_instance(cfg.eval.dataset.city.lower())).to_data_list()
     test_dl = DataLoader(test_ds, batch_size=cfg.batch_size)
 
     # evaluate the model on the dataset
@@ -256,6 +259,6 @@ def main(cfg: DictConfig, tensors:dict):
         init_cfg=cfg.get('init', None),
     )
     
-    dump_routes(run_name, routes.cpu())
+    save_routes(Path("output_routes") / f"{run_name}_routes.pt", routes)
     return metrics, unserved_demand, routes
 

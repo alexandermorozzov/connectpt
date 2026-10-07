@@ -14,8 +14,9 @@ import hydra
 from .run.logger import log as log_metrics
 from .search.records import METRIC_FIELDS, SearchBestRecord
 from .models import check_extensions_add_connections
-from . import torch_utils as tu
-from .citygraph_dataset import get_dataset_from_config
+from .city.shortest_paths import reconstruct_all_paths
+from .common.tensors import get_update_at_mask
+from .network.routes import to_routes
 from .transit_time_estimator import (
     ROUTE_ACTION_HALT,
     RouteGenBatchState,
@@ -379,7 +380,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
     max_n_nodes = state.max_n_nodes
 
     # get all shortest paths
-    shortest_paths, _ = tu.reconstruct_all_paths(state.nexts)
+    shortest_paths, _ = reconstruct_all_paths(state.nexts)
 
     demand = torch.nn.functional.pad(state.demand, (0, 1, 0, 1))
     n_routes = state.n_routes_to_plan
@@ -1054,8 +1055,7 @@ def get_neural_variants(model, env_state, bee_networks, drop_route_idxs,
     env_state.replace_routes(flatbee_kept_routes)
     result = model(env_state, greedy=False)
     env_state = result.state
-    routes = tu.get_batch_tensor_from_routes(env_state.routes, 
-                                             bee_networks.device)
+    routes = to_routes(env_state.routes).to(bee_networks.device)
     if bee_dim:
         routes = routes.reshape(batch_size, n_bees, n_routes, -1)
     pad_size = max_n_nodes - routes.shape[-1]
@@ -1188,7 +1188,7 @@ def get_bee_2_variants(batch_bee_routes, shorten_prob, are_neighbours):
     rs_gatherer = route_starts[:, None, None].expand(-1, n_nodes+1, 1)
     start_nbr_probs = neighbour_probs.gather(2, rs_gatherer).squeeze(-1)
     # set the probabilities of nodes already on the route to 0
-    bbr_scatterer = tu.get_update_at_mask(flat_routes, flat_routes==-1, n_nodes)
+    bbr_scatterer = get_update_at_mask(flat_routes, flat_routes==-1, n_nodes)
     start_nbr_probs.scatter_(1, bbr_scatterer, 0)
     no_start_options = start_nbr_probs.sum(-1) == 0
     start_nbr_probs[no_start_options] = 1

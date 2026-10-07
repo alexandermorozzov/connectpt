@@ -7,7 +7,7 @@ from uuid import uuid4
 from hydra import compose, initialize_config_dir
 
 from connectpt.routes_generator.run.context import CFG_DIR
-from connectpt.routes_generator.citygraph_dataset import DynamicCityGraphDataset
+from connectpt.routes_generator.city.synthetic import DynamicCityGraphDataset
 from connectpt.routes_generator.model_factory import RouteModelFactory
 from connectpt.routes_generator.objectives import CostFactory
 from connectpt.routes_generator.transit_time_estimator import RouteGenBatchState
@@ -213,7 +213,7 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
 @pytest.mark.parametrize('trainer', ['ppo_construction', 'decomposed_construction', 'd3po_construction'])
 def test_construction_uses_legacy_data_setup_and_existing_updates(trainer):
     import pickle
-    from connectpt.routes_generator.citygraph_dataset import RAW_GRAPH_FILENAME
+    from connectpt.routes_generator.city.synthetic import RAW_GRAPH_FILENAME
     from connectpt.routes_generator.training.construction_run import ConstructionTrainingRun
     torch.set_num_threads(2)
     torch.manual_seed(7)
@@ -221,7 +221,7 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer):
     data_dir = folder / 'data'
     data_dir.mkdir(parents=True)
     dataset = DynamicCityGraphDataset(9, 9, data_type='voronoi')
-    # Raw graphs, as saved by citygraph_dataset.main; old loaders apply augmentation.
+    # Raw graphs, as saved by city.synthetic.main; loaders apply augmentation.
     graphs = [dataset.generate_graph() for _ in range(12)]
     (data_dir / RAW_GRAPH_FILENAME).write_bytes(pickle.dumps(graphs))
     test_dir = folder / 'test'

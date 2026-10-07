@@ -22,6 +22,8 @@ import importlib
 
 import torch
 
+from ..network.routes import get_unselected_routes
+
 # Import the bee_colony *module* (not the package attribute): the package
 # __init__ rebinds ``connectpt.routes_generator.bee_colony`` to the compat
 # ``bee_colony`` function, so ``from .. import bee_colony`` would grab that
@@ -337,7 +339,7 @@ class ExecutablePlan:
         remaining_state = None
         if self.construction_model is None or (
                 empty_routes.any() and force_linking_unlinked):
-            unsel_routes = _bc.tu.get_unselected_routes(
+            unsel_routes = get_unselected_routes(
                 bee_networks, chosen_route_idxs)
             remaining_state = env_state.clone()
             remaining_state.replace_routes(unsel_routes.flatten(0, 1))

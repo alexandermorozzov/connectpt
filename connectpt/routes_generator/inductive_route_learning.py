@@ -6,16 +6,15 @@ from pathlib import Path
 
 from tqdm import tqdm
 import torch
+from .city.instances import load_instance
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Batch
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 import hydra
 
-# need to import CityGraphData here to allow unpickling of new datasets
-from .citygraph_dataset import CityGraphData, CityGraphDataset, \
-    get_default_train_and_eval_split, get_dynamic_training_set, STOP_KEY, \
-    DEMAND_KEY
+from .city.graph import to_batch, STOP_KEY, DEMAND_KEY
+from .city.synthetic import CityGraphDataset, get_default_train_and_eval_split, get_dynamic_training_set
 from .transit_time_estimator import (COST_WEIGHT_KEY_ORDER,
                                      ROUTE_ACTION_EXTEND, RouteGenBatchState)
 from . import utils as lrnu
@@ -731,9 +730,8 @@ def setup_and_train(cfg: DictConfig, *,
         val_ds = CityGraphDataset(cfg.dataset.val_path)
     elif cfg.dataset.type == 'mumford':
         do_scaling = cfg.dataset.get('scale_dynamically', True)
-        data = CityGraphData.from_mumford_data(cfg.dataset.path, 
-                                               cfg.dataset.city,
-                                               scale_dynamically=do_scaling)
+        data = to_batch(load_instance(cfg.dataset.city.lower()),
+                        scale_dynamically=do_scaling).to_data_list()[0]
         train_ds = [data] * cfg.batch_size
         train_dl = DataLoader(train_ds, batch_size=cfg.batch_size)
         val_ds = [data] * val_batch_size

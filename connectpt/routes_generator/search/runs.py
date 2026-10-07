@@ -28,7 +28,7 @@ from ..run.runs import ExperimentRun, RunArtifact
 from ..run.context import RunContext
 from ..run.schemas import (AdjustmentParams, InstanceParams, SearchPaths, SearchRunParams,
                            SweepParams, params)
-from ..data import load_instance
+from ..city.instances import load_instance
 from ..evaluation import full_metric_row, select_metrics
 from ..model_factory import RouteModelFactory
 from ..objectives import CostFactory

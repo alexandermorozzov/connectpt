@@ -14,13 +14,7 @@ from __future__ import annotations
 import torch
 
 from ..transit_time_estimator import RouteGenBatchState
-from ..torch_utils import get_batch_tensor_from_routes
-
-
-def _as_route_tensor(routes):
-    if isinstance(routes, torch.Tensor):
-        return routes.detach().cpu()
-    return get_batch_tensor_from_routes(routes).detach().cpu()
+from ..network.routes import to_routes
 
 
 def _expand_batch_value(value, batch_size: int, device):
@@ -51,7 +45,7 @@ def compute_cost_breakdown(dataloader, eval_cfg, cost_obj, routes_tensor, device
         eval_cfg.min_route_len,
         eval_cfg.max_route_len,
     )
-    routes_tensor = _as_route_tensor(routes_tensor).to(state.device)
+    routes_tensor = to_routes(routes_tensor).to(state.device)
     state.add_new_routes(routes_tensor)
 
     cho = cost_obj._cost_helper(state)

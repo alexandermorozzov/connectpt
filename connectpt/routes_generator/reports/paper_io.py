@@ -12,7 +12,6 @@ from pathlib import Path
 import numpy as np
 
 from ..run.artifacts import ArtifactStore
-from ..data.routes import as_route_tensor
 from ..evaluation import full_metric_row
 
 
@@ -49,19 +48,4 @@ def save_paper_fig(fig, name, *, out_dir, dpi=220):
     path = base / f"{name}.png"
     fig.savefig(path, dpi=dpi, bbox_inches="tight")
     print(f"[results] figure -> {path}")
-    return path
-
-
-def save_paper_routes(name, routes, coords=None, street_adj=None, meta=None, *,
-                      out_dir):
-    """Dump a {label: route_tensor} mapping (+ coords/street_adj) into ``out_dir``
-    so the route figures can be reconstructed later."""
-    payload = {
-        "routes": {k: as_route_tensor(v).cpu() for k, v in routes.items()},
-        "coords": (coords.cpu() if hasattr(coords, "cpu") else coords),
-        "street_adj": (street_adj.cpu() if hasattr(street_adj, "cpu") else street_adj),
-        "meta": meta or {},
-    }
-    path = ArtifactStore(out_dir).save_routes(payload, f"{name}_routes")
-    print(f"[results] route dump ({len(payload['routes'])} sets) -> {path}")
     return path

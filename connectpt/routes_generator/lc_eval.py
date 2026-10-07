@@ -14,9 +14,10 @@ from omegaconf import OmegaConf
 from torch_geometric.loader import DataLoader
 
 from . import utils as lrnu
-from .citygraph_dataset import get_dataset_from_config
+from .city.graph import to_batch
+from .city.instances import load_instance
 from .run.context import CFG_DIR, CONSTRUCTION_MODEL_WEIGHTS_PATH as MODEL_WEIGHTS_PATH, safe_run_name
-from .data.routes import as_route_tensor
+from .network.routes import to_routes
 from .eval_route_generator import eval_model
 from .evaluation.cost_breakdown import add_cost_breakdown_to_metrics
 from .objectives import cost_kwargs
@@ -37,12 +38,8 @@ def _apply_disabled_components(cfg):
     return cfg
 
 
-def make_test_dataloader(dataset_cfg):
-    return DataLoader(get_dataset_from_config(dataset_cfg), batch_size=1)
 
 
-def make_tensor_dataloader(dataset_cfg, tensors):
-    return DataLoader(get_dataset_from_config(dataset_cfg, tensors=tensors), batch_size=1)
 
 
 def build_lc_cfg(run_name, n_routes, min_route_len, max_route_len,
@@ -77,9 +74,9 @@ def build_lc_cfg(run_name, n_routes, min_route_len, max_route_len,
 def run_lc(cfg, init_routes=None, revisit_routes=None, *,
            tensors=None, run_name_prefix="lc_", n_samples=None):
     if tensors is None:
-        dataloader = make_test_dataloader(cfg.eval.dataset)
+        dataloader = DataLoader(to_batch(load_instance(cfg.eval.dataset.city.lower())).to_data_list(), batch_size=1)
     else:
-        dataloader = make_tensor_dataloader(cfg.eval.dataset, tensors)
+        dataloader = DataLoader(to_batch(tensors).to_data_list(), batch_size=1)
     device, run_name, _, cost_obj, model = lrnu.process_standard_experiment_cfg(
         cfg, run_name_prefix=run_name_prefix, weights_required=True)
     init_cfg = OmegaConf.create({"method": "tensor"}) if init_routes is not None else None
@@ -90,7 +87,7 @@ def run_lc(cfg, init_routes=None, revisit_routes=None, *,
         model, dataloader, cfg.eval, cost_obj, n_samples=effective_n_samples,
         return_routes=True, silent=True, device=device, init_cfg=init_cfg,
         routes_tensor=init_routes, revisit_routes_tensor=revisit_routes)
-    routes_tensor = as_route_tensor(routes)
+    routes_tensor = to_routes(routes)
     metrics = add_cost_breakdown_to_metrics(
         metrics, dataloader, cfg.eval, cost_obj, routes_tensor, device)
     step_counts = getattr(model, "route_step_counts_log", [])
@@ -104,14 +101,11 @@ def run_lc_batch(cfg, tensors_list, *, run_name_prefix="lc_", n_samples=None,
         cfg, run_name_prefix=run_name_prefix, weights_required=True)
     if hasattr(model, "clear_step_counts_log"):
         model.clear_step_counts_log()
-    datalist = []
-    for tn in tensors_list:
-        ds = get_dataset_from_config(cfg.eval.dataset, tensors=tn)
-        datalist.append(ds[0] if isinstance(ds, (list, tuple)) else ds)
+    datalist = [to_batch(tn).to_data_list()[0] for tn in tensors_list]
     bs = int(batch_size or len(datalist))
     dataloader = DataLoader(datalist, batch_size=bs)
     effective_n_samples = LC_SAMPLES if n_samples is None else int(n_samples)
     _, _unserved, _metrics, routes = eval_model(
         model, dataloader, cfg.eval, cost_obj, n_samples=effective_n_samples,
         sample_batch_size=bs, return_routes=True, silent=True, device=device)
-    return as_route_tensor(routes)
+    return to_routes(routes)

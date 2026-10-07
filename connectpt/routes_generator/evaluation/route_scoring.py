@@ -16,8 +16,8 @@ import numpy as np
 import torch
 
 from ..bee_colony import get_adjustment_degrees
-from ..data.route_copies import redundancy_fraction
-from ..data.routes import as_route_tensor
+from ..network.corruption import redundancy_fraction
+from ..network.routes import to_routes
 from ..objectives import cost_kwargs
 
 
@@ -42,8 +42,8 @@ def metric_value(metrics, key, default=np.nan):
 
 def adj_vs_init(routes, init_routes, adjustment=None):
     """Mean adjustment degree of a route set vs the init network."""
-    r = as_route_tensor(routes)
-    s = as_route_tensor(init_routes)
+    r = to_routes(routes)
+    s = to_routes(init_routes)
     if r.ndim == 2:
         r = r[None]
     if s.ndim == 2:
@@ -63,31 +63,22 @@ def route_adjustment_degrees(routes, reference_routes, adjustment=None):
     reported ``adj_vs_seed``. Both route sets are padded to a common width so a
     candidate longer than the seed still aligns.
     """
-    r = as_route_tensor(routes).long()
-    s = as_route_tensor(reference_routes).long()
+    r = to_routes(routes).long()
+    s = to_routes(reference_routes).long()
     if r.ndim == 3:
         r = r[0]
     if s.ndim == 3:
         s = s[0]
     width = max(int(r.shape[-1]), int(s.shape[-1]))
-    r, s = _pad_route_width(r, width)[None], _pad_route_width(s, width)[None]
+    r, s = to_routes(r, width=width), to_routes(s, width=width)
     gap, mode = _adjustment_values(adjustment)
     return get_adjustment_degrees(
         r, s, True, gap=gap, mode=mode)[0].detach().cpu().numpy()
 
 
-def _pad_route_width(routes, width):
-    """Right-pad a ``[n_routes, L]`` tensor with ``-1`` up to ``width``."""
-    if routes.shape[-1] >= width:
-        return routes[..., :width]
-    pad = torch.full((routes.shape[0], width - routes.shape[-1]), -1,
-                     dtype=routes.dtype)
-    return torch.cat([routes, pad], dim=-1)
-
-
 def redundancy_pct(routes):
     """% of edge traversals that re-cover an already-covered edge."""
-    R = as_route_tensor(routes)
+    R = to_routes(routes)
     if R.ndim == 3:
         R = R[0]
     return 100.0 * redundancy_fraction(R)
@@ -102,7 +93,7 @@ def conn_metric(m):
 def full_metric_row(m, rt, seed, adjustment=None):
     """Full metric set for every results row: we optimize a subset (RTT+conn+adj)
     but always compute/report/save ALL of them."""
-    rt = as_route_tensor(rt)
+    rt = to_routes(rt)
     return {
         "ATT": metric_value(m, "ATT"), "RTT": metric_value(m, "RTT"),
         # WMC = the optimized weighted connectivity (median by default). Both
@@ -149,7 +140,7 @@ def score_fixed_routes(routes, tensors, spec, *, alpha=None, adj_target=None,
     from omegaconf import OmegaConf
     from torch_geometric.loader import DataLoader
 
-    from ..citygraph_dataset import get_dataset_from_config
+    from ..city.graph import to_batch
     from ..objectives import CostFactory
     from ..utils import test_method
     from .cost_breakdown import add_cost_breakdown_to_metrics
@@ -166,22 +157,22 @@ def score_fixed_routes(routes, tensors, spec, *, alpha=None, adj_target=None,
             cost_obj.adjustment_degree_weight = float(adj_weight)
         if adj_objective is not None:
             cost_obj.adjustment_degree_objective = str(adj_objective)
-        seed = as_route_tensor(seed_routes)
+        seed = to_routes(seed_routes)
         cost_obj.adjustment_seed = (seed[None] if seed.dim() == 2 else seed).to(device)
     else:
         cost_obj.adjustment_degree_weight = 0.0
     cost_obj.to(device)
 
     dataloader = DataLoader(
-        get_dataset_from_config(OmegaConf.create({"type": "tensor"}), tensors=tensors),
+        to_batch(tensors).to_data_list(),
         batch_size=1)
     eval_cfg = OmegaConf.create({"csv": False, **dict(spec)})
     out = test_method(
         None, dataloader, eval_cfg, OmegaConf.create({"method": "tensor"}),
         cost_obj, silent=True, device=device, return_routes=True,
-        routes_tensor=as_route_tensor(routes))
+        routes_tensor=to_routes(routes))
     _mean, _std, _unserved, metrics, scored = out
-    scored = as_route_tensor(scored)
+    scored = to_routes(scored)
     metrics = add_cost_breakdown_to_metrics(
         metrics, dataloader, eval_cfg, cost_obj, scored, device)
     return metrics, scored

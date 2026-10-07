@@ -13,11 +13,12 @@ from omegaconf import DictConfig
 import networkx as nx
 
 from . import models
-from .initialization import init_from_cfg
+from .initialization import john_init, nikolic_init
+from .network.routes import to_routes
 from .transit_time_estimator import RouteGenBatchState, \
     get_cost_module_from_cfg
-from .citygraph_dataset import STOP_KEY
-from .torch_utils import load_routes_tensor
+from .city.graph import STOP_KEY
+from .run.artifacts import load_routes
 
 from hydra import compose, initialize_config_dir
 
@@ -467,3 +468,34 @@ def get_eval_cfg(cfg_dir: str, base_cfg_name: str = "stacks/model_eval", params:
         cfg_eval = compose(config_name=base_cfg_name, overrides=overrides)
 
     return cfg_eval
+
+
+def init_from_cfg(state, init_cfg, routes_tensor):
+    """Initializes the network according to the configuration.
+
+    Args:
+        state: The initial state of the system, not including the routes.
+        init_cfg: The configuration for the initialization method.
+
+    Returns:
+        The initial network.
+    """
+    if init_cfg is None:
+        return None
+
+    if init_cfg.method == 'load':
+        init_network = load_routes(init_cfg.path, state.device)
+    elif init_cfg.method == 'tensor' and routes_tensor is not None:
+        init_network = routes_tensor
+    elif init_cfg.method == 'john':
+        alpha = init_cfg.get('alpha', state.alpha)
+        init_network = john_init(state, alpha, init_cfg.prioritize_direct_connections)
+    elif init_cfg.method == 'nikolic':
+        init_network = nikolic_init(state)
+    else:
+        raise ValueError(f'Unknown initialization method: {init_cfg.method}')
+
+    if init_network is None:
+        return None
+    return to_routes(init_network, n_routes=int(state.n_routes_to_plan.min().item())).expand(
+        state.batch_size, -1, -1).to(state.device)

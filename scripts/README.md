@@ -219,8 +219,8 @@ python scripts/run.py --config-name runs/train_construction trainer=decomposed_c
 Один раз сгенерируйте общие файлы:
 
 ```bash
-python -m connectpt.routes_generator.citygraph_dataset datasets/construction/20_nodes/mixed mixed --min 20 --max 20 -n 32768
-python -m connectpt.routes_generator.citygraph_dataset datasets/construction/20_nodes/test mixed --min 20 --max 20 -n 128
+python -m connectpt.routes_generator.city.synthetic datasets/construction/20_nodes/mixed mixed --min 20 --max 20 -n 32768
+python -m connectpt.routes_generator.city.synthetic datasets/construction/20_nodes/test mixed --min 20 --max 20 -n 128
 ```
 
 - Обучающий файл делится 90 / 10 на train и validation.

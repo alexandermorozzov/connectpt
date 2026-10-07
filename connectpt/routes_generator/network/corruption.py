@@ -22,6 +22,8 @@ from collections import Counter
 
 import torch
 
+from .routes import route_lists
+
 COPY_MUTATION_KINDS = ("full_copy", "prefix_copy", "suffix_copy", "middle_copy")
 
 # Cap on unserved demand (%) for the coverage-preserving duplicate tier: a copy
@@ -31,33 +33,34 @@ D_UN_CAP_PCT = 10.0
 # Tier presets used both for the training curriculum (PART 1, incl. lc_clean)
 # and the experiment init corruption (PART 2 uses "covered_dup").
 COPY_TIER_CFG = {
-    "copy_full":     {"events": 3, "max_multiplicity": 3, "kinds": ("full_copy",)},
-    "copy_boundary": {"events": 4, "max_multiplicity": 4,
-                      "kinds": ("prefix_copy", "suffix_copy")},
-    "copy_mixed":    {"events": 6, "max_multiplicity": 5, "kinds": COPY_MUTATION_KINDS},
-    "covered_dup":   {"events": 6, "max_multiplicity": 4, "kinds": COPY_MUTATION_KINDS,
-                      "covered": True, "d_un_cap": D_UN_CAP_PCT},
-    "lc_clean":      {"events": 0, "max_multiplicity": 1, "kinds": ()},
+    "copy_full": {"events": 3, "max_multiplicity": 3, "kinds": ("full_copy",)},
+    "copy_boundary": {"events": 4, "max_multiplicity": 4, "kinds": ("prefix_copy", "suffix_copy")},
+    "copy_mixed": {"events": 6, "max_multiplicity": 5, "kinds": COPY_MUTATION_KINDS},
+    "covered_dup": {
+        "events": 6,
+        "max_multiplicity": 4,
+        "kinds": COPY_MUTATION_KINDS,
+        "covered": True,
+        "d_un_cap": D_UN_CAP_PCT,
+    },
+    "lc_clean": {"events": 0, "max_multiplicity": 1, "kinds": ()},
 }
-
-
-def route_nodes(route):
-    """Node sequence of one padded route row (drops the -1 padding)."""
-    return [int(x) for x in route.tolist() if int(x) >= 0]
 
 
 def is_simple_sequence(nodes, min_len, max_len):
     """True if the node sequence is a valid simple route within the contract."""
-    return (min_len <= len(nodes) <= max_len and
-            len(nodes) == len(set(nodes)) and
-            all(a != b for a, b in zip(nodes[:-1], nodes[1:])))
+    return (
+        min_len <= len(nodes) <= max_len
+        and len(nodes) == len(set(nodes))
+        and all(a != b for a, b in zip(nodes[:-1], nodes[1:]))
+    )
 
 
 def leg_counts(routes):
     """Counter of undirected edge traversals over all routes."""
     counts = Counter()
     for route in routes:
-        ns = route_nodes(route)
+        ns = route_lists(route)
         for a, b in zip(ns[:-1], ns[1:]):
             counts[(min(a, b), max(a, b))] += 1
     return counts
@@ -72,8 +75,8 @@ def count_changed_routes(before, after):
     n = max(int(before.shape[0]), int(after.shape[0]))
     changed = 0
     for i in range(n):
-        b = route_nodes(before[i]) if i < before.shape[0] else []
-        a = route_nodes(after[i]) if i < after.shape[0] else []
+        b = route_lists(before[i]) if i < before.shape[0] else []
+        a = route_lists(after[i]) if i < after.shape[0] else []
         if b != a:
             changed += 1
     return changed
@@ -96,24 +99,6 @@ def redundancy_fraction(routes):
     return redundancy_stats(routes)["redundancy"]
 
 
-def pad_routes(routes, n_routes, max_len):
-    """Pad/trim a (n, len) or (1, n, len) route tensor to exactly (n_routes, max_len)."""
-    t = torch.as_tensor(routes).long()
-    if t.ndim == 3:
-        t = t[0]
-    if t.shape[0] < n_routes:
-        t = torch.cat([t, torch.full((n_routes - t.shape[0], t.shape[1]), -1,
-                                     dtype=t.dtype)], 0)
-    else:
-        t = t[:n_routes]
-    if t.shape[1] < max_len:
-        t = torch.cat([t, torch.full((t.shape[0], max_len - t.shape[1]), -1,
-                                     dtype=t.dtype)], 1)
-    elif t.shape[1] > max_len:
-        t = t[:, :max_len]
-    return t
-
-
 def uncovered_demand_pct(routes, demand, n_nodes):
     """Demand-weighted % of OD pairs not connected by any route (union-find)."""
     parent = list(range(n_nodes))
@@ -125,7 +110,7 @@ def uncovered_demand_pct(routes, demand, n_nodes):
         return x
 
     for route in routes:
-        ns = route_nodes(route)
+        ns = route_lists(route)
         for a, b in zip(ns[:-1], ns[1:]):
             ra, rb = find(a), find(b)
             if ra != rb:
@@ -144,10 +129,10 @@ def uncovered_demand_pct(routes, demand, n_nodes):
 
 # --- street-graph utilities (phantom-edge-free candidates) ------------------
 
+
 def street_legs_valid(nodes, street_adj):
     """True if every consecutive leg of the node sequence is a real street edge."""
-    return all(math.isfinite(float(street_adj[a, b]))
-               for a, b in zip(nodes[:-1], nodes[1:]))
+    return all(math.isfinite(float(street_adj[a, b])) for a, b in zip(nodes[:-1], nodes[1:]))
 
 
 def street_path(street_adj, src, dst, rng=None, noise=0.0, forbidden=frozenset()):
@@ -210,15 +195,14 @@ def segment_time(nodes, street_adj):
     return sum(float(street_adj[a, b]) for a, b in zip(nodes[:-1], nodes[1:]))
 
 
-def copy_candidate(routes, donor_idx, target_idx, kind, rng, min_len, max_len,
-                   street_adj=None):
+def copy_candidate(routes, donor_idx, target_idx, kind, rng, min_len, max_len, street_adj=None):
     """Propose a copy of (part of) the donor route into the target slot.
 
     When ``street_adj`` is given, glue junctions that don't exist in the
     street graph are repaired with the shortest street path (or the candidate
     is rejected) so no phantom legs enter the network."""
-    donor = route_nodes(routes[donor_idx])
-    target = route_nodes(routes[target_idx])
+    donor = route_lists(routes[donor_idx])
+    target = route_lists(routes[target_idx])
     if not donor or not target:
         return None
     if kind == "full_copy":
@@ -237,9 +221,11 @@ def copy_candidate(routes, donor_idx, target_idx, kind, rng, min_len, max_len,
         elif kind == "middle_copy":
             donor_start = rng.randint(0, len(donor) - seg_len)
             target_start = rng.randint(1, len(target) - seg_len - 1)
-            candidate = (target[:target_start] +
-                         donor[donor_start:donor_start + seg_len] +
-                         target[target_start + seg_len:])
+            candidate = (
+                target[:target_start]
+                + donor[donor_start : donor_start + seg_len]
+                + target[target_start + seg_len :]
+            )
         else:
             raise ValueError(f"unknown mutation kind: {kind}")
     if candidate == target or not is_simple_sequence(candidate, min_len, max_len):
@@ -253,12 +239,22 @@ def copy_candidate(routes, donor_idx, target_idx, kind, rng, min_len, max_len,
 
 def replace_route(routes, route_idx, nodes):
     routes[route_idx] = -1
-    routes[route_idx, :len(nodes)] = torch.as_tensor(nodes, dtype=routes.dtype)
+    routes[route_idx, : len(nodes)] = torch.as_tensor(nodes, dtype=routes.dtype)
 
 
-def try_copy_mutation(routes, kind, max_multiplicity, rng, min_len, max_len,
-                      demand=None, n_nodes=None, d_un_cap=None, attempts=120,
-                      street_adj=None):
+def try_copy_mutation(
+    routes,
+    kind,
+    max_multiplicity,
+    rng,
+    min_len,
+    max_len,
+    demand=None,
+    n_nodes=None,
+    d_un_cap=None,
+    attempts=120,
+    street_adj=None,
+):
     """Copy one donor route/subroute into 1..max_multiplicity-1 recipients.
 
     Each accepted copy must strictly increase edge redundancy; when
@@ -276,16 +272,16 @@ def try_copy_mutation(routes, kind, max_multiplicity, rng, min_len, max_len,
         current_redundancy = redundancy_fraction(mutated)
         touched = 0
         for target_idx in target_idxs:
-            candidate = copy_candidate(mutated, donor_idx, target_idx, kind, rng,
-                                       min_len, max_len, street_adj=street_adj)
+            candidate = copy_candidate(
+                mutated, donor_idx, target_idx, kind, rng, min_len, max_len, street_adj=street_adj
+            )
             if candidate is None:
                 continue
             proposal = mutated.clone()
             replace_route(proposal, target_idx, candidate)
             if redundancy_fraction(proposal) <= current_redundancy + 1e-12:
                 continue
-            if d_un_cap is not None and \
-                    uncovered_demand_pct(proposal, demand, n_nodes) > d_un_cap:
+            if d_un_cap is not None and uncovered_demand_pct(proposal, demand, n_nodes) > d_un_cap:
                 continue  # would break coverage -> reject
             mutated = proposal
             current_redundancy = redundancy_fraction(mutated)
@@ -295,8 +291,9 @@ def try_copy_mutation(routes, kind, max_multiplicity, rng, min_len, max_len,
     return base, 0
 
 
-def inject_route_copies(routes, tier_cfg, rng, min_len, max_len,
-                        demand=None, n_nodes=None, street_adj=None):
+def inject_route_copies(
+    routes, tier_cfg, rng, min_len, max_len, demand=None, n_nodes=None, street_adj=None
+):
     """Apply one tier's worth of copy-injection events to a route tensor.
 
     Returns ``(routes, applied_events, mutated_routes)`` where the two
@@ -315,9 +312,17 @@ def inject_route_copies(routes, tier_cfg, rng, min_len, max_len,
         rng.shuffle(kinds)
         for kind in kinds:
             proposal, touched = try_copy_mutation(
-                routes, kind, int(tier_cfg["max_multiplicity"]), rng,
-                min_len, max_len, demand=demand, n_nodes=n_nodes,
-                d_un_cap=d_un_cap, street_adj=street_adj)
+                routes,
+                kind,
+                int(tier_cfg["max_multiplicity"]),
+                rng,
+                min_len,
+                max_len,
+                demand=demand,
+                n_nodes=n_nodes,
+                d_un_cap=d_un_cap,
+                street_adj=street_adj,
+            )
             if touched:
                 routes = proposal
                 applied_events[kind] += 1
@@ -339,17 +344,31 @@ def inject_route_copies(routes, tier_cfg, rng, min_len, max_len,
 #     points (targets d_un around d_un_target_pct).
 
 REALISTIC_TIER_CFG = {
-    "dup":        {"events": 1, "max_multiplicity": 2, "kinds": COPY_MUTATION_KINDS,
-                   "covered": True, "d_un_cap": D_UN_CAP_PCT},
-    "detour":     {"events": 2, "min_stretch": 1.3, "max_stretch": 2.5,
-                   "max_redundancy_gain": 0.05},
+    "dup": {
+        "events": 1,
+        "max_multiplicity": 2,
+        "kinds": COPY_MUTATION_KINDS,
+        "covered": True,
+        "d_un_cap": D_UN_CAP_PCT,
+    },
+    "detour": {"events": 2, "min_stretch": 1.3, "max_stretch": 2.5, "max_redundancy_gain": 0.05},
     "drop_cover": {"events": 3, "d_un_target_pct": 5.0},
 }
 
 
-def try_detour_mutation(routes, rng, street_adj, min_len, max_len,
-                        min_stretch=1.3, max_stretch=2.5, attempts=120,
-                        demand=None, n_nodes=None, max_redundancy_gain=0.05):
+def try_detour_mutation(
+    routes,
+    rng,
+    street_adj,
+    min_len,
+    max_len,
+    min_stretch=1.3,
+    max_stretch=2.5,
+    attempts=120,
+    demand=None,
+    n_nodes=None,
+    max_redundancy_gain=0.05,
+):
     """Replace a route segment with a longer street path (a "detour").
 
     Picks two anchor stops >= 2 legs apart and reroutes between them via a
@@ -362,17 +381,16 @@ def try_detour_mutation(routes, rng, street_adj, min_len, max_len,
     new_time)`` or None.
     """
     n_routes = routes.shape[0]
-    base_d_un = (uncovered_demand_pct(routes, demand, n_nodes)
-                 if demand is not None else None)
+    base_d_un = uncovered_demand_pct(routes, demand, n_nodes) if demand is not None else None
     base_redundancy = redundancy_fraction(routes)
     for _ in range(attempts):
         ri = rng.randrange(n_routes)
-        ns = route_nodes(routes[ri])
+        ns = route_lists(routes[ri])
         if len(ns) < 4 or not street_legs_valid(ns, street_adj):
             continue
         i = rng.randrange(0, len(ns) - 2)
         j = rng.randrange(i + 2, len(ns))
-        old_seg = ns[i:j + 1]
+        old_seg = ns[i : j + 1]
         old_t = segment_time(old_seg, street_adj)
         if old_t <= 0:
             continue
@@ -380,21 +398,22 @@ def try_detour_mutation(routes, rng, street_adj, min_len, max_len,
         # MUST go around -- a plain noised Dijkstra almost always returns the
         # direct segment again, since fewer hops usually beats the noise.
         blocked = {rng.choice(old_seg[1:-1])}
-        forbidden = ((set(ns[:i]) | set(ns[j + 1:])) - {ns[i], ns[j]}) | blocked
-        path = street_path(street_adj, ns[i], ns[j], rng=rng, noise=1.0,
-                           forbidden=forbidden)
+        forbidden = ((set(ns[:i]) | set(ns[j + 1 :])) - {ns[i], ns[j]}) | blocked
+        path = street_path(street_adj, ns[i], ns[j], rng=rng, noise=1.0, forbidden=forbidden)
         if path is None or path == old_seg:
             continue
         new_t = segment_time(path, street_adj)
         if not (min_stretch * old_t <= new_t <= max_stretch * old_t):
             continue
-        candidate = ns[:i] + path + ns[j + 1:]
+        candidate = ns[:i] + path + ns[j + 1 :]
         if not is_simple_sequence(candidate, min_len, max_len):
             continue
         proposal = routes.clone()
         replace_route(proposal, ri, candidate)
-        if base_d_un is not None and \
-                uncovered_demand_pct(proposal, demand, n_nodes) > base_d_un + 1e-9:
+        if (
+            base_d_un is not None
+            and uncovered_demand_pct(proposal, demand, n_nodes) > base_d_un + 1e-9
+        ):
             continue  # a detour must not uncover demand (drop_cover does that)
         if redundancy_fraction(proposal) > base_redundancy + max_redundancy_gain:
             continue  # nor turn into wholesale corridor duplication
@@ -402,8 +421,7 @@ def try_detour_mutation(routes, rng, street_adj, min_len, max_len,
     return None
 
 
-def try_drop_cover_mutation(routes, rng, demand, street_adj, min_len, max_len,
-                            attempts=60):
+def try_drop_cover_mutation(routes, rng, demand, street_adj, min_len, max_len, attempts=60):
     """Uncover one low-demand stop that is served by exactly one route.
 
     Endpoint stops are trimmed; interior stops are bypassed when their
@@ -412,15 +430,16 @@ def try_drop_cover_mutation(routes, rng, demand, street_adj, min_len, max_len,
     """
     cover = {}
     for ri in range(routes.shape[0]):
-        for node in route_nodes(routes[ri]):
+        for node in route_lists(routes[ri]):
             cover.setdefault(node, []).append(ri)
     D = demand if torch.is_tensor(demand) else torch.as_tensor(demand)
-    node_demand = (D.sum(0) + D.sum(1))
-    singly = sorted((n for n, c in cover.items() if len(c) == 1),
-                    key=lambda n: float(node_demand[n]))
+    node_demand = D.sum(0) + D.sum(1)
+    singly = sorted(
+        (n for n, c in cover.items() if len(c) == 1), key=lambda n: float(node_demand[n])
+    )
     for node in singly[:attempts]:
         ri = cover[node][0]
-        ns = route_nodes(routes[ri])
+        ns = route_lists(routes[ri])
         pos = ns.index(node)
         if pos in (0, len(ns) - 1):
             candidate = ns[1:] if pos == 0 else ns[:-1]
@@ -428,15 +447,16 @@ def try_drop_cover_mutation(routes, rng, demand, street_adj, min_len, max_len,
             prev_n, next_n = ns[pos - 1], ns[pos + 1]
             if not math.isfinite(float(street_adj[prev_n, next_n])):
                 continue
-            candidate = ns[:pos] + ns[pos + 1:]
+            candidate = ns[:pos] + ns[pos + 1 :]
         if not is_simple_sequence(candidate, min_len, max_len):
             continue
         return ri, candidate, node
     return None
 
 
-def inject_realistic_tier(routes, rng, min_len, max_len, *, street_adj,
-                          demand, n_nodes, tier_cfg=None):
+def inject_realistic_tier(
+    routes, rng, min_len, max_len, *, street_adj, demand, n_nodes, tier_cfg=None
+):
     """Apply the realistic corruption tier to a clean network.
 
     Returns ``(routes, applied)`` where ``applied`` counts the injected
@@ -453,9 +473,17 @@ def inject_realistic_tier(routes, rng, min_len, max_len, *, street_adj,
         rng.shuffle(kinds)
         for kind in kinds:
             proposal, touched = try_copy_mutation(
-                routes, kind, int(dup["max_multiplicity"]), rng, min_len, max_len,
-                demand=demand, n_nodes=n_nodes, d_un_cap=d_un_cap,
-                street_adj=street_adj)
+                routes,
+                kind,
+                int(dup["max_multiplicity"]),
+                rng,
+                min_len,
+                max_len,
+                demand=demand,
+                n_nodes=n_nodes,
+                d_un_cap=d_un_cap,
+                street_adj=street_adj,
+            )
             if touched:
                 routes = proposal
                 applied[f"dup_{kind}"] += 1
@@ -463,12 +491,18 @@ def inject_realistic_tier(routes, rng, min_len, max_len, *, street_adj,
 
     det = cfg["detour"]
     for _ in range(int(det["events"])):
-        res = try_detour_mutation(routes, rng, street_adj, min_len, max_len,
-                                  min_stretch=float(det["min_stretch"]),
-                                  max_stretch=float(det["max_stretch"]),
-                                  demand=demand, n_nodes=n_nodes,
-                                  max_redundancy_gain=float(
-                                      det.get("max_redundancy_gain", 0.05)))
+        res = try_detour_mutation(
+            routes,
+            rng,
+            street_adj,
+            min_len,
+            max_len,
+            min_stretch=float(det["min_stretch"]),
+            max_stretch=float(det["max_stretch"]),
+            demand=demand,
+            n_nodes=n_nodes,
+            max_redundancy_gain=float(det.get("max_redundancy_gain", 0.05)),
+        )
         if res is not None:
             ri, candidate, _, _ = res
             replace_route(routes, ri, candidate)
@@ -478,8 +512,7 @@ def inject_realistic_tier(routes, rng, min_len, max_len, *, street_adj,
     for _ in range(int(dc["events"])):
         if uncovered_demand_pct(routes, demand, n_nodes) >= float(dc["d_un_target_pct"]):
             break
-        res = try_drop_cover_mutation(routes, rng, demand, street_adj,
-                                      min_len, max_len)
+        res = try_drop_cover_mutation(routes, rng, demand, street_adj, min_len, max_len)
         if res is None:
             break
         ri, candidate, _ = res
