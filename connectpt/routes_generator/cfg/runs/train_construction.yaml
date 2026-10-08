@@ -1,14 +1,7 @@
 # @package _global_
-defaults:
-  - /model: construction_holliday
-  - /experiment: standard
-  - /cost: att_rtt
-  - /dataset: construction
-  - /trainer: ppo_construction
-  - _self_
 run:
-  type: construction_training
-  name: construction_${trainer}_seed${run.seed}
+  type: training
+  name: construction_${algorithm.name}_seed${run.seed}
   seed: 0
   cpu: false
 paths:
@@ -18,23 +11,58 @@ paths:
   init_checkpoint_path: null
 experiment:
   logdir: null
-eval:
-  n_routes: 10
-  min_route_len: 2
-  max_route_len: 12
-  csv: false
+logger_list:
+- tensorboard
+- csv
+defaults:
+- /cost: att_rtt
+- /dataset: construction
+- /experiment: standard
+- /model: construction_holliday
+- /algorithm: ppo
+- /env: construction
+- /curriculum: construction
+- _self_
+optimizer:
+  name: Adam
+  learning_rate: 0.0016134816080499328
+  decay: 0.0008404361781997002
+train_loop:
+  n_iterations: 200
+  horizon: 120
+  val_period: 10
+  validate_before_update: true
+  max_seconds: null
+  batch_size: 64
+  batch_size_cuda: 64
+  cpu_threads: 2
+  warmup_batches: 0
+  max_rollout_samples: null
+  calibrate_before_validation: false
+  action_seed: null
+  force_nonhalt_until: null
+  resample_preferences_on_terminal: false
+algorithm:
+  minibatch_size: ${train_loop.batch_size}
+  entropy_weight: 0.0
+  critic:
+    normalize_returns: false
+    huber: false
+    value_clip: null
 evaluation:
+  validation_mode: sample
   graph_count: 64
   test_graph_count: null
   pareto_enabled: true
   pareto_period: 10
   pareto_preference_count: 11
   pareto_stochastic_samples: 1
-  hv_reference: [3.0, 3.0]
+  hv_reference:
+  - 3.0
+  - 3.0
   eu_preference_count: 101
   log_pareto_front: true
   preference_count: 21
   stochastic_samples: 4
   seed: 9001
   final_test: true
-logger_list: [tensorboard, csv]

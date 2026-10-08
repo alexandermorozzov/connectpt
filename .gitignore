@@ -35,6 +35,8 @@ venv/
 ENV/
 !connectpt/routes_generator/env/
 !connectpt/routes_generator/env/*.py
+!connectpt/routes_generator/cfg/env/
+!connectpt/routes_generator/cfg/env/*.yaml
 
 # Editors
 .idea

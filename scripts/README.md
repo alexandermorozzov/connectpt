@@ -204,14 +204,14 @@ models:
 
 Другой вариант — оставить имя и задать другой корень: `run_search.py --weights-dir ...`.
 
-## 5. Обучение construction: PPO, decomposed PPO, D3PO
+## 5. Обучение construction: PPO и D3PO
 
-Construction-политика строит сеть с нуля. Алгоритм задаёт группа `trainer`:
+Construction-политика строит сеть с нуля. Алгоритм задаёт группа `algorithm`:
 
 ```bash
-python scripts/run.py --config-name runs/train_construction trainer=ppo_construction
-python scripts/run.py --config-name runs/train_construction trainer=d3po_construction
-python scripts/run.py --config-name runs/train_construction trainer=decomposed_construction
+python scripts/run.py --config-name runs/train_construction algorithm=ppo
+python scripts/run.py --config-name runs/train_construction algorithm=d3po
+python scripts/run.py --config-name runs/train_construction algorithm=d3po algorithm.diversity_weight=0
 ```
 
 ### 5.1. Данные
@@ -249,7 +249,8 @@ python -m connectpt.routes_generator.city.synthetic datasets/construction/20_nod
 - Предпочтения: α = 0 с вероятностью 0.33, α = 1 — 0.33, иначе α ~ U[0, 1].
   Веса держатся до смены graph batch во всех алгоритмах.
 - RTT считается в обе стороны.
-- Decomposed PPO = D3PO без diversity. Diversity D3PO — полный categorical KL.
+- Абляция без diversity: `algorithm=d3po algorithm.diversity_weight=0`.
+  Diversity D3PO — полный categorical KL.
 - Старые веса с 14 edge-признаками грузятся только с `model=construction`.
 
 ### 5.3. Что пишется
@@ -262,6 +263,7 @@ python -m connectpt.routes_generator.city.synthetic datasets/construction/20_nod
 | `config.yaml` | собранный конфиг |
 | `history.csv` | строка на шаг, столбец на метрику (те же теги, что в TensorBoard) |
 | `tensorboard/` | события TensorBoard |
+| `critic_snapshot.pt` | параметры критика, последние значения и targets |
 
 Кроме того: чекпоинты итераций, `last.pt`, `best.pt` (в корне весов), JSON теста.
 
@@ -287,7 +289,7 @@ HV считается с фиксированной точкой `[3, 3]` в н�
 ```powershell
 $cmp = 'artifacts/comparisons/construction_seed0'
 foreach ($a in 'ppo', 'd3po') {
-    .\scripts\launch.ps1 --wait run.py --config-name runs/train_construction trainer=${a}_construction `
+    .\scripts\launch.ps1 --wait run.py --config-name runs/train_construction algorithm=$a `
         run.name=$a run.seed=0 --runs-dir $cmp/runs --weights-dir $cmp/weights
 }
 .\scripts\launch.ps1 --wait run.py --config-name runs/compare paths.output_dir=$cmp
@@ -305,8 +307,8 @@ foreach ($a in 'ppo', 'd3po') {
 
 ```powershell
 $cmp = 'artifacts/comparisons/construction_overnight_seed0'
-.\scripts\launch.ps1 run.py --config-name runs/train_construction_overnight trainer=ppo_construction run.name=ppo --runs-dir $cmp/runs --weights-dir $cmp/weights
-.\scripts\launch.ps1 run.py --config-name runs/train_construction_overnight trainer=d3po_construction run.name=d3po --runs-dir $cmp/runs --weights-dir $cmp/weights
+.\scripts\launch.ps1 run.py --config-name runs/train_construction_overnight algorithm=ppo run.name=ppo --runs-dir $cmp/runs --weights-dir $cmp/weights
+.\scripts\launch.ps1 run.py --config-name runs/train_construction_overnight algorithm=d3po run.name=d3po --runs-dir $cmp/runs --weights-dir $cmp/weights
 ```
 
 - Профиль — `cfg/runs/train_construction_overnight.yaml`: batch 32, horizon 64,
@@ -335,7 +337,7 @@ TensorBoard — один сервер на всё: `tensorboard --logdir artifac
 в фоне. Первый аргумент — скрипт, остальные уходят ему без изменений.
 
 ```powershell
-.\scripts\launch.ps1 run.py --config-name runs/train_construction trainer=d3po_construction
+.\scripts\launch.ps1 run.py --config-name runs/train_construction algorithm=d3po
 .\scripts\launch.ps1 run_search.py --methods ea nea --instances mandl --alpha 0 1
 .\scripts\launch.ps1 --wait run.py --config-name runs/train --dry-run
 ```

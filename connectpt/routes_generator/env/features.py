@@ -286,11 +286,7 @@ class Observation:
         return self.paths
 
 
-def observe(state, feature_set, *, allow_below_min=False):
-    if isinstance(state, Observation):
-        if state.feature_set != feature_set:
-            raise ValueError("observation feature set differs from policy")
-        return state
+def global_features(state, feature_set):
     glob = global_state_features(
         state,
         include_redundancy=feature_set.redundancy,
@@ -305,11 +301,12 @@ def observe(state, feature_set, *, allow_below_min=False):
         + feature_set.adjustment_features
     )
     glob = select_features(glob, global_names, feature_set.global_features)
-    pair = pair_features(state, use_redundancy=feature_set.redundancy, preference_goals=feature_set.preference_goals)
-    if feature_set.pair[-1] != "street.drive_time":
-        raise ValueError("street.drive_time must be the last pair feature for separate normalization")
-    pair_names = PAIR_COLUMNS + (PAIR_REDUNDANCY_COLUMNS if feature_set.redundancy else ()) + pref_names
-    pair = select_features(pair, pair_names, feature_set.pair[:-1])
+    return glob
+
+
+def critic_features(state, feature_set, glob=None):
+    if glob is None:
+        glob = global_features(state, feature_set)
     critic = critic_inputs(
         state.graph_data,
         state.cost_weights,
@@ -319,6 +316,22 @@ def observe(state, feature_set, *, allow_below_min=False):
     )
     critic[..., -glob.shape[-1] :] = glob
     critic = select_features(critic, GRAPH_COLUMNS + feature_set.global_features, feature_set.critic)
+    return critic
+
+
+def observe(state, feature_set, *, allow_below_min=False):
+    if isinstance(state, Observation):
+        if state.feature_set != feature_set:
+            raise ValueError("observation feature set differs from policy")
+        return state
+    glob = global_features(state, feature_set)
+    pref_names = tuple(f"pref.{name}" for name in feature_set.preference_goals)
+    pair = pair_features(state, use_redundancy=feature_set.redundancy, preference_goals=feature_set.preference_goals)
+    if feature_set.pair[-1] != "street.drive_time":
+        raise ValueError("street.drive_time must be the last pair feature for separate normalization")
+    pair_names = PAIR_COLUMNS + (PAIR_REDUNDANCY_COLUMNS if feature_set.redundancy else ()) + pref_names
+    pair = select_features(pair, pair_names, feature_set.pair[:-1])
+    critic = critic_features(state, feature_set, glob)
     from ..city.shortest_paths import reconstruct_all_paths
 
     paths = state.extra_data.shortest_path_sequences

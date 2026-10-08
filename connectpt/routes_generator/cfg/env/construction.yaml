@@ -1,0 +1,14 @@
+name: construction
+params:
+  n_routes: 10
+  min_route_len: 2
+  max_route_len: 12
+  diff_reward: true
+  reward_scale: 1.0
+  force_linking_unlinked: ${model.route_generator.kwargs.force_linking_unlinked}
+  max_act_len: ${model.route_generator.kwargs.max_act_len}
+  max_route_edit_steps: null
+  max_trim_actions_per_route: null
+  force_nonhalt_first_step: false
+  allow_trim_below_min: false
+  forbid_halt_when_overlong: false

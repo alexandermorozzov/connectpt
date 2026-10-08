@@ -17,6 +17,7 @@ def _tag(name, sep=None):
 @dataclass
 class DataCounts:
     """Graph counts of a construction run, logged once at step 0."""
+
     PHASE: ClassVar[str] = "data"
     training_graphs: int | None = _tag("training graph count")
     validation_graphs: int | None = _tag("validation graph count")
@@ -25,6 +26,7 @@ class DataCounts:
 @dataclass
 class ValidationRecord:
     """Construction validation pass (mean over the validation graphs)."""
+
     PHASE: ClassVar[str] = "eval"
     cost: float | None = _tag("val cost")
     att: float | None = _tag("val ATT")
@@ -38,6 +40,7 @@ class ValidationRecord:
 class ParetoRecord:
     """Preference-grid evaluation; the caller passes the prefix
     (``pareto/<mode>`` or ``test/<checkpoint>/<mode>``)."""
+
     PHASE: ClassVar[str] = "pareto"
     att_minutes: float | None = None
     rtt_minutes: float | None = None
@@ -67,6 +70,7 @@ class ParetoRecord:
 @dataclass
 class ConstructionRolloutRecord:
     """Returns and critic values of one construction rollout."""
+
     PHASE: ClassVar[str] = "rollout"
     avg_return: float | None = _tag("avg return")
     baseline: float | None = _tag("baseline")
@@ -78,6 +82,7 @@ class ConstructionRolloutRecord:
 @dataclass
 class ConstructionTrainRecord:
     """One construction training iteration (PPO or D3PO update)."""
+
     PHASE: ClassVar[str] = "train"
     route_obj: float | None = _tag("route obj")
     objective: float | None = _tag("objective")
@@ -92,7 +97,6 @@ class ConstructionTrainRecord:
     train_seconds: float | None = _tag("train seconds")
     elapsed_seconds: float | None = _tag("elapsed seconds")
     env_transitions: int | None = _tag("env transitions")
-    total_timesteps: int | None = field(default=None, metadata={"tag": "time/total_timesteps"})
     graph_instances_loaded: int | None = _tag("graph instances loaded")
     graph_batches_loaded: int | None = _tag("graph batches loaded")
     completed_networks: int | None = _tag("completed networks")
@@ -108,61 +112,48 @@ class ConstructionTrainRecord:
     completed_alpha_mean: float | None = _tag("train/completed_alpha_mean")
     completed_alpha_0_fraction: float | None = _tag("train/completed_alpha_0_fraction")
     completed_alpha_1_fraction: float | None = _tag("train/completed_alpha_1_fraction")
-    completed_alpha_intermediate_fraction: float | None = _tag(
-        "train/completed_alpha_intermediate_fraction")
+    completed_alpha_intermediate_fraction: float | None = _tag("train/completed_alpha_intermediate_fraction")
 
 
 @dataclass
-class EditTrainRecord:
-    """One edit training iteration (PPO or D3PO)."""
+class TrainRecord:
     PHASE: ClassVar[str] = "train"
-    seed_cost: float | None = _tag("train_seed_cost")
-    final_cost: float | None = _tag("train_final_cost")
-    delta: float | None = _tag("train_delta")
-    component_demand_delta: float | None = _tag("train_component_demand_delta")
-    component_route_delta: float | None = _tag("train_component_route_delta")
-    component_connectivity_delta: float | None = _tag("train_component_connectivity_delta")
-    reward_mean: float | None = _tag("train_reward_mean")
-    reward_sum: float | None = _tag("train_reward_sum")
-    reward_per_episode: float | None = _tag("train_reward_per_episode")
-    scaled_delta_sum: float | None = _tag("train_scaled_delta_sum")
-    reward_delta_residual: float | None = _tag("train_reward_delta_residual")
-    episode_count: int | None = _tag("train_episode_count")
-    return_mean: float | None = _tag("train_return_mean")
-    advantage_mean: float | None = _tag("train_advantage_mean")
-    active_sample_count: int | None = _tag("train_active_sample_count")
-    ppo_ratio_mean: float | None = _tag("train_ppo_ratio_mean")
-    ppo_clip_fraction: float | None = _tag("train_ppo_clip_fraction")
-    ppo_objective: float | None = _tag("train_ppo_objective")
-    d3po_ratio_mean: float | None = _tag("train_d3po_ratio_mean")
-    d3po_clip_fraction: float | None = _tag("train_d3po_clip_fraction")
-    d3po_objective: float | None = _tag("train_d3po_objective")
-    d3po_diversity_loss: float | None = _tag("train_d3po_diversity_loss")
-    critic_mse_mean: float | None = _tag("train_critic_mse_mean")
-    critic_explained_variance: float | None = _tag("train_critic_explained_variance")
-    # D3PO: per objective, keyed demand / route / connectivity
-    return_mean_by_objective: dict | None = _tag("train_return_mean", sep="_")
-    advantage_mean_by_objective: dict | None = _tag("train_advantage_mean", sep="_")
-    critic_mse_by_objective: dict | None = _tag("train_critic_mse", sep="_")
-    critic_explained_variance_by_objective: dict | None = _tag(
-        "train_critic_explained_variance", sep="_")
-    changed_route_rate: float | None = _tag("train_changed_route_rate")
-    val_gap: float | None = _tag("train_val_gap")
-    is_eval_iteration: bool | None = _tag("is_eval_iteration")
-    # action counts and rates, keyed by action statistic
-    action: dict | None = _tag("train_action", sep="_")
+    policy_gradient_loss: float
+    value_loss: float
+    entropy_loss: float
+    clip_fraction: float
+    approx_kl: float
+    explained_variance: float
+    diversity_loss: float
+    learning_rate: float
+    clip_range: float
+    n_updates: int
+    loss: float
+    diversity_kl: float
+    diversity_target: float
 
 
 @dataclass
-class EditValRecord:
-    """Edit validation: the last evaluation, carried until the next one."""
-    PHASE: ClassVar[str] = "eval"
-    seed_cost: float | None = _tag("val_seed_cost")
-    final_cost: float | None = _tag("val_final_cost")
-    delta: float | None = _tag("val_delta")
-    win_rate: float | None = _tag("val_win_rate")
-    changed_route_rate: float | None = _tag("val_changed_route_rate")
-    changed_graph_rate: float | None = _tag("val_changed_graph_rate")
-    component_delta_demand: float | None = _tag("val_component_delta_demand")
-    component_delta_route: float | None = _tag("val_component_delta_route")
-    component_delta_connectivity: float | None = _tag("val_component_delta_connectivity")
+class GoalTrainRecord:
+    PHASE: ClassVar[str] = "train"
+    value_loss: dict
+    explained_variance: dict
+    advantage_std: dict
+
+
+@dataclass
+class RolloutRecord:
+    PHASE: ClassVar[str] = "rollout"
+    ep_rew_mean: float
+    ep_len_mean: float
+    objective: dict
+    penalty: dict
+
+
+@dataclass
+class TimeRecord:
+    PHASE: ClassVar[str] = "time"
+    fps: float
+    iterations: int
+    time_elapsed: float
+    total_timesteps: int

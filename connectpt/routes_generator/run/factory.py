@@ -11,19 +11,16 @@ class ExperimentRunFactory:
     @staticmethod
     def from_cfg(cfg):
         run_type = cfg.run.type
-        if run_type == "construction_training":
-            from ..training.construction_run import ConstructionTrainingRun
-            return ConstructionTrainingRun(cfg)
+        if run_type == "training":
+            from ..training.runs import TrainingRun
+            return TrainingRun(cfg)
         if run_type == "bee_colony_search":
             from ..search.runs import BeeColonySearchRun
             return BeeColonySearchRun(cfg)
-        if run_type == "edit_training":
-            from ..training import EditTrainingRun
-            return EditTrainingRun(cfg)
         if run_type == "comparison":
             from ..training.runs import ComparisonRun
             return ComparisonRun(cfg)
         if run_type == "dataset_prepare":
-            from ..training import DatasetPreparationRun
-            return DatasetPreparationRun(cfg)
+            from ..training.runs import DatasetRun
+            return DatasetRun(cfg)
         raise ValueError(f"Unknown run.type: {run_type!r}")

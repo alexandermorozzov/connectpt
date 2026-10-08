@@ -122,6 +122,9 @@ class DatasetBuildParams:
     lc_combos: list
     tiers: list
     force_regen: bool
+    batch_size_cpu: int
+    batch_size_cuda: int
+    corruption_seed: int
 
 
 @dataclass(frozen=True)

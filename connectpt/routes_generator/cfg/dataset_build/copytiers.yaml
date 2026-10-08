@@ -9,3 +9,6 @@ lc_combos:
   - [0.0, 0.0, 1.0, conn]
 tiers: [copy_full, copy_boundary, copy_mixed, covered_dup, lc_clean]
 force_regen: false
+batch_size_cpu: 8
+batch_size_cuda: 64
+corruption_seed: 1000

@@ -64,11 +64,6 @@ from .initialization import (
 from .policy.generate import generate, evaluate_policy
 from .policy.build import load_policy
 
-# === Inductive Learning ===
-from .inductive_route_learning import (
-    NNBaseline,
-)
-
 # === Models & Architectures ===
 from .policy.models import (
     PathCombiningRouteGenerator,

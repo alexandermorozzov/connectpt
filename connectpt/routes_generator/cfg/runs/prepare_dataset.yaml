@@ -10,6 +10,7 @@ run:
   type: dataset_prepare
   name: prepare_dataset
   seed: 0
+  cpu: false
 
 paths:
   output_dir: artifacts/runs/prepare_dataset

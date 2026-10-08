@@ -17,16 +17,20 @@ cfg/
 ├── dataset/         # датасет и его разбиение
 ├── dataset_build/   # параметры генерации датасета
 ├── curriculum/      # расписание тиров edit-обучения
-├── trainer/         # оптимизатор и цикл PPO / D3PO
+├── algorithm/       # PPO / D3PO и параметры критика
+├── features/        # порядок и размерности признаков
 ├── experiment/      # общие настройки: seed, symmetric_routes
 ├── sweep/           # точка поиска: α, число итераций
-└── stacks/          # внутренняя сборка для оценки моделей
+└── env/             # construction / edit: награда и ограничения действий
 ```
 
 - `model/` отвечает, **какая архитектура** строится.
 - `model_profile/` отвечает, **какая версия** архитектуры используется, вместе
   с чекпоинтом.
 - Метод выбирает профили по роли: `construction` или `edit`.
+- `algorithm` задаёт GAE, clip, entropy, diversity и критик. `train_loop` задаёт
+  batch, horizon, число итераций, валидацию и бюджет времени. `optimizer` задаёт
+  параметры оптимизатора. Обе среды используют один цикл обучения.
 
 Примеры:
 
@@ -34,7 +38,7 @@ cfg/
 python scripts/run_search.py --dry-run --methods ea
 python scripts/run_search.py --methods nea_edit --instances mandl
 python scripts/run.py --config-name runs/train --dry-run
-python scripts/run.py --config-name runs/train_construction trainer=d3po_construction --dry-run
+python scripts/run.py --config-name runs/train_construction algorithm=d3po --dry-run
 python scripts/run.py --config-name runs/prepare_dataset
 ```
 

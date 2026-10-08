@@ -54,7 +54,6 @@ class Trajectory:
     rewards: list
     dones: list
     infos: list
-    values: list
     final_state: object
 
     @property
@@ -88,13 +87,12 @@ class Trajectory:
         return total
 
 
-def rollout(env, policy, greedy=False, max_steps=None, critic=None, *, actions=None, record_states=True):
+def rollout(env, policy, greedy=False, max_steps=None, *, actions=None, record_states=True):
     """Collect steps without treating a horizon boundary as episode termination.
 
-    ``critic`` preserves the old sampling order until the training migration.
     Replay uses the same masks and state transitions as sampling.
     """
-    trajectory = Trajectory([], [], [], [], [], [], env.state)
+    trajectory = Trajectory([], [], [], [], [], env.state)
     obs, mask = env.observe()
     encoding = None
     if env.single_route and policy.action_spec.role == "construction":
@@ -104,8 +102,6 @@ def rollout(env, policy, greedy=False, max_steps=None, critic=None, *, actions=N
     while not env.is_done().all():
         if max_steps is not None and len(trajectory.outputs) >= max_steps:
             break
-        if critic is not None:
-            trajectory.values.append(critic.from_state(env.state))
         if record_states:
             trajectory.states.append(env.state.snapshot_for_buffer(device=torch.device("cpu")))
         active = ~env.is_done().clone()
