@@ -9,7 +9,7 @@ from ..run.logger import log as log_metrics
 from ..objectives.metrics import evaluate_network
 from ..objectives.preferences import scalarize
 from ..objectives.penalties import adjustment_degree, adjustment_penalty
-from .records import METRIC_FIELDS, SearchBestRecord
+from .records import MONITOR_FIELDS, SearchBestRecord, SearchRecord
 from .operators import get_direct_sat_dmd
 
 
@@ -205,12 +205,19 @@ def run_colony(
     best_adjustment_penalties = bee_adjustment_penalties[batch_idxs, best_idxs]
 
     def log_best(step):
+        measured = state.clone()
+        measured.replace_routes(best_networks)
+        result = cost_obj(measured)
         record = SearchBestRecord(
-            **{METRIC_FIELDS[name]: vals.mean() for name, vals in zip(metric_names, best_metrics.unbind(-1))}
+            float(best_raw_costs.mean()),
+            {name: float(result.goals[:, i].mean()) for i, name in enumerate(cost_obj.objectives)},
+            {name: float(result.penalties[:, i].mean()) for i, name in enumerate(("constraints", "adjustment"))},
+            {
+                MONITOR_FIELDS[name]: float(value.mean())
+                for name, value in zip(metric_names, best_metrics.unbind(-1))
+                if name in MONITOR_FIELDS and MONITOR_FIELDS[name] in cost_obj.monitor
+            },
         )
-        if use_adjustment_penalty:
-            record.adjustment_degree = best_adjustment_degrees.mean()
-            record.adjustment_penalty = best_adjustment_penalties.mean()
         log_metrics(logger_list, record, step)
 
     log_best(0)
@@ -218,7 +225,9 @@ def run_colony(
     cost_history = torch.zeros((batch_size, n_iterations + 1), device=dev)
     cost_history[:, 0] = best_raw_costs
 
+    log_metrics(logger_list, SearchRecord(0.0), 0)
     for iteration in tqdm(range(n_iterations), disable=silent):
+        accepted_count = 0
         for pi in range(passes_per_it):
             for mi in range(mod_steps_per_pass):
 
@@ -280,6 +289,7 @@ def run_colony(
 
                 # greedy acceptance: keep only strict improvements
                 accepted_idxs = (new_bee_objective_costs - bee_objective_costs) < 0
+                accepted_count += int(accepted_idxs.sum())
 
                 _record_accepted_mutations(
                     mutation_counts_out,
@@ -365,6 +375,11 @@ def run_colony(
             bee_metrics = bee_metrics[batch_idxs[:, None], recruiters]
 
         log_best(iteration + 1)
+        log_metrics(
+            logger_list,
+            SearchRecord(accepted_count / (batch_size * n_bees * passes_per_it * mod_steps_per_pass)),
+            iteration + 1,
+        )
 
     # return the best solution
     state.replace_routes(best_networks)

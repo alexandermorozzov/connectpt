@@ -262,7 +262,9 @@ def build_init_routes(
 
         device = resolve_device()
 
-    routes = INITIALIZERS[generator](spec, tensors, device=device)
+    run = InitialRun(generator)
+    run.setup()
+    routes = INITIALIZERS[generator](spec, tensors, device=device, profile=run)
     routes = to_routes(routes, n_routes=spec["n_routes"], width=spec["max_route_len"])[0]
     if generator == "lc" and not clean:
         rng = random.Random(seed)
@@ -274,12 +276,13 @@ def build_init_routes(
             street_adj=tensors["street_adj"],
             demand=tensors["demand"],
             n_nodes=tensors["node_locs"].shape[0],
+            params=run.corruption,
         )
     routes = to_routes(routes)
     return routes[None] if routes.ndim == 2 else routes
 
 
-def _lc_construct(spec, tensors, *, device) -> torch.Tensor:
+def learned_initial(spec, tensors, *, device, profile) -> torch.Tensor:
     from torch_geometric.loader import DataLoader
     from ..city.graph import to_batch
     from ..env.state import RouteGenBatchState
@@ -322,7 +325,13 @@ class InitialRun:
         with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
             cfg = compose(
                 config_name=None,
-                overrides=["+cost=rtt_wmc", "+adjustment=cap", "+experiment=standard", "+initial=heuristic"],
+                overrides=[
+                    "+cost=rtt_wmc",
+                    "+adjustment=cap",
+                    "+experiment=standard",
+                    "+initial=heuristic",
+                    "+corruption=realistic",
+                ],
             )
         cost = build_cost(
             cfg.cost, symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
@@ -330,13 +339,16 @@ class InitialRun:
         self.constants = cost.constants
         self.preferences = cost.get_weights()
         self.params = InitialParams(**cfg.initial)
+        from omegaconf import OmegaConf
+        from ..network.corruption import RealisticParams
+
+        self.corruption = RealisticParams.from_values(OmegaConf.to_container(cfg.corruption, resolve=True))
 
 
-def _heuristic_construct(spec, tensors, *, device, generator):
+def _heuristic_construct(spec, tensors, *, device, generator, profile):
     from ..city.graph import to_batch
 
-    run = InitialRun(generator)
-    run.setup()
+    run = profile
     # The preserved heuristic implementations operate on CPU matrices.
     state = RouteGenBatchState(
         to_batch(tensors, torch.device("cpu")),
@@ -353,12 +365,12 @@ def _heuristic_construct(spec, tensors, *, device, generator):
     return routes.to(device)
 
 
-def _john_construct(spec, tensors, *, device):
-    return _heuristic_construct(spec, tensors, device=device, generator="john")
+def _john_construct(spec, tensors, *, device, profile):
+    return _heuristic_construct(spec, tensors, device=device, generator="john", profile=profile)
 
 
-def _nikolic_construct(spec, tensors, *, device):
-    return _heuristic_construct(spec, tensors, device=device, generator="nikolic")
+def _nikolic_construct(spec, tensors, *, device, profile):
+    return _heuristic_construct(spec, tensors, device=device, generator="nikolic", profile=profile)
 
 
-INITIALIZERS = {"lc": _lc_construct, "john": _john_construct, "nikolic": _nikolic_construct}
+INITIALIZERS = {"lc": learned_initial, "john": _john_construct, "nikolic": _nikolic_construct}

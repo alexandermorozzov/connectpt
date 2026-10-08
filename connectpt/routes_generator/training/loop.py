@@ -11,8 +11,8 @@ from ..policy.generate import generate
 from ..run.logger import log, flush
 from ..run.checkpoints import CheckpointStore
 from .records import (
-    ConstructionRolloutRecord,
-    ConstructionTrainRecord,
+    ValueRecord,
+    DiagnosticRecord,
     TrainRecord,
     GoalTrainRecord,
     RolloutRecord,
@@ -167,7 +167,6 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget):
     for iteration in range(budget.n_iterations):
         if iteration and budget.max_seconds is not None and time.monotonic() - started >= budget.max_seconds:
             break
-        iteration_started = time.monotonic()
         progress = iteration / budget.n_iterations
         if budget.validate_before_update and iteration % budget.val_period == 0:
             if iteration == 0 and budget.calibrate_before_validation:
@@ -193,23 +192,11 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget):
         names = tuple(algorithm.cost.objectives)
         log(
             logger_list,
-            ConstructionRolloutRecord(
-                avg_return=scalar_rewards.mean(),
-                baseline=scalar_values.mean(),
-                avg_return_by_objective=(
-                    {
-                        ("connectivity" if name == "WMC" else name): batch.rewards[..., i].mean()
-                        for i, name in enumerate(names)
-                    }
-                    if batch.rewards.ndim > 2
-                    else None
-                ),
-                baseline_by_objective={
-                    "connectivity" if name == "WMC" else name: batch.values[..., i].mean()
-                    for i, name in enumerate(names)
-                }
+            ValueRecord(
+                float(scalar_values.mean()),
+                {name: float(batch.values[..., i].mean()) for i, name in enumerate(names)}
                 if batch.values.ndim > 2
-                else None,
+                else {},
             ),
             iteration,
         )
@@ -268,29 +255,11 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget):
             ),
             iteration,
         )
-        record = ConstructionTrainRecord(
-            objective=stats.objective,
-            entropy=stats.entropy,
-            value_loss=stats.value_loss,
-            clip_fraction=stats.clip_fraction,
+        record = DiagnosticRecord(
             initial_ratio_error=stats.initial_ratio_error,
-            route_obj=stats.policy_objective if batch.rewards.ndim == 2 else None,
-            diversity_loss=stats.diversity_loss if batch.rewards.ndim > 2 else None,
-            explained_variance=stats.explained_variance if batch.rewards.ndim == 2 else None,
-            explained_variance_by_objective={
-                name.lower() if name != "WMC" else "connectivity": value
-                for name, value in zip(names, stats.explained_variance_by_objective)
-            }
-            if batch.rewards.ndim > 2
-            else None,
-            train_seconds=time.monotonic() - iteration_started,
-            elapsed_seconds=time.monotonic() - started,
-            env_transitions=(iteration + 1) * budget.horizon * data.batch_size,
             graph_instances_loaded=data.graph_instances_loaded,
             graph_batches_loaded=data.graph_batches_loaded,
             completed_networks=int(batch.dones.sum()),
-            mean_episode_reward=float(episode_rewards.mean()) if episode_rewards.numel() else float("nan"),
-            mean_episode_length=float(episode_lengths.float().mean()) if episode_lengths.numel() else float("nan"),
             return_target_mean=float(batch.returns.mean()),
             step_reward=float(scalar_rewards.mean()),
         )
@@ -318,6 +287,7 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget):
         ):
             val_cost = data.validation.run(policy, logger_list, iterations, progress)
             last_validation_step = iterations
+            data.validation.monitor(policy, logger_list, iterations)
             if val_cost < best_cost:
                 best_cost, best_policy = val_cost, copy.deepcopy(policy)
         flush(logger_list)

@@ -99,6 +99,7 @@ class RouteGenBatchState:
         # right now this must have the same value for all scenarios
         self.symmetric_routes = constants.symmetric_routes
         self._finished_routes = [[] for _ in range(graph_data.num_graphs)]
+        self._route_update_deferred = False
         self._redundancy_features_enabled = False
         self._adjustment_gap = 0.1
         self._adjustment_mode = "paper"
@@ -201,7 +202,7 @@ class RouteGenBatchState:
             extra_data.adjustment_seed = torch.full((0, 0), -1, device=dev, dtype=torch.long)
 
             extra_datas.append(extra_data)
-            if hasattr(dd, "fixed_routes") and dd.fixed_routes.numel() > 0:
+            if "fixed_routes" in dd and dd.fixed_routes.numel() > 0:
                 fixed_routes = dd.fixed_routes
                 if fixed_routes.ndim == 3 and fixed_routes.shape[0] == 1:
                     fixed_routes = fixed_routes.squeeze(0)
@@ -708,7 +709,7 @@ class RouteGenBatchState:
         would have produced -- bit-identical results, half the Floyd-Warshall
         work on those paths.
         """
-        if getattr(self, "_route_update_deferred", False):
+        if self._route_update_deferred:
             yield  # already inside an outer deferral; its exit will update
             return
         self._route_update_deferred = True
@@ -719,7 +720,7 @@ class RouteGenBatchState:
             self._update_route_data()
 
     def _update_route_data(self):
-        if getattr(self, "_route_update_deferred", False):
+        if self._route_update_deferred:
             return
         # do things that have to be done whether we added or removed routes
         fw_mat = self.route_mat + self.transfer_time_s[:, None, None]
@@ -1011,14 +1012,14 @@ class RouteGenBatchState:
     # don't expose the extra data directly, just provide this interface.
     @property
     def norm_node_features(self):
-        if hasattr(self.extra_data, "norm_node_features"):
+        if "norm_node_features" in self.extra_data:
             return self.extra_data.norm_node_features
         else:
             return None
 
     @property
     def norm_cost_weights(self):
-        if hasattr(self.extra_data, "norm_cost_weights"):
+        if "norm_cost_weights" in self.extra_data:
             return self.extra_data.norm_cost_weights
         else:
             return None
@@ -1202,7 +1203,7 @@ class RouteGenBatchState:
 
     @property
     def context_leg_use_count(self):
-        if hasattr(self.extra_data, "context_leg_use_count"):
+        if "context_leg_use_count" in self.extra_data:
             return self.extra_data.context_leg_use_count
         return self.context_edge_covered_mask.to(dtype=torch.long)
 

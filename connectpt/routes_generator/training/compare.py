@@ -22,7 +22,7 @@ def _run_summary(run):
         seed=info["seed"],
         commit=info["commit"],
         iterations=int(steps["step"].iloc[-1]) + 1,
-        training_seconds=float(steps["elapsed seconds"].iloc[-1]),
+        training_seconds=float(steps["time/time_elapsed"].iloc[-1]),
         total_active_steps=int(steps["time/total_timesteps"].iloc[-1]),
         max_seconds=config.train_loop.max_seconds,
         preference_reset_policy="episode" if config.train_loop.resample_preferences_on_terminal else "batch",
@@ -64,9 +64,9 @@ def compare_runs(root, names=("ppo", "d3po"), *, checkpoint="last", mode="greedy
     if len(reset_policies) != 1:
         raise ValueError("Preference reset policies differ")
     # New runs store fixed bounds. Keep pooled bounds only for legacy artifacts.
-    pooled = np.array([[r["penalized_att"], r["penalized_rtt"]] for rows in evaluations.values() for r in rows])
+    pooled = np.array([[r["penalized_0"], r["penalized_1"]] for rows in evaluations.values() for r in rows])
     reference = (pooled.max(0) * 1.1 + 0.01).tolist()
-    pure_pool = np.array([[r["att_norm"], r["rtt_norm"]] for rows in evaluations.values() for r in rows])
+    pure_pool = np.array([[r["objective_0"], r["objective_1"]] for rows in evaluations.values() for r in rows])
     pure_reference = (pure_pool.max(0) * 1.1 + 0.01).tolist()
     references = [m.get("hv_reference") for m in metadata.values()]
     fixed_reference = any(r is not None for r in references)
@@ -83,10 +83,10 @@ def compare_runs(root, names=("ppo", "d3po"), *, checkpoint="last", mode="greedy
         points, feasible_points, metrics = {}, {}, {}
         for name in names:
             rows = [r for r in evaluations[name] if r["graph"] == graph and r.get("sample", 0) == sample]
-            points[name] = np.array([[r["penalized_att"], r["penalized_rtt"]] for r in rows])
-            feasible_points[name] = np.array([[r["att_norm"], r["rtt_norm"]] for r in rows if r["feasible"]]).reshape(
-                -1, 2
-            )
+            points[name] = np.array([[r["penalized_0"], r["penalized_1"]] for r in rows])
+            feasible_points[name] = np.array(
+                [[r["objective_0"], r["objective_1"]] for r in rows if r["feasible"]]
+            ).reshape(-1, 2)
             feasible = feasible_points[name]
             metrics[name] = front_metrics(rows, reference, query_count)
             if not fixed_reference:

@@ -4,8 +4,7 @@ The unified objective computes normalized RTT / WMC / cost components during the
 search; this module turns the engine's raw metrics dict (plus the route tensors)
 into the full metric row every results table reports -- including the derived
 metrics the engine does not emit (adjustment degree vs the seed network, edge
-redundancy). One implementation: ``eval_lib`` re-exports these names so the
-notebook / frozen path use the same code.
+redundancy). All tables use the same evaluator.
 
 Adjustment-degree gap/mode come from the composed ``cost.kwargs`` block.
 """
@@ -87,79 +86,10 @@ def conn_metric(m):
     return v
 
 
-def full_metric_row(m, rt, seed, adjustment=None):
-    """Result-table view of the single network evaluator."""
-    return evaluate_network(m, routes=rt, seed=seed, adjustment=adjustment)
-
-
 def select_metrics(row: dict, keep) -> dict:
     """Filter a metric row to the ``keep`` keys (preserving present ones)."""
     keep = list(keep)
     return {k: row[k] for k in keep if k in row}
-
-
-def score_fixed_routes(
-    routes,
-    tensors,
-    spec,
-    *,
-    alpha=None,
-    adj_target=None,
-    adj_weight=None,
-    adj_objective=None,
-    seed_routes=None,
-    device=None,
-    cost_cfg,
-):
-    from ..city.graph import to_batch
-    from ..env.state import RouteGenBatchState
-    from .cost import build_cost
-
-    device = torch.device("cpu") if device is None else device
-    overrides = {}
-    if alpha is not None:
-        overrides.update(route_time_weight=float(alpha), median_connectivity_weight=float(1 - float(alpha)))
-    if adj_target is not None and seed_routes is not None:
-        overrides["adjustment_degree_target"] = float(adj_target)
-        if adj_weight is not None:
-            overrides["adjustment_degree_weight"] = float(adj_weight)
-        if adj_objective is not None:
-            overrides["adjustment_degree_objective"] = str(adj_objective)
-    else:
-        overrides["adjustment_degree_weight"] = 0.0
-    cost = build_cost(cost_cfg, **overrides)
-    state = RouteGenBatchState(
-        to_batch(tensors, device),
-        cost.constants,
-        spec["n_routes"],
-        spec["min_route_len"],
-        spec["max_route_len"],
-        preferences=cost.get_weights(device),
-    )
-    scored = to_routes(routes).to(device)
-    state.add_new_routes(scored)
-    if seed_routes is not None and adj_target is not None:
-        state.set_adjustment_seed(seed_routes)
-    values = evaluate_network(state, cost)
-    values.update(cost_breakdown(state, cost))
-    return values, scored
-
-
-def initial_row(instance, *, alpha=None, adj_target=None, adj_weight=None, keep=None, cost_cfg) -> dict:
-    """Metric row of the instance's initial (unoptimized) network."""
-    metrics, scored = score_fixed_routes(
-        instance.init_routes,
-        instance.tensors,
-        instance.spec,
-        alpha=alpha,
-        adj_target=adj_target,
-        adj_weight=adj_weight,
-        seed_routes=instance.init_routes,
-        cost_cfg=cost_cfg,
-    )
-    adjustment = cost_cfg.kwargs
-    row = full_metric_row(metrics, scored, instance.init_routes, adjustment)
-    return select_metrics(row, keep) if keep else row
 
 
 class Metrics(dict):
@@ -310,21 +240,23 @@ def cost_breakdown(state, cost_obj):
     }
 
 
-def add_cost_breakdown_to_metrics(metrics, dataloader, eval_cfg, cost_obj, routes_tensor, device):
+def evaluate_routes(routes, tensors, spec, *, cost, device, seed_routes=None):
+    """Evaluate a fixed network using already resolved objective parameters."""
+    from ..city.graph import to_batch
     from ..env.state import RouteGenBatchState
 
-    data = next(iter(dataloader))
-    if device is not None:
-        data = data.to(device)
     state = RouteGenBatchState(
-        data,
-        cost_obj.constants,
-        eval_cfg.n_routes,
-        eval_cfg.min_route_len,
-        eval_cfg.max_route_len,
-        preferences=cost_obj.get_weights(device),
+        to_batch(tensors, device),
+        cost.constants,
+        spec["n_routes"],
+        spec["min_route_len"],
+        spec["max_route_len"],
+        preferences=cost.get_weights(device),
     )
-    state.add_new_routes(to_routes(routes_tensor).to(state.device))
-    metrics = dict(metrics)
-    metrics.update(cost_breakdown(state, cost_obj))
-    return metrics
+    scored = to_routes(routes).to(device)
+    state.add_new_routes(scored)
+    if seed_routes is not None:
+        state.set_adjustment_seed(seed_routes)
+    values = evaluate_network(state, cost)
+    values.update(cost_breakdown(state, cost))
+    return values, scored

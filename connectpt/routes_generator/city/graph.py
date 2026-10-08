@@ -88,7 +88,7 @@ class InsertPosFeatures(BaseTransform):
         data = data.clone()
         for key in [STOP_KEY]:
             val = data[key]
-            if hasattr(val, "x") and val.x is not None:
+            if "x" in val and val.x is not None:
                 val.x = torch.cat((val.pos, val.x), dim=1)
             else:
                 val.x = val.pos.clone()

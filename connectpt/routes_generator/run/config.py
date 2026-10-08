@@ -67,7 +67,7 @@ def compose_policy_config(name="construction_v1"):
 
 def _runs_root(cfg) -> str:
     """The scratch root for per-run outputs (``paths.runs_dir``)."""
-    return str((cfg.get("paths") or {}).get("runs_dir") or "artifacts/runs")
+    return str(cfg.paths.runs_dir)
 
 
 def _set_run_dir(cfg) -> None:
@@ -129,7 +129,7 @@ def build_experiment(
     cfg = _compose_experiment(name, group_overrides)
     with open_dict(cfg):
         # -- output roots (weights read from, scratch written to) --
-        if cfg.get("paths") is None:
+        if "paths" not in cfg:
             cfg.paths = OmegaConf.create({})
         if weights_dir is not None:
             cfg.paths.weights_dir = str(weights_dir)
@@ -165,7 +165,7 @@ def build_experiment(
             cfg.instance.max_route_len = int(route_len[1])
 
         # -- search point (create the block if the leaf has none) --
-        if cfg.get("sweep") is None:
+        if "sweep" not in cfg:
             cfg.sweep = OmegaConf.create({})
         if alpha is not None:
             cfg.sweep.alpha = alpha

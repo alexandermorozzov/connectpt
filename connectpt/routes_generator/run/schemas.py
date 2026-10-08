@@ -125,6 +125,7 @@ class DatasetBuildParams:
     batch_size_cpu: int
     batch_size_cuda: int
     corruption_seed: int
+    tier_cfg: dict
 
 
 @dataclass(frozen=True)

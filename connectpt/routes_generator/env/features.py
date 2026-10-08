@@ -6,7 +6,7 @@ from torch import Tensor
 from ..city.graph import STOP_KEY, DEMAND_KEY
 from ..common.tensors import get_update_at_mask
 from ..network.routes import get_route_leg_times, to_routes
-from ..objectives.cost import EPSILON, _finite_time_diameter
+from ..objectives.components import EPSILON, _finite_time_diameter
 
 
 PREFERENCE_KEYS = {"ATT": "demand_time_weight", "RTT": "route_time_weight", "WMC": "median_connectivity_weight"}
@@ -793,9 +793,7 @@ def trim_redundancy_features(state, positions, trim_start, dtype):
 
 
 def other_route_overlap_masks(state):
-    if hasattr(state.extra_data, "context_node_covered_mask") and hasattr(
-        state.extra_data, "context_edge_covered_mask"
-    ):
+    if "context_node_covered_mask" in state.extra_data and "context_edge_covered_mask" in state.extra_data:
         return (
             state.context_node_covered_mask.to(device=state.device, dtype=torch.bool),
             state.context_edge_covered_mask.to(device=state.device, dtype=torch.bool),

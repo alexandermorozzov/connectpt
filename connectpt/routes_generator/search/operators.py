@@ -113,7 +113,7 @@ def get_new_route_variants(
     return new_routes
 
 
-def get_neural_edit_variants(
+def edit_route(
     model,
     env_state,
     bee_networks,
@@ -131,7 +131,7 @@ def get_neural_edit_variants(
 ):
     """Apply one edit step (extend / trim_start / trim_end / halt) per bee.
 
-    Like ``get_neural_extend_variants`` but the model is allowed to choose
+    The edit policy chooses
     any route action — extend, trim_start, trim_end, or halt — in a single
     step. The bee's chosen route is fed in as the in-progress route, the
     rest of the bee's network is fed in as context, and one
@@ -140,7 +140,7 @@ def get_neural_edit_variants(
     written back into the network.
     """
     if not model.supports_trim_actions:
-        raise ValueError("get_neural_edit_variants requires a model with " "supports_trim_actions=True")
+        raise ValueError("edit_route requires a model with " "supports_trim_actions=True")
 
     bee_dim = bee_networks.ndim == 4
     if not bee_dim:
@@ -222,7 +222,7 @@ def get_neural_edit_variants(
     return result_networks
 
 
-def get_neural_variants(model, env_state, bee_networks, drop_route_idxs, greedy=False, *, cost):
+def rebuild_route(model, env_state, bee_networks, drop_route_idxs, greedy=False, *, cost):
     bee_dim = bee_networks.ndim == 4
     if not bee_dim:
         # there is no bee dimension, so add one
@@ -485,7 +485,7 @@ class NeuralRebuildOp:
     def mutate(self, ctx: MutationContext, idxs):
         if ctx.process_sequentially:
             return _run_rebuild_variants_for_bees(
-                get_neural_variants,
+                rebuild_route,
                 self.model,
                 ctx.seq_state,
                 ctx.bee_networks,
@@ -493,9 +493,7 @@ class NeuralRebuildOp:
                 idxs,
                 cost=ctx.cost,
             )
-        networks = get_neural_variants(
-            self.model, ctx.env_state, ctx.bee_networks, ctx.chosen_route_idxs, cost=ctx.cost
-        )
+        networks = rebuild_route(self.model, ctx.env_state, ctx.bee_networks, ctx.chosen_route_idxs, cost=ctx.cost)
         return networks[:, idxs, -1]
 
 
@@ -537,7 +535,7 @@ class EditOp:
         )
         if ctx.process_sequentially:
             return _run_selected_route_variants_for_bees(
-                get_neural_edit_variants,
+                edit_route,
                 self.model,
                 ctx.seq_state,
                 ctx.bee_networks,
@@ -545,7 +543,5 @@ class EditOp:
                 idxs,
                 **kwargs,
             )
-        networks = get_neural_edit_variants(
-            self.model, ctx.env_state, ctx.bee_networks, ctx.chosen_route_idxs, **kwargs
-        )
+        networks = edit_route(self.model, ctx.env_state, ctx.bee_networks, ctx.chosen_route_idxs, **kwargs)
         return _gather_group_routes(networks, ctx, idxs)

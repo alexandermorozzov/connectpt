@@ -9,6 +9,7 @@ cfg/
 ├── instance/        # путь к бенчмарку и ограничения маршрутов
 ├── method/          # методы поиска: ea, nea, nea_edit, nea_combined
 ├── initial/         # настройки эвристических начальных сетей
+├── corruption/      # параметры порчи: тиры датасета и реалистичная начальная сеть
 ├── cost/            # цель: rtt_wmc (поиск, edit), att_rtt (construction)
 ├── adjustment/      # штраф за изменение сети: cap
 ├── model/           # архитектура сети
@@ -30,6 +31,7 @@ cfg/
 - `method.bees` содержит число пчёл, оператор, профиль и полную маску действий.
   Группы выполняются в порядке записи. Одинаковые операторы не сливаются.
 - `method` также задаёт число проходов, шагов мутации и вероятность обрезки.
+- `corruption` содержит обязательные параметры порчи; среда и алгоритм их не читают.
 - `algorithm` задаёт GAE, clip, entropy, diversity и критик. `train_loop` задаёт
   batch, horizon, число итераций, валидацию и бюджет времени. `optimizer` задаёт
   параметры оптимизатора. Обе среды используют один цикл обучения.
@@ -47,5 +49,13 @@ python scripts/run.py --config-name runs/prepare_dataset
 Поиск и edit-обучение используют одну цель `cost=rtt_wmc`. Штраф за изменение
 сети задаёт `adjustment/cap.yaml`. Выключить штраф: `cost.kwargs.penalties.adjustment=0`
 (в поиске — `--adj-weight 0`). Режим «цель»: `cost.kwargs.adjustment_degree_objective=target`.
+
+`run.type`: `search`, `training`, `dataset_prepare`, `comparison`. Файлы весов
+загружаются строго; старые имена и формы тензоров сохраняются. `features` задаёт
+порядок входов. Ниже `Run.setup` передаются dataclass-параметры.
+
+Логирование содержит только скаляры: `rollout`, `train`, `eval`, `pareto`, `search`,
+`time`. Старые теги и `log_pareto_front` удалены. Таблица переименований —
+`docs/config-keys.md`; графики строятся в ноутбуках.
 
 YAML содержит только значения. Комментарии в конфигах не пишутся.

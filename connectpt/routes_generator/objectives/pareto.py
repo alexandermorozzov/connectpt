@@ -1,4 +1,4 @@
-"""Per-city ATT/RTT Pareto metrics with a fixed minimization reference."""
+"""Per-city two-objective Pareto metrics with a fixed minimization reference."""
 from collections import defaultdict
 
 import numpy as np
@@ -52,8 +52,8 @@ def front_metrics(rows, reference, eu_preference_count=101):
         raise ValueError("Cannot evaluate an empty preference grid")
     if eu_preference_count < 2:
         raise ValueError("EU needs at least two query preferences")
-    points = np.array([[r["penalized_att"], r["penalized_rtt"]] for r in rows])
-    pure = np.array([[r["att_norm"], r["rtt_norm"]] for r in rows])
+    points = np.array([[r["penalized_0"], r["penalized_1"]] for r in rows])
+    pure = np.array([[r["objective_0"], r["objective_1"]] for r in rows])
     mask = np.array([r["feasible"] for r in rows], dtype=bool)
     feasible = pure[mask]
     alphas = np.linspace(0, 1, eu_preference_count)
@@ -62,7 +62,7 @@ def front_metrics(rows, reference, eu_preference_count=101):
         hv_penalized=hypervolume_2d(points, reference),
         hv_feasible=hypervolume_2d(feasible, reference),
         eu_conditioned_penalized=float(
-            np.mean([-r["preference"] * r["penalized_att"] - (1 - r["preference"]) * r["penalized_rtt"] for r in rows])
+            np.mean([-r["preference"] * r["penalized_0"] - (1 - r["preference"]) * r["penalized_1"] for r in rows])
         ),
         eu_archive_penalized=float((-np.min(weights @ points.T, axis=1)).mean()),
         eu_archive_feasible=float((-np.min(weights @ feasible.T, axis=1)).mean()) if len(feasible) else None,
@@ -127,7 +127,7 @@ def summarize_evaluation(rows, reference, eu_preference_count=101):
         summary=summary,
         per_graph=per_graph,
         reference=list(reference),
-        direction="minimize ATT/RTT; maximize HV and EU (negative cost)",
+        direction="minimize configured objectives; maximize HV and EU (negative cost)",
         stochastic_rule="Independent fronts per city/draw, then mean; no pooling/best-of-N",
         network_rule="Route permutation and symmetric reversal ignored; duplicate routes retained",
     )

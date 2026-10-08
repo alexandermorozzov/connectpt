@@ -4,9 +4,9 @@ One implementation of the route-copy corruption machinery that used to exist
 twice in the notebook: the training-dataset tier generator (PART 1) and the
 experiment init-network builder (PART 2) both inject duplicate routes /
 sub-routes into a clean network so the edit model has removable redundancy to
-trim. The tier presets (``COPY_TIER_CFG``) are the single source for both.
+trim. Tier values come from ``cfg/corruption`` and are resolved at Run.setup.
 
-A "tier" config is a dict with:
+A ``CopyTierParams`` value contains:
 
 * ``events``           -- how many injection events to attempt,
 * ``max_multiplicity`` -- max copies of one donor per event (donor + N-1 targets),
@@ -16,6 +16,7 @@ A "tier" config is a dict with:
   removable and trimming is the only way to cut cost,
 * ``d_un_cap``         -- the coverage cap (%) for ``covered`` tiers.
 """
+from dataclasses import dataclass
 import heapq
 import math
 from collections import Counter
@@ -26,25 +27,53 @@ from .routes import route_lists
 
 COPY_MUTATION_KINDS = ("full_copy", "prefix_copy", "suffix_copy", "middle_copy")
 
+
+@dataclass(frozen=True)
+class CopyTierParams:
+    events: int
+    max_multiplicity: int
+    kinds: list
+    covered: bool
+    d_un_cap: float | None
+
+
+@dataclass(frozen=True)
+class DetourParams:
+    events: int
+    min_stretch: float
+    max_stretch: float
+    max_redundancy_gain: float
+
+
+@dataclass(frozen=True)
+class DropCoverageParams:
+    events: int
+    d_un_target_pct: float
+
+
+@dataclass(frozen=True)
+class RealisticParams:
+    dup: CopyTierParams
+    detour: DetourParams
+    drop_cover: DropCoverageParams
+
+    @classmethod
+    def from_values(cls, values):
+        return cls(
+            **{
+                **values,
+                "dup": CopyTierParams(**values["dup"]),
+                "detour": DetourParams(**values["detour"]),
+                "drop_cover": DropCoverageParams(**values["drop_cover"]),
+            }
+        )
+
+
 # Cap on unserved demand (%) for the coverage-preserving duplicate tier: a copy
 # is only injected if the network still leaves <= this much demand disconnected.
-D_UN_CAP_PCT = 10.0
 
 # Tier presets used both for the training curriculum (PART 1, incl. lc_clean)
 # and the experiment init corruption (PART 2 uses "covered_dup").
-COPY_TIER_CFG = {
-    "copy_full": {"events": 3, "max_multiplicity": 3, "kinds": ("full_copy",)},
-    "copy_boundary": {"events": 4, "max_multiplicity": 4, "kinds": ("prefix_copy", "suffix_copy")},
-    "copy_mixed": {"events": 6, "max_multiplicity": 5, "kinds": COPY_MUTATION_KINDS},
-    "covered_dup": {
-        "events": 6,
-        "max_multiplicity": 4,
-        "kinds": COPY_MUTATION_KINDS,
-        "covered": True,
-        "d_un_cap": D_UN_CAP_PCT,
-    },
-    "lc_clean": {"events": 0, "max_multiplicity": 1, "kinds": ()},
-}
 
 
 def is_simple_sequence(nodes, min_len, max_len):
@@ -222,9 +251,7 @@ def copy_candidate(routes, donor_idx, target_idx, kind, rng, min_len, max_len, s
             donor_start = rng.randint(0, len(donor) - seg_len)
             target_start = rng.randint(1, len(target) - seg_len - 1)
             candidate = (
-                target[:target_start]
-                + donor[donor_start : donor_start + seg_len]
-                + target[target_start + seg_len :]
+                target[:target_start] + donor[donor_start : donor_start + seg_len] + target[target_start + seg_len :]
             )
         else:
             raise ValueError(f"unknown mutation kind: {kind}")
@@ -291,9 +318,7 @@ def try_copy_mutation(
     return base, 0
 
 
-def inject_route_copies(
-    routes, tier_cfg, rng, min_len, max_len, demand=None, n_nodes=None, street_adj=None
-):
+def inject_route_copies(routes, tier, rng, min_len, max_len, demand=None, n_nodes=None, street_adj=None):
     """Apply one tier's worth of copy-injection events to a route tensor.
 
     Returns ``(routes, applied_events, mutated_routes)`` where the two
@@ -305,16 +330,16 @@ def inject_route_copies(
     routes = routes.clone()
     applied_events = Counter()
     mutated_routes = Counter()
-    covered = bool(tier_cfg.get("covered", False))
-    d_un_cap = float(tier_cfg.get("d_un_cap", 100.0)) if covered else None
-    for _ in range(int(tier_cfg["events"])):
-        kinds = list(tier_cfg["kinds"])
+    covered = bool(tier.covered)
+    d_un_cap = float(tier.d_un_cap) if covered else None
+    for _ in range(int(tier.events)):
+        kinds = list(tier.kinds)
         rng.shuffle(kinds)
         for kind in kinds:
             proposal, touched = try_copy_mutation(
                 routes,
                 kind,
-                int(tier_cfg["max_multiplicity"]),
+                int(tier.max_multiplicity),
                 rng,
                 min_len,
                 max_len,
@@ -342,18 +367,6 @@ def inject_route_copies(
 #     should straighten (segment time stretched by min_stretch..max_stretch),
 #   * a few dropped low-demand singly-covered stops -- honestly uncovered
 #     points (targets d_un around d_un_target_pct).
-
-REALISTIC_TIER_CFG = {
-    "dup": {
-        "events": 1,
-        "max_multiplicity": 2,
-        "kinds": COPY_MUTATION_KINDS,
-        "covered": True,
-        "d_un_cap": D_UN_CAP_PCT,
-    },
-    "detour": {"events": 2, "min_stretch": 1.3, "max_stretch": 2.5, "max_redundancy_gain": 0.05},
-    "drop_cover": {"events": 3, "d_un_target_pct": 5.0},
-}
 
 
 def try_detour_mutation(
@@ -410,10 +423,7 @@ def try_detour_mutation(
             continue
         proposal = routes.clone()
         replace_route(proposal, ri, candidate)
-        if (
-            base_d_un is not None
-            and uncovered_demand_pct(proposal, demand, n_nodes) > base_d_un + 1e-9
-        ):
+        if base_d_un is not None and uncovered_demand_pct(proposal, demand, n_nodes) > base_d_un + 1e-9:
             continue  # a detour must not uncover demand (drop_cover does that)
         if redundancy_fraction(proposal) > base_redundancy + max_redundancy_gain:
             continue  # nor turn into wholesale corridor duplication
@@ -434,9 +444,7 @@ def try_drop_cover_mutation(routes, rng, demand, street_adj, min_len, max_len, a
             cover.setdefault(node, []).append(ri)
     D = demand if torch.is_tensor(demand) else torch.as_tensor(demand)
     node_demand = D.sum(0) + D.sum(1)
-    singly = sorted(
-        (n for n, c in cover.items() if len(c) == 1), key=lambda n: float(node_demand[n])
-    )
+    singly = sorted((n for n, c in cover.items() if len(c) == 1), key=lambda n: float(node_demand[n]))
     for node in singly[:attempts]:
         ri = cover[node][0]
         ns = route_lists(routes[ri])
@@ -454,28 +462,25 @@ def try_drop_cover_mutation(routes, rng, demand, street_adj, min_len, max_len, a
     return None
 
 
-def inject_realistic_tier(
-    routes, rng, min_len, max_len, *, street_adj, demand, n_nodes, tier_cfg=None
-):
+def inject_realistic_tier(routes, rng, min_len, max_len, *, street_adj, demand, n_nodes, params):
     """Apply the realistic corruption tier to a clean network.
 
     Returns ``(routes, applied)`` where ``applied`` counts the injected
     events per kind (``dup_<kind>`` / ``detour`` / ``drop_cover``).
     """
-    cfg = tier_cfg or REALISTIC_TIER_CFG
     routes = routes.clone()
     applied = Counter()
 
-    dup = cfg["dup"]
-    d_un_cap = float(dup.get("d_un_cap", 100.0)) if dup.get("covered") else None
-    for _ in range(int(dup["events"])):
-        kinds = list(dup["kinds"])
+    dup = params.dup
+    d_un_cap = float(dup.d_un_cap) if dup.covered else None
+    for _ in range(int(dup.events)):
+        kinds = list(dup.kinds)
         rng.shuffle(kinds)
         for kind in kinds:
             proposal, touched = try_copy_mutation(
                 routes,
                 kind,
-                int(dup["max_multiplicity"]),
+                int(dup.max_multiplicity),
                 rng,
                 min_len,
                 max_len,
@@ -489,28 +494,28 @@ def inject_realistic_tier(
                 applied[f"dup_{kind}"] += 1
                 break
 
-    det = cfg["detour"]
-    for _ in range(int(det["events"])):
+    det = params.detour
+    for _ in range(int(det.events)):
         res = try_detour_mutation(
             routes,
             rng,
             street_adj,
             min_len,
             max_len,
-            min_stretch=float(det["min_stretch"]),
-            max_stretch=float(det["max_stretch"]),
+            min_stretch=float(det.min_stretch),
+            max_stretch=float(det.max_stretch),
             demand=demand,
             n_nodes=n_nodes,
-            max_redundancy_gain=float(det.get("max_redundancy_gain", 0.05)),
+            max_redundancy_gain=float(det.max_redundancy_gain),
         )
         if res is not None:
             ri, candidate, _, _ = res
             replace_route(routes, ri, candidate)
             applied["detour"] += 1
 
-    dc = cfg["drop_cover"]
-    for _ in range(int(dc["events"])):
-        if uncovered_demand_pct(routes, demand, n_nodes) >= float(dc["d_un_target_pct"]):
+    dc = params.drop_cover
+    for _ in range(int(dc.events)):
+        if uncovered_demand_pct(routes, demand, n_nodes) >= float(dc.d_un_target_pct):
             break
         res = try_drop_cover_mutation(routes, rng, demand, street_adj, min_len, max_len)
         if res is None:

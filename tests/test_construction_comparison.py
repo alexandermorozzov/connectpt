@@ -1,6 +1,5 @@
 from connectpt.routes_generator.env.features import observe
 from connectpt.routes_generator.env.masks import ActionMask
-from connectpt.routes_generator.training.replay import evaluate_action
 from connectpt.routes_generator.env.features import global_state_features, redundancy_global_features
 import torch
 import pytest
@@ -27,6 +26,14 @@ from connectpt.routes_generator.training.algorithms.base import (
 )
 
 from connectpt.routes_generator.objectives.pareto import hypervolume_2d, coverage, nondominated
+
+
+def evaluate_action(policy, state, indices, kinds=None, mask=None):
+    from connectpt.routes_generator.env.actions import RouteAction, ROUTE_ACTION_HALT, ROUTE_ACTION_EXTEND
+    if kinds is None:
+        kinds = torch.where(indices[:, 0] < 0, ROUTE_ACTION_HALT, ROUTE_ACTION_EXTEND)
+    return policy.evaluate(observe(state, policy.feature_set), ActionMask() if mask is None else mask,
+        RouteAction(kinds, indices))
 
 
 def preference_dict(weights):
@@ -141,10 +148,10 @@ def test_three_way_comparison_separates_conditioned_utility_and_archive(tmp_path
                 graph=0,
                 preference=w,
                 sample=0,
-                penalized_att=x,
-                penalized_rtt=y,
-                att_norm=x,
-                rtt_norm=y,
+                penalized_0=x,
+                penalized_1=y,
+                objective_0=x,
+                objective_1=y,
                 feasible=True,
                 unserved_fraction=0,
             )
@@ -184,7 +191,7 @@ def write_run(run, *, status, timesteps, max_seconds, commit="same"):
         "  resample_preferences_on_terminal: false\n"
     )
     (run / "history.csv").write_text(
-        "step,val cost,time/total_timesteps,elapsed seconds\n"
+        "step,eval/cost,time/total_timesteps,time/time_elapsed\n"
         f"0,1.0,{timesteps // 2},0.5\n1,,{timesteps},1.0\n2,0.9,,\n"
     )
 
@@ -305,44 +312,44 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer, tmp_p
 
     events = EventAccumulator(str(artifact.output_dir / "tensorboard")).Reload()
     required_tags = (
-        "mean episode reward",
-        "train/att_minutes",
-        "train/rtt_minutes",
-        "val cost",
-        "pareto/greedy/hv_feasible",
-        "pareto/stochastic/eu_archive_penalized",
+        "rollout/ep_rew_mean",
+        "rollout/att_minutes",
+        "rollout/rtt_minutes",
+        "eval/cost",
+        "pareto/greedy/hv",
+        "pareto/stochastic/eu_archive",
         "pareto/greedy/distinct_networks",
         "pareto/greedy/distinct_pareto_networks",
     )
     assert all(tag in events.Tags()["scalars"] for tag in required_tags)
-    assert "pareto/greedy/front_city_0" in events.Tags()["images"]
+    assert not events.Tags()["images"]
     protocol = json.loads((artifact.output_dir / "pareto/validation_protocol.json").read_text())
     assert len(protocol["indices"]) == 3
     assert protocol["reference"] == [3.0, 3.0]
-    for tag in ("mean episode reward", "mean episode length"):
+    for tag in ("rollout/ep_rew_mean", "rollout/ep_len_mean"):
         recorded = events.Scalars(tag)
         assert len(recorded) == len(history)
         for entry, row in zip(recorded, history):
             value = row[tag]
-            if row["completed networks"]:
+            if row["rollout/completed_networks"]:
                 assert math.isfinite(value)
                 assert entry.value == pytest.approx(value)
             else:
                 assert math.isnan(value) and math.isnan(entry.value)
-    assert any(row["completed networks"] for row in history)
-    assert all(row["mean episode length"] >= 1 for row in history if row["completed networks"])
+    assert any(row["rollout/completed_networks"] for row in history)
+    assert all(row["rollout/ep_len_mean"] >= 1 for row in history if row["rollout/completed_networks"])
     for row in history:
-        if row["completed networks"]:
-            assert math.isfinite(row["train/att_minutes"]) and math.isfinite(row["train/rtt_minutes"])
+        if row["rollout/completed_networks"]:
+            assert math.isfinite(row["rollout/att_minutes"]) and math.isfinite(row["rollout/rtt_minutes"])
             # Diff rewards telescope from the empty network to its final cost.
-            expected_reward = 5.5 + 2 * row["train/completed_alpha_mean"] - row["train/cost"]
-            assert row["mean episode reward"] == pytest.approx(expected_reward, abs=1e-5)
+            expected_reward = 5.5 + 2 * row["rollout/completed_alpha_mean"] - row["rollout/cost"]
+            assert row["rollout/ep_rew_mean"] == pytest.approx(expected_reward, abs=1e-5)
     if trainer == "ppo":
-        assert history[-1]["initial ratio error"] < 2e-4
+        assert history[-1]["rollout/initial_ratio_error"] < 2e-4
     elif trainer == "d3po":
-        assert history[-1]["diversity loss"] > 0
+        assert history[-1]["train/diversity_loss"] > 0
     else:
-        assert history[-1]["diversity loss"] == 0
+        assert history[-1]["train/diversity_loss"] == 0
 
 
 def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
@@ -434,10 +441,10 @@ def test_pareto_network_identity_and_per_city_fronts():
                     graph=graph,
                     sample=0,
                     preference=alpha,
-                    att_norm=x,
-                    rtt_norm=y,
-                    penalized_att=x,
-                    penalized_rtt=y,
+                    objective_0=x,
+                    objective_1=y,
+                    penalized_0=x,
+                    penalized_1=y,
                     feasible=True,
                     unserved_fraction=0,
                     network_signature=original,
@@ -454,7 +461,7 @@ def test_pareto_network_identity_and_per_city_fronts():
 
 
 def test_fixed_preference_evaluation_does_not_consume_training_rng():
-    from connectpt.routes_generator.training.validate import evaluate_test, EvaluationProfile, EvaluationParams
+    from connectpt.routes_generator.training.validate import evaluate_preferences, EvaluationProfile, EvaluationParams
     from connectpt.routes_generator.env.construction import EnvParams
     from connectpt.routes_generator.run.schemas import params
 
@@ -483,11 +490,11 @@ def test_fixed_preference_evaluation_does_not_consume_training_rng():
         cfg.train_loop.batch_size,
         cfg.experiment.symmetric_routes,
     )
-    rows = evaluate_test(
+    rows = evaluate_preferences(
         model, graphs, profile, cost, output, torch.device("cpu"), mode="stochastic", save_artifacts=False
     )
     assert torch.equal(torch.random.get_rng_state(), before)
-    repeated = evaluate_test(
+    repeated = evaluate_preferences(
         model, graphs, profile, cost, output, torch.device("cpu"), mode="stochastic", save_artifacts=False
     )
     assert rows == repeated

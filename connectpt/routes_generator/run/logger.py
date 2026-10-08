@@ -2,10 +2,8 @@
 
 A metric exists only as a field of a dataclass record. ``log(logger_list,
 record, step)`` writes every set field (``None`` = not measured) to every logger.
-The tag is ``<prefix>/<field>``: ``prefix`` is the record's ``PHASE`` unless the
-caller passes one. A field that keeps its legacy tag until Э9 says so in
-``field(metadata={"tag": ...})``. A ``dict`` field writes ``<tag>/<key>``
-(a legacy tag may join with ``metadata["sep"]`` instead of ``/``).
+The tag is derived from the record's PHASE and field name. Dictionary fields
+append their key with a slash. Records contain scalar measurements only.
 """
 from __future__ import annotations
 
@@ -17,10 +15,8 @@ from pathlib import Path
 
 class Logger(ABC):
     @abstractmethod
-    def scalar(self, tag: str, value: float, step: int) -> None: ...
-
-    def figure(self, tag: str, fig, step: int) -> None:
-        """A matplotlib figure; only TensorBoard keeps it (removed in Э9)."""
+    def scalar(self, tag: str, value: float, step: int) -> None:
+        ...
 
     def flush(self) -> None:
         pass
@@ -34,13 +30,11 @@ class TensorBoardLogger(Logger):
 
     def __init__(self, run_dir):
         from torch.utils.tensorboard import SummaryWriter
+
         self.writer = SummaryWriter(str(Path(run_dir) / "tensorboard"))
 
     def scalar(self, tag, value, step):
         self.writer.add_scalar(tag, value, step)
-
-    def figure(self, tag, fig, step):
-        self.writer.add_figure(tag, fig, step, close=True)
 
     def flush(self):
         self.writer.flush()
@@ -55,7 +49,7 @@ class CsvLogger(Logger):
     def __init__(self, run_dir):
         self.path = Path(run_dir) / "history.csv"
         self.rows: dict[int, dict[str, float]] = {}
-        self.columns: dict[str, None] = {}      # first-seen order
+        self.columns: dict[str, None] = {}  # first-seen order
 
     def scalar(self, tag, value, step):
         self.rows.setdefault(int(step), {})[tag] = value
@@ -84,11 +78,10 @@ def record_tags(record, prefix: str | None = None):
         value = getattr(record, f.name)
         if value is None:
             continue
-        tag = f.metadata.get("tag", f"{prefix}/{f.name}")
+        tag = f"{prefix}/{f.name}"
         if isinstance(value, dict):
-            sep = f.metadata.get("sep", "/")
             for key, item in value.items():
-                yield f"{tag}{sep}{key}", float(item)
+                yield f"{tag}/{key}", float(item)
         else:
             yield tag, float(value)
 

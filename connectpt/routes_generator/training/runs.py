@@ -160,7 +160,7 @@ class TrainingRun(ExperimentRun):
         from .critic import ValueHead
         from .loop import Budget, train
         from .records import DataCounts
-        from .validate import ConstructionValidation, EditValidation, evaluate_test, log_pareto_metrics
+        from .validate import ConstructionValidation, EditValidation, evaluate_preferences, log_pareto_metrics
 
         device, lp = self.context.device, self.loop_params
         opt = self.optimizer_params
@@ -240,7 +240,7 @@ class TrainingRun(ExperimentRun):
                 )
             for label, actor in (("last", self.policy), ("best", result.best_policy)):
                 for mode in ("greedy", "stochastic"):
-                    rows = evaluate_test(
+                    rows = evaluate_preferences(
                         actor,
                         test_data,
                         self.evaluation_profile,
@@ -253,7 +253,11 @@ class TrainingRun(ExperimentRun):
                     )
                     if self.evaluation.pareto_enabled:
                         report = log_pareto_metrics(
-                            rows, self.evaluation_profile, self.logger_list, result.iterations, f"test/{label}/{mode}"
+                            rows,
+                            self.evaluation_profile,
+                            self.logger_list,
+                            result.iterations,
+                            f"eval/test/{label}/{mode}",
                         )
                         ArtifactStore(self.run_dir).save_json(report, f"test_pareto_{label}_{mode}.json")
         if result.iterations < lp.n_iterations:
@@ -266,7 +270,7 @@ def copytier_config(dg, data, policy_profile, policy_cost, policy_seed) -> "Copy
     parameters."""
     from ..run.context import DATASETS_DIR
     from .edit_dataset import CopyTierConfig
-    from connectpt.routes_generator.network.corruption import COPY_TIER_CFG
+    from ..network.corruption import CopyTierParams
 
     ddir = DATASETS_DIR / data.dataset_dirname
     tiers = list(dg.tiers)
@@ -285,7 +289,7 @@ def copytier_config(dg, data, policy_profile, policy_cost, policy_seed) -> "Copy
         min_route_len=int(data.min_route_len),
         max_route_len=int(data.max_route_len),
         lc_n_samples=int(dg.lc_n_samples),
-        tier_cfg=COPY_TIER_CFG,
+        tier_cfg={name: CopyTierParams(**values) for name, values in dg.tier_cfg.items()},
         force_regen=dg.force_regen,
         policy_profile=policy_profile,
         policy_cost=policy_cost,

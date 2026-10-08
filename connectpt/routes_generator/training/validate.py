@@ -1,4 +1,4 @@
-"""Construction test evaluation and artifact helpers; training lives in setup_and_train."""
+"""Validation and preference-grid evaluation above the shared policy evaluator."""
 from __future__ import annotations
 
 import time
@@ -30,7 +30,6 @@ class EvaluationParams:
     pareto_stochastic_samples: int
     hv_reference: list
     eu_preference_count: int
-    log_pareto_front: bool
     preference_count: int
     stochastic_samples: int
     seed: int
@@ -49,13 +48,15 @@ class Validation:
     def __init__(self, data, cost, env, profile, output, device):
         self.data, self.cost, self.env = data, cost, env
         self.profile, self.output, self.device = profile, output, device
+        self.last_monitor_step = None
 
     def batches(self, progress):
         raise NotImplementedError
 
     @torch.no_grad()
     def run(self, policy, logger_list, step, progress):
-        collected = []
+        self.progress = progress
+        collected, results = [], []
         for graphs, seeds, route_count in self.batches(progress):
             from dataclasses import replace
 
@@ -71,23 +72,42 @@ class Validation:
                 seed_networks=seeds,
             )
             collected.append(metrics)
+            results.append(self.cost(self.env.state))
         metrics = {key: torch.cat([item[key] for item in collected]) for key in collected[0]}
         log(
             logger_list,
             ValidationRecord(
-                cost=metrics["cost"].mean(),
-                att=metrics["ATT"].mean(),
-                rtt=metrics["RTT"].mean(),
-                d_un=metrics["$d_{un}$"].mean(),
-                disconnected_pairs=metrics["# disconnected node pairs"].mean(),
-                wmc=metrics["median_connectivity_weighted"].mean(),
+                cost=float(metrics["cost"].mean()),
+                objective={
+                    name: float(torch.cat([r.goals[:, i] for r in results]).mean())
+                    for i, name in enumerate(self.cost.objectives)
+                },
+                penalty={
+                    name: float(torch.cat([r.penalties[:, i] for r in results]).mean())
+                    for i, name in enumerate(("constraints", "adjustment"))
+                },
+                monitor={
+                    name: float(metrics[key].mean())
+                    for name, key in (
+                        ("ATT", "ATT"),
+                        ("RTT", "RTT"),
+                        ("WMC", "median_connectivity_weighted"),
+                        ("d0", "$d_0$"),
+                        ("d1", "$d_1$"),
+                        ("d2", "$d_2$"),
+                        ("d_un", "$d_{un}$"),
+                        ("n_disconnected", "# disconnected node pairs"),
+                    )
+                    if name in self.cost.monitor
+                },
+                feasible_fraction=float(torch.cat([~r.are_constraints_violated() for r in results]).float().mean()),
             ),
             step,
         )
         return float(metrics["cost"].mean())
 
     def monitor(self, policy, logger_list, step, *, final=False):
-        pass
+        raise NotImplementedError
 
 
 class ConstructionValidation(Validation):
@@ -111,7 +131,7 @@ class ConstructionValidation(Validation):
 
     def monitor(self, policy, logger_list, step, *, final=False):
         params = self.profile.evaluation
-        if params.pareto_enabled and (final or step % params.pareto_period == 0):
+        if params.pareto_enabled and step != self.last_monitor_step and (final or step % params.pareto_period == 0):
             evaluate_pareto(
                 policy,
                 self.data.validation_loader.dataset,
@@ -122,6 +142,7 @@ class ConstructionValidation(Validation):
                 logger_list,
                 step,
             )
+            self.last_monitor_step = step
 
 
 class EditValidation(Validation):
@@ -131,8 +152,26 @@ class EditValidation(Validation):
             graphs, seeds = self.data.module.make_batch(chunk)
             yield graphs, seeds, seeds.shape[1]
 
+    def monitor(self, policy, logger_list, step, *, final=False):
+        params = self.profile.evaluation
+        if params.pareto_enabled and step != self.last_monitor_step and (final or step % params.pareto_period == 0):
+            _, indices, _ = self.data.curriculum.get(self.progress)
+            graphs, seeds = self.data.module.make_batch(indices)
+            evaluate_pareto(
+                policy,
+                graphs.to_data_list(),
+                self.profile,
+                self.cost,
+                self.output,
+                self.device,
+                logger_list,
+                step,
+                seed_networks=seeds,
+            )
+            self.last_monitor_step = step
 
-def evaluate_test(
+
+def evaluate_preferences(
     model,
     data,
     profile,
@@ -205,8 +244,11 @@ def evaluate_test(
                     if seeds is not None:
                         state.set_adjustment_seed(seeds)
                     result = fixed_cost(state)
-                    pure = fixed_cost.get_cost_components(state, result, include_constraint=False)[:, :2]
-                    penalized = fixed_cost.get_cost_components(state, result)[:, :2]
+                    from ..objectives.preferences import GOAL_NAMES
+
+                    columns = [GOAL_NAMES.index(name) for name in fixed_cost.objectives]
+                    pure = fixed_cost.get_cost_components(state, result, include_constraint=False)[:, columns]
+                    penalized = fixed_cost.get_cost_components(state, result)[:, columns]
                     feasible = ~result.are_constraints_violated()
                     for i in range(len(chunk)):
                         route_list = [r.cpu().tolist() for r in state.routes[i]]
@@ -217,10 +259,10 @@ def evaluate_test(
                                 sample=sample,
                                 att_minutes=float(result.mean_demand_time[i] / 60),
                                 rtt_minutes=float(result.total_route_time[i] / 60),
-                                att_norm=float(pure[i, 0]),
-                                rtt_norm=float(pure[i, 1]),
-                                penalized_att=float(penalized[i, 0]),
-                                penalized_rtt=float(penalized[i, 1]),
+                                objective_0=float(pure[i, 0]),
+                                objective_1=float(pure[i, 1]),
+                                penalized_0=float(penalized[i, 0]),
+                                penalized_1=float(penalized[i, 1]),
                                 scalar_cost=float(result.cost[i]),
                                 feasible=bool(feasible[i]),
                                 unserved_fraction=float(result.unserved_demand[i] / result.total_demand[i]),
@@ -240,6 +282,7 @@ def evaluate_test(
                 "mode": mode,
                 "samples_per_preference": samples,
                 "hv_reference": list(profile.evaluation.hv_reference),
+                "objectives": list(cost.objectives),
                 "eu_preference_count": int(profile.evaluation.eu_preference_count),
                 "protocol": dict(
                     graph_count=len(data),
@@ -260,25 +303,31 @@ def evaluate_test(
 def log_pareto_metrics(rows, profile, logger_list, step, prefix):
     report = summarize_evaluation(rows, profile.evaluation.hv_reference, int(profile.evaluation.eu_preference_count))
     summary = {k: float("nan") if v is None else v for k, v in report["summary"].items()}
-    reference_att, reference_rtt = profile.evaluation.hv_reference
+    reference_0, reference_1 = profile.evaluation.hv_reference
     log(
         logger_list,
-        ParetoRecord(**summary, reference_att=reference_att, reference_rtt=reference_rtt),
+        ParetoRecord(
+            **{
+                dict(
+                    hv_feasible="hv", eu_conditioned_penalized="eu_conditioned", eu_archive_penalized="eu_archive"
+                ).get(k, k): v
+                for k, v in summary.items()
+            },
+            reference_0=reference_0,
+            reference_1=reference_1,
+        ),
         step,
         prefix=prefix,
     )
     return report
 
 
-def evaluate_pareto(model, data, profile, cost, output, device, logger_list, step):
+def evaluate_pareto(model, data, profile, cost, output, device, logger_list, step, *, seed_networks=None):
     """Fixed held-out cities/preferences/action seeds, isolated from training RNG."""
-    from matplotlib.figure import Figure
-    from matplotlib.backends.backend_agg import FigureCanvasAgg
-
     artifacts = ArtifactStore(output)
     for mode in ("greedy", "stochastic"):
         started = time.monotonic()
-        rows = evaluate_test(
+        rows = evaluate_preferences(
             model,
             data,
             profile,
@@ -289,6 +338,7 @@ def evaluate_pareto(model, data, profile, cost, output, device, logger_list, ste
             preference_count=int(profile.evaluation.pareto_preference_count),
             stochastic_samples=int(profile.evaluation.pareto_stochastic_samples),
             save_artifacts=False,
+            seed_networks=seed_networks,
         )
         report = log_pareto_metrics(rows, profile, logger_list, step, f"pareto/{mode}")
         report["evaluation_seconds"] = time.monotonic() - started
@@ -296,33 +346,4 @@ def evaluate_pareto(model, data, profile, cost, output, device, logger_list, ste
         example = [r for r in rows if r["graph"] == 0 and r["sample"] == 0]
         report["example_front"] = example
         artifacts.save_json(report, f"pareto/iter{step:05d}_{mode}.json")
-        if profile.evaluation.log_pareto_front:
-            from ..objectives.pareto import nondominated
-
-            fig = Figure(figsize=(5, 4))
-            FigureCanvasAgg(fig)
-            ax = fig.subplots()
-            points = np.array([[r["att_norm"], r["rtt_norm"]] for r in example])
-            feasible = np.array([r["feasible"] for r in example])
-            scatter = ax.scatter(
-                points[:, 0],
-                points[:, 1],
-                c=[r["preference"] for r in example],
-                vmin=0,
-                vmax=1,
-                cmap="viridis",
-                label="Generated networks",
-            )
-            front = nondominated(points[feasible])
-            if len(front):
-                front = front[np.argsort(front[:, 0])]
-                ax.plot(front[:, 0], front[:, 1], "k.-", label="Feasible Pareto front")
-            ax.set(
-                xlabel="Normalized ATT", ylabel="Normalized RTT", title=f"Validation city 0, {mode}, iteration {step}"
-            )
-            ax.legend(loc="best")
-            fig.colorbar(scatter, ax=ax, label="Passenger weight alpha")
-            fig.tight_layout()
-            for logger in logger_list:
-                logger.figure(f"pareto/{mode}/front_city_0", fig, step)
     flush(logger_list)

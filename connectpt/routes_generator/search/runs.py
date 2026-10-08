@@ -15,7 +15,7 @@ from ..run.runs import ExperimentRun, RunArtifact
 from ..run.context import RunContext
 from ..run.schemas import AdjustmentParams, InstanceParams, SearchPaths, SearchRunParams, SweepParams, params
 from ..city.instances import load_instance
-from ..objectives.metrics import full_metric_row, select_metrics
+from ..objectives.metrics import evaluate_network, select_metrics
 from ..policy.build import ModelProfileParams, load_policy
 from ..run.config import compose_policy_model, policy_profile
 from ..objectives.cost import build_cost
@@ -53,9 +53,9 @@ class SearchRun(ExperimentRun):
         # models: build (role-checked) + strict-load the checkpoint into the class
         self.models: dict = {}
         for role in ("construction", "edit"):
-            m_cfg = cfg.models.get(role)
-            if m_cfg is None:
+            if role not in cfg.models:
                 continue
+            m_cfg = cfg.models[role]
             profile = ModelProfileParams(**m_cfg)
             model = load_policy(
                 policy_profile(
@@ -117,7 +117,7 @@ class SearchRun(ExperimentRun):
         )
         routes, metrics = result.routes, result.metrics
         keep = self.keep_metrics
-        row = full_metric_row(metrics, routes, inst.init_routes, adjustment=self.adjustment)
+        row = evaluate_network(metrics, routes=routes, seed=inst.init_routes, adjustment=self.adjustment)
         row = select_metrics(row, keep) if keep else row
         row.update(method=label, alpha=alpha, adj_target=adj_target, n_iterations=n_iterations)
         return SearchArtifact(

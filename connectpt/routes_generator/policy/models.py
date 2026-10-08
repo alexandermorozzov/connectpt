@@ -2211,7 +2211,7 @@ class UnbiasedPathCombiner(RouteGeneratorBase):
                                        dim=-1)
         nodepair_descs = self.nodepair_embedder(nodepair_descs)
 
-        if not hasattr(state.graph_data, '_seqs'):
+        if '_seqs' not in state.graph_data.__dict__:
             # compute the shortest paths and store them in the graph_data object
              # so we don't need to recompute them for each route.
             seqs, _ = reconstruct_all_paths(state.graph_data.nexts)

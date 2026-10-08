@@ -64,7 +64,6 @@ evaluation:
   - 3.0
   - 3.0
   eu_preference_count: 101
-  log_pareto_front: true
   preference_count: 21
   stochastic_samples: 4
   seed: 9001

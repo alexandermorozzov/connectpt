@@ -1,3 +1,7 @@
+defaults:
+  - /corruption@tier_cfg: copytiers
+  - _self_
+
 n_graphs: 1000
 raw_n_nodes: 50
 raw_graph_type: mixed

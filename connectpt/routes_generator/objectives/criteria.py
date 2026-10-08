@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 
 
-GOAL_NAMES = ("ATT", "RTT", "WMC")
+from .preferences import GOAL_NAMES
 
 
 class Criterion(ABC):
@@ -25,13 +25,13 @@ class NetworkCriterion(Criterion):
         return self._name
 
     def compute(self, state, result=None, *, no_norm=False):
-        from .cost import CostModule
-        from .cost import _finite_time_diameter
+        from .components import PhysicalCost
+        from .components import _finite_time_diameter
 
         values = (
             result
             if result is not None
-            else CostModule(
+            else PhysicalCost(
                 state.mean_stop_time[0].item(), state.transfer_time_s[0].item(), state.symmetric_routes
             )._cost_helper(state)
         )
@@ -70,9 +70,11 @@ class PenaltyCriterion(Criterion):
 
         if self.name == "constraints":
             if result is None:
-                from .cost import CostModule
-                result = CostModule(state.mean_stop_time[0].item(), state.transfer_time_s[0].item(),
-                                    state.symmetric_routes)._cost_helper(state)
+                from .components import PhysicalCost
+
+                result = PhysicalCost(
+                    state.mean_stop_time[0].item(), state.transfer_time_s[0].item(), state.symmetric_routes
+                )._cost_helper(state)
             return constraint_penalty(state, result, self.parameters["ignore_stops_oob"])
         if self.name == "adjustment":
             current = to_routes(state.routes).to(state.device)

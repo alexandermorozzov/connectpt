@@ -2,6 +2,7 @@ import torch
 from torch import Tensor
 
 EPSILON = 1e-6
+GOAL_NAMES = ("ATT", "RTT", "WMC")
 COST_WEIGHT_KEY_ORDER = (
     "demand_time_weight",
     "route_time_weight",
@@ -135,8 +136,6 @@ class PreferenceSampler:
 
     def sample(self, batch_size, device=None):
         """Sample only active goals, in configured objective order."""
-        from .criteria import GOAL_NAMES
-
         named = self.sample_variable_weights(batch_size, device)
         return torch.stack([named[COST_WEIGHT_KEY_ORDER[GOAL_NAMES.index(name)]] for name in self.objectives], dim=-1)
 

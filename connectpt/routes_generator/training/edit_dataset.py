@@ -432,7 +432,7 @@ def build(cfg: CopyTierConfig):
                 {
                     "graph_index": gi,
                     "tier": tier,
-                    "tier_kind": ("clean" if not tier_cfg["kinds"] else "copies"),
+                    "tier_kind": ("clean" if not tier_cfg.kinds else "copies"),
                     "lc_combo": ctag,
                     "applied_events": int(sum(event_counts.values())),
                     "n_corrupted_routes": int(n_corrupted),

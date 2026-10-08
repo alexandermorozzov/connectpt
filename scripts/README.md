@@ -7,7 +7,6 @@
 | `run_search.py` | Оптимизация сети: EA, NEA, NEA-Edit, NEA-Combined. |
 | `run.py` | Один конфиг `cfg/runs/<имя>.yaml`: датасет edit, обучение, сравнение. |
 | `make_init_routes.py` | Строит начальные сети бенчмарков: `--generator lc`, `john`, `nikolic`. |
-| `data_plot.py` | Рисует маршруты поверх УДС. |
 | `launch.ps1` / `launch.sh` | Любой из скриптов выше в фоне, с логом. |
 
 Конфиги лежат в `connectpt/routes_generator/cfg/`. Точки входа — `cfg/runs/*.yaml`.
@@ -109,30 +108,14 @@ python scripts/make_init_routes.py
 
 Скрипт строит сеть обученной construction-моделью и пишет `Routes.txt` для
 `mandl` и `mumford0`–`mumford3`. Флаги: `--instances`, `--seed`, `--instances-dir`,
-`--cpu`, `--clean` (только сэмпл модели, без «реалистичной» порчи).
+`--cpu`, `--generator {lc,john,nikolic}`, `--clean` (LC без «реалистичной» порчи).
 У MACSA и EKB начальная сеть уже есть.
 
-## 3. Рисование
+## 3. Визуализация
 
-```
-python scripts/data_plot.py [ФАЙЛ.pt ...] [--instance ИМЯ] [--out PNG] [--demand] [--ncols N] [--dpi N]
-```
-
-Скрипт только рисует PNG. Он ничего не считает.
-
-| Задача | Команда |
-|---|---|
-| Начальная сеть инстанса | `python scripts/data_plot.py --instance mandl` |
-| Результат прогона | `python scripts/data_plot.py artifacts/results/search/search_mandl_ea_seed0_routes.pt` |
-| Несколько методов рядом | перечислите несколько `.pt` и задайте `--out` |
-| Чужой тензор маршрутов | `python scripts/data_plot.py routes.pt --instance mumford1 --out fig.png` |
-
-- Дамп прогона содержит УДС, сеть `Initial` и сеть каждой точки сетки. Одна
-  команда уже даёт сравнение «было → стало».
-- При нескольких дампах `Initial` рисуется один раз.
-- `--out` по умолчанию — рядом с первым входным файлом.
-- `--demand` добавляет панель матрицы корреспонденций. `--ncols` по умолчанию 4,
-  `--dpi` — 150.
+Графики строятся в ноутбуках `examples/`. Дамп поиска содержит город, сеть
+`Initial` и сети точек поиска. Загрузка — `run.artifacts.load_routes`, метрики —
+`objectives.metrics.evaluate_network`. В пакете и логгере рисования нет.
 
 ## 4. Обучение edit-политики
 
@@ -271,17 +254,18 @@ python -m connectpt.routes_generator.city.synthetic datasets/construction/20_nod
 
 | Тег | Смысл |
 |---|---|
-| `mean episode reward`, `mean episode length` | завершённые сети; NaN без завершений |
-| `train/step_reward` | средняя награда шага |
-| `train/{cost,att_minutes,rtt_minutes}` | метрики завершённых сетей |
-| `val cost`, `val ATT`, `val RTT` | валидация; по `val cost` выбирается best |
+| `rollout/ep_rew_mean`, `rollout/ep_len_mean` | завершённые сети; NaN без завершений |
+| `rollout/step_reward` | средняя награда шага |
+| `rollout/{cost,att_minutes,rtt_minutes}` | метрики завершённых сетей |
+| `eval/cost`, `eval/objective/*`, `eval/penalty/*`, `eval/monitor/*` | валидация; по cost выбирается best |
 | `pareto/{greedy,stochastic}/*` | HV, EU, число различных и недоминируемых сетей |
-| `critic/*`, `value loss`, `clip fraction`, `entropy` | критик и обновление политики |
+| `train/{value_loss,clip_fraction,entropy_loss,approx_kl}` | критик и обновление политики |
 | `time/total_timesteps` | число переходов среды |
 
-HV считается с фиксированной точкой `[3, 3]` в нормированных ATT / RTT. EU —
-отрицательная стоимость: больше — лучше. Имена тегов до Э9 старые; схема —
-`docs/board/plan-architecture-refactor.md`, B9.
+HV считается с фиксированной точкой `[3, 3]` по активным нормированным целям.
+Их порядок указан в протоколе оценки: ATT/RTT для construction, RTT/WMC для edit.
+EU — отрицательная стоимость: больше — лучше. Таблица тегов — `docs/config-keys.md`.
+Пакет пишет скаляры и данные; визуализацию делают ноутбуки `examples/`.
 
 ### 5.4. Сравнение алгоритмов
 

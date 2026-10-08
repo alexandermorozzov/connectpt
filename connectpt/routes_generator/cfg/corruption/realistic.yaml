@@ -1,0 +1,18 @@
+dup:
+  events: 1
+  max_multiplicity: 2
+  kinds:
+  - full_copy
+  - prefix_copy
+  - suffix_copy
+  - middle_copy
+  covered: true
+  d_un_cap: 10.0
+detour:
+  events: 2
+  min_stretch: 1.3
+  max_stretch: 2.5
+  max_redundancy_gain: 0.05
+drop_cover:
+  events: 3
+  d_un_target_pct: 5.0
