@@ -2,12 +2,6 @@ common:
   dropout: 0.0
   nonlin_type: ReLU
   embed_dim: 64
-
-route_generator:
-  kwargs:
-    force_linking_unlinked: false
-    logit_clip: null
-
 backbone_gn:
   net_type: graph attn
   kwargs:
@@ -15,8 +9,12 @@ backbone_gn:
     use_norm: false
     n_heads: 4
     dense: false
-
+    recurrent: false
+    residual: false
+    n_proj_layers: 1
+    out_dim: null
+    layer_kwargs: {}
 defaults:
-  - /features@features: edit_v1
-  - _self_
-  - route_generator: biased_trim
+- /features@features: edit_v1
+- _self_
+- route_generator: biased_trim

@@ -54,6 +54,7 @@ class MutationContext:
     adj_condition_target: Any
     adj_condition_weight: Any
     max_n_nodes: int
+    cost: Any
 
 
 def _gather_group_routes(all_networks, ctx: MutationContext, idxs):
@@ -97,9 +98,9 @@ class NeuralRebuildOp:
         if ctx.process_sequentially:
             return _bc._run_rebuild_variants_for_bees(
                 _bc.get_neural_variants, self.model, ctx.seq_state,
-                ctx.bee_networks, ctx.chosen_route_idxs, idxs)
+                ctx.bee_networks, ctx.chosen_route_idxs, idxs, cost=ctx.cost)
         networks = _bc.get_neural_variants(
-            self.model, ctx.env_state, ctx.bee_networks, ctx.chosen_route_idxs)
+            self.model, ctx.env_state, ctx.bee_networks, ctx.chosen_route_idxs, cost=ctx.cost)
         return networks[:, idxs, -1]
 
 
@@ -135,7 +136,7 @@ class _OneStepNeuralOp:
         self.ignore_max_route_len = bool(ignore_max_route_len)
 
     def _variant_kwargs(self, ctx: MutationContext) -> dict:
-        kwargs = dict(ignore_max_route_len=self.ignore_max_route_len,
+        kwargs = dict(cost=ctx.cost, ignore_max_route_len=self.ignore_max_route_len,
                       allow_halt=self.allow_halt)
         if self.passes_adj_condition:
             kwargs.update(adj_condition_target=ctx.adj_condition_target,
@@ -198,12 +199,12 @@ class TrimThenExtendOp:
                 self.trim_model, self.extend_model, ctx.seq_state,
                 ctx.bee_networks, ctx.chosen_route_idxs, idxs,
                 ignore_max_route_len=self.ignore_max_route_len,
-                allow_halt=self.allow_halt)
+                allow_halt=self.allow_halt, cost=ctx.cost)
         all_networks = _bc.get_neural_trim_then_extend_variants(
             self.trim_model, self.extend_model, ctx.env_state,
             ctx.bee_networks, ctx.chosen_route_idxs,
             ignore_max_route_len=self.ignore_max_route_len,
-            allow_halt=self.allow_halt)
+            allow_halt=self.allow_halt, cost=ctx.cost)
         return _gather_group_routes(all_networks, ctx, idxs)
 
 
@@ -299,7 +300,7 @@ class ExecutablePlan:
 
     def get_mutants(self, bee_networks, chosen_route_idxs, *, direct_sat_dmd,
                     shorten_prob, street_node_neighbours, shortest_paths,
-                    force_linking_unlinked, env_state,
+                    force_linking_unlinked, env_state, cost,
                     single_bee_env_state=None, adj_condition_target=None,
                     adj_condition_weight=None,
                     process_neural_bees_sequentially=False):
@@ -361,7 +362,7 @@ class ExecutablePlan:
             shortest_paths=shortest_paths,
             force_linking_unlinked=force_linking_unlinked,
             adj_condition_target=adj_condition_target,
-            adj_condition_weight=adj_condition_weight, max_n_nodes=max_n_nodes)
+            adj_condition_weight=adj_condition_weight, max_n_nodes=max_n_nodes, cost=cost)
 
         # Each slot is a disjoint block of bees; run in canonical order so the
         # RNG stream (empty-route refill, then each operator) matches the legacy

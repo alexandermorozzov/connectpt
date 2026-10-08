@@ -32,6 +32,34 @@ def load_experiment(name: str, *, overrides=None):
     return _compose_experiment(name, overrides)
 
 
+def compose_policy_model(name: str):
+    """Model group for a named profile, without an evaluation stack."""
+    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
+        cfg = compose(config_name=None, overrides=[f"+model={name}"])
+    return cfg.model
+
+
+def policy_profile(model_cfg, cost_cfg, experiment, device, *, checkpoint_path=None):
+    """Resolve config groups at the Run.setup boundary."""
+    from ..policy.build import ModelParams, PolicyProfile
+    from ..objectives.cost import CostConstants
+
+    values = OmegaConf.to_container(cost_cfg.kwargs, resolve=True)
+    return PolicyProfile(
+        ModelParams.from_values(OmegaConf.to_container(model_cfg, resolve=True)),
+        CostConstants(experiment.symmetric_routes, values["mean_stop_time_s"], values["avg_transfer_wait_time_s"]),
+        tuple(values["objectives"]), experiment.low_memory_mode, checkpoint_path, device)
+
+
+def compose_policy_config(name="construction_v1"):
+    """Compose the groups used by standalone policy runs."""
+    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
+        cfg = compose(config_name=None, overrides=[
+            "+cost=rtt_wmc", "+adjustment=cap", "+experiment=standard",
+            f"+model_profile={name}"])
+    return cfg
+
+
 def _runs_root(cfg) -> str:
     """The scratch root for per-run outputs (``paths.runs_dir``)."""
     return str((cfg.get("paths") or {}).get("runs_dir") or "artifacts/runs")

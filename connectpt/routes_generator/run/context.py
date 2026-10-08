@@ -33,10 +33,6 @@ MODEL_WEIGHTS_DIR = ARTIFACTS_DIR / "model_weights"
 EDIT_MODEL_WEIGHTS_DIR = MODEL_WEIGHTS_DIR / "improvement"
 MODEL_OUTPUTS_DIR = ARTIFACTS_DIR / "lc_improvement_outputs"
 
-# Pretrained construction (neural-BCO bee) checkpoint that ships with the repo.
-CONSTRUCTION_MODEL_WEIGHTS_PATH = (
-    MODEL_WEIGHTS_DIR / "inductive_random_graphs_weighted_connectivity.pt"
-)
 # Preserved edit/improvement checkpoint (the one the experiments load).
 EDIT_MODEL_WEIGHTS_PATH = (
     EDIT_MODEL_WEIGHTS_DIR / "improvement_lc_redundancy_rttwmc_v1_PRESERVED.pt"

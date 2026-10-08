@@ -35,46 +35,18 @@ def build_init_routes(spec, tensors, *, seed: int = 0, device=None,
 
 
 def _lc_construct(spec, tensors, *, device) -> torch.Tensor:
-    """One learned-construction rollout for ``spec`` on ``tensors``."""
-    from omegaconf import OmegaConf
     from torch_geometric.loader import DataLoader
-
     from ..city.graph import to_batch
-    from ..run.checkpoints import CheckpointStore
-    from ..run.context import CFG_DIR, CONSTRUCTION_MODEL_WEIGHTS_PATH
-    from ..run.context import seed_everything
-    from ..eval_route_generator import eval_model
-    from ..model_factory import RouteModelFactory
-    from ..objectives.cost import build_cost
-    from ..utils import get_eval_cfg
+    from ..env.state import RouteGenBatchState
+    from ..policy.generate import generate
+    from ..policy.rollout import bind_env
+    from ..run.policy import PolicyRun
+    from ..run.config import compose_policy_config
 
-    from hydra import compose, initialize_config_dir
-    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        kw = compose(config_name="stacks/model_eval").cost.kwargs
-    params = {
-        "dataset_name": "tensor",
-        "n_routes": spec["n_routes"],
-        "min_route_len": spec["min_route_len"],
-        "max_route_len": spec["max_route_len"],
-        "run_name": f"lc_init_{spec.get('city', 'inst')}",
-        "model_weights": str(CONSTRUCTION_MODEL_WEIGHTS_PATH),
-        "demand_time_weight": kw.demand_time_weight,
-        "route_time_weight": kw.route_time_weight,
-        "median_connectivity_weight": kw.median_connectivity_weight,
-    }
-    cfg = get_eval_cfg(str(CFG_DIR), "stacks/model_eval", params)
-    seed_everything(cfg.experiment.get("seed"))
-    dataloader = DataLoader(
-        to_batch(tensors).to_data_list(), batch_size=1)
-    cost_obj = build_cost(
-        cfg.cost,
-        symmetric_routes=bool(cfg.experiment.symmetric_routes))
-    cost_obj.to(device)
-    model = RouteModelFactory.build_construction_model(cfg.model, cfg.experiment)
-    CheckpointStore.load_model_weights(model, cfg.model.weights, map_location=device)
-    model.to(device)
-
-    _, _unserved, _metrics, routes = eval_model(
-        model, dataloader, cfg.eval, cost_obj, n_samples=1,
-        return_routes=True, silent=True, device=device)
-    return to_routes(routes)
+    run = PolicyRun(compose_policy_config(), device)
+    run.setup()
+    data = next(iter(DataLoader(to_batch(tensors).to_data_list(), batch_size=1))).to(device)
+    state = RouteGenBatchState(data, run.cost.constants,
+        spec["n_routes"], spec["min_route_len"], spec["max_route_len"],
+        preferences=run.cost.get_weights())
+    return generate(bind_env(state, run.policy, run.cost, normalize=False), run.policy, "sample", 1)

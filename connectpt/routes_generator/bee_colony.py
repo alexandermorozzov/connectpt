@@ -1,3 +1,5 @@
+from .env.construction import normalize_nodes
+from .policy.rollout import bind_env, rollout
 from connectpt.routes_generator.env.masks import ActionMask
 import sys
 import os
@@ -212,7 +214,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
     # plans have no such model and skip planning setup (legacy semantics).
     planning_model = plan.planning_model
     if planning_model is not None:
-        bee_states = planning_model.setup_planning(bee_states)
+        normalize_nodes(bee_states, planning_model.node_norm, planning_model.feature_set)
     # Sequential neural-bee processing runs the model on one bee at a time and
     # needs a state whose batch equals the number of graphs (not graphs *
     # n_bees), so a single bee's network is not broadcast up to the full bee
@@ -222,7 +224,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
         single_bee_states = RouteGenBatchState.batch_from_list(
             state.batch_to_list())
         if planning_model is not None:
-            single_bee_states = planning_model.setup_planning(single_bee_states)
+            normalize_nodes(single_bee_states, planning_model.node_norm, planning_model.feature_set)
 
     metric_names = cost_obj.get_metric_names()
     
@@ -298,7 +300,7 @@ def run_bee_colony_plan(state, cost_obj, init_network, n_bees=10,
                     street_node_neighbours=street_node_neighbours,
                     shortest_paths=shortest_paths,
                     force_linking_unlinked=force_linking_unlinked,
-                    env_state=bee_states,
+                    env_state=bee_states, cost=cost_obj,
                     single_bee_env_state=single_bee_states,
                     adj_condition_target=adjustment_degree_target,
                     adj_condition_weight=adjustment_degree_weight,
@@ -468,13 +470,13 @@ def _gather_chosen_routes_from_networks(networks, chosen_route_idxs):
 
 def _run_rebuild_variants_for_bees(variant_fn, model, env_state,
                                    bee_networks, chosen_route_idxs,
-                                   bee_idxs):
+                                   bee_idxs, *, cost):
     """Run a rebuild-style neural variant one bee at a time."""
     outputs = []
     for bee_idx in bee_idxs.unbind(0):
         bee_slice, chosen_slice = _index_single_bee(
             bee_networks, chosen_route_idxs, bee_idx)
-        networks = variant_fn(model, env_state, bee_slice, chosen_slice)
+        networks = variant_fn(model, env_state, bee_slice, chosen_slice, cost=cost)
         outputs.append(networks[:, 0, -1])
     return _stack_bee_route_outputs(outputs, bee_networks)
 
@@ -545,7 +547,7 @@ def get_new_route_variants(batch_bee_routes, direct_sat_dmd_mat, shortest_paths,
 
 def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs,
                                greedy=False, ignore_max_route_len=False,
-                               allow_halt=True):
+                               allow_halt=True, *, cost):
     """Extend chosen routes with a single GNN step instead of rebuilding them.
 
     For each bee, the chosen route is set as the current in-progress route and
@@ -577,40 +579,20 @@ def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs
     with env_state.defer_route_data_update():
         env_state.replace_routes(flat_kept)
         env_state.set_current_routes(flat_chosen)
-    env_state = model.setup_planning(env_state)
+    normalize_nodes(env_state, model.node_norm, model.feature_set)
 
     pre_step_routes = env_state.current_routes.clone()
 
-    supports_trim_actions = getattr(model, 'supports_trim_actions', False)
-
+    original_max_route_len = env_state.extra_data.max_route_len.clone()
     if ignore_max_route_len:
-        original_max_route_len = env_state.extra_data.max_route_len.clone()
         env_state.extra_data.max_route_len = env_state.n_nodes.clone()
-        try:
-            if supports_trim_actions:
-                action_kinds, action, _, _ = model.step_route_action(
-                    env_state, greedy=greedy,
-                    mask=ActionMask(extend=True, trim_start=False, trim_end=False, halt=allow_halt))
-            else:
-                action, _, _ = model.step(
-                    env_state, greedy=greedy, mask=ActionMask(halt=allow_halt))
-        finally:
-            env_state.extra_data.max_route_len = original_max_route_len
-    else:
-        if supports_trim_actions:
-            action_kinds, action, _, _ = model.step_route_action(
-                env_state, greedy=greedy,
-                mask=ActionMask(extend=True, trim_start=False, trim_end=False, halt=allow_halt))
-        else:
-            action, _, _ = model.step(
-                env_state, greedy=greedy, mask=ActionMask(halt=allow_halt))
-
-    if supports_trim_actions:
-        halted = action_kinds == ROUTE_ACTION_HALT
-        env_state.apply_route_actions(action_kinds, action)
-    else:
-        halted = action[:, 0] == -1
-        env_state.shortest_path_action(action)
+    try:
+        env = bind_env(env_state, model, cost, normalize=False,
+            mask=ActionMask(extend=True, trim_start=False, trim_end=False, halt=allow_halt))
+        trajectory = rollout(env, model, greedy, max_steps=1, record_states=False)
+        halted = trajectory.outputs[0].action.kind == ROUTE_ACTION_HALT
+    finally:
+        env_state.extra_data.max_route_len = original_max_route_len
 
     post_step_routes = env_state.current_routes.clone()
 
@@ -638,7 +620,7 @@ def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
                              allow_extend=True, allow_trim_start=True,
                              allow_trim_end=True, allow_halt=True,
                              adj_condition_target=None,
-                             adj_condition_weight=None):
+                             adj_condition_weight=None, *, cost):
     """Apply one edit step (extend / trim_start / trim_end / halt) per bee.
 
     Like ``get_neural_extend_variants`` but the model is allowed to choose
@@ -696,29 +678,23 @@ def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
             weight=(float(adj_condition_weight)
                     if (n_cond >= 2 and adj_condition_weight is not None)
                     else None))
-    env_state = model.setup_planning(env_state)
+    normalize_nodes(env_state, model.node_norm, model.feature_set)
 
     pre_step_routes = env_state.current_routes.clone()
 
+    original_max_route_len = env_state.extra_data.max_route_len.clone()
     if ignore_max_route_len:
-        original_max_route_len = env_state.extra_data.max_route_len.clone()
         env_state.extra_data.max_route_len = env_state.n_nodes.clone()
-        try:
-            action_kinds, action, _, _ = model.step_route_action(
-                env_state, greedy=greedy,
-                mask=ActionMask(extend=allow_extend, trim_start=allow_trim_start, trim_end=allow_trim_end, halt=allow_halt))
-        finally:
-            env_state.extra_data.max_route_len = original_max_route_len
-    else:
-        action_kinds, action, _, _ = model.step_route_action(
-            env_state, greedy=greedy,
-            mask=ActionMask(extend=allow_extend, trim_start=allow_trim_start, trim_end=allow_trim_end, halt=allow_halt))
-
-    halted = action_kinds == ROUTE_ACTION_HALT
+    try:
+        env = bind_env(env_state, model, cost, normalize=False,
+            mask=ActionMask(extend=allow_extend, trim_start=allow_trim_start,
+                            trim_end=allow_trim_end, halt=allow_halt))
+        trajectory = rollout(env, model, greedy, max_steps=1, record_states=False)
+        halted = trajectory.outputs[0].action.kind == ROUTE_ACTION_HALT
+    finally:
+        env_state.extra_data.max_route_len = original_max_route_len
     if n_cond > 0:
-        # back to the sentinel: other (unconditioned) models share this state
-        env_state.set_adjustment_conditioning(-1.0, weight=None)
-    env_state.apply_route_actions(action_kinds, action)
+        env_state.extra_data.adjustment_conditioned.fill_(False)
 
     post_step_routes = env_state.current_routes.clone()
 
@@ -743,7 +719,7 @@ def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
 
 def get_neural_trim_variants(model, env_state, bee_networks, chosen_route_idxs,
                              greedy=False, ignore_max_route_len=False,
-                             allow_halt=True):
+                             allow_halt=True, *, cost):
     """Apply one trim-only edit step per bee.
 
     This is the BCO type-6 mutation: the selected route is the current route,
@@ -761,7 +737,7 @@ def get_neural_trim_variants(model, env_state, bee_networks, chosen_route_idxs,
         allow_extend=False,
         allow_trim_start=True,
         allow_trim_end=True,
-        allow_halt=allow_halt,
+        allow_halt=allow_halt, cost=cost,
     )
 
 
@@ -769,7 +745,7 @@ def get_neural_trim_then_extend_variants(trim_model, extend_model, env_state,
                                          bee_networks, chosen_route_idxs,
                                          greedy=False,
                                          ignore_max_route_len=False,
-                                         allow_halt=True):
+                                         allow_halt=True, *, cost):
     """Apply trim-only edit followed by one construction-style extension.
 
     This is the BCO type-7 compound mutation.  It lets a bee pass through a
@@ -791,7 +767,7 @@ def get_neural_trim_then_extend_variants(trim_model, extend_model, env_state,
         chosen_route_idxs,
         greedy=greedy,
         ignore_max_route_len=ignore_max_route_len,
-        allow_halt=allow_halt,
+        allow_halt=allow_halt, cost=cost,
     )
     return get_neural_extend_variants(
         extend_model,
@@ -800,12 +776,12 @@ def get_neural_trim_then_extend_variants(trim_model, extend_model, env_state,
         chosen_route_idxs,
         greedy=greedy,
         ignore_max_route_len=ignore_max_route_len,
-        allow_halt=allow_halt,
+        allow_halt=allow_halt, cost=cost,
     )
 
 
 def get_neural_variants(model, env_state, bee_networks, drop_route_idxs,
-                        greedy=False):
+                        greedy=False, *, cost):
     bee_dim = bee_networks.ndim == 4
     if not bee_dim:
         # there is no bee dimension, so add one
@@ -827,8 +803,7 @@ def get_neural_variants(model, env_state, bee_networks, drop_route_idxs,
 
     # plan a new route with the model
     env_state.replace_routes(flatbee_kept_routes)
-    result = model(env_state, greedy=False)
-    env_state = result.state
+    rollout(bind_env(env_state, model, cost), model, greedy=False, record_states=False)
     routes = to_routes(env_state.routes).to(bee_networks.device)
     if bee_dim:
         routes = routes.reshape(batch_size, n_bees, n_routes, -1)

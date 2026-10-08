@@ -15,7 +15,8 @@ from ..run.context import DATASETS_DIR, resolve_weights_path
 from ..run.context import RunContext
 from ..run.schemas import (CurriculumParams, EditDatasetParams, TrainingPaths,
                            TrainingRunParams, params)
-from ..model_factory import RouteModelFactory
+from ..policy.build import load_policy
+from ..run.config import policy_profile
 from ..objectives.cost import build_cost
 from .edit_ppo_trainer import EditPPOTrainer
 from .runs import ExperimentRun, TrainingArtifact
@@ -35,7 +36,9 @@ class EditTrainingRun(ExperimentRun):
         device = self.context.device
 
         # model -- built through the factory; never wrapped, so strict-load holds
-        self.model = RouteModelFactory.build_edit_model(cfg.model, cfg.experiment)
+        self.model = load_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, device))
+        from ..env.actions import ActionSpec
+        ActionSpec("edit").validate(self.model.action_spec)
         self.model.to(device)
 
         # optional warm-start checkpoint
@@ -50,6 +53,7 @@ class EditTrainingRun(ExperimentRun):
         self.cost_obj = build_cost(
             cfg.cost,
             symmetric_routes=bool(cfg.experiment.symmetric_routes),
+            low_memory_mode=cfg.experiment.low_memory_mode,
         )
         self.cost_obj.to(device)
 

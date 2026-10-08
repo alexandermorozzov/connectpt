@@ -1,6 +1,10 @@
+from .policy.generate import generate
+from .env.construction import normalize_nodes
+from .policy.rollout import bind_env, rollout as policy_rollout
+from .training.replay import evaluate_action
 from .run.checkpoints import CheckpointStore
 from connectpt.routes_generator.env.masks import ActionMask
-from .env.features import global_state_features, critic_inputs, PREFERENCE_KEYS
+from .env.features import global_state_features, critic_inputs, PREFERENCE_KEYS, observe
 import math
 import random
 from pathlib import Path
@@ -11,11 +15,11 @@ from tqdm import tqdm
 
 from .run.logger import flush, log as log_metrics
 from .training.records import EditTrainRecord, EditValRecord
-from .city.graph import DEMAND_KEY, STOP_KEY, DemandScaleTransform, SpaceScaleTransform
+from .city.graph import STOP_KEY, DemandScaleTransform, SpaceScaleTransform
 from .objectives.preferences import COST_WEIGHT_KEY_ORDER
 from .env.actions import ROUTE_ACTION_EXTEND, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_TRIM_START
 from .env.state import RouteGenBatchState
-from .models import FeatureNorm, get_mlp, DEFAULT_PREFERENCE_GOALS
+from .policy.models import FeatureNorm, get_mlp, DEFAULT_PREFERENCE_GOALS
 from .network.routes import to_routes
 from .city.graph import to_batch
 from .objectives.penalties import edit_step_penalty as step_penalty, forced_halt_penalty as halt_penalty
@@ -214,15 +218,13 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
                 seed_routes=(route_batch if adjustment_use_current else None),
                 gap=adjustment_gap, mode=adjustment_mode)
         context_route_counts = route_state.n_finished_routes.detach().clone()
-        if getattr(model, "supports_trim_actions", False):
-            actions, logits, entropy = model.plan_new_route(
-                route_state, greedy=greedy,
-                force_nonhalt_first_step=force_nonhalt_first_step,
-                max_steps=max_route_edit_steps,
-                max_trim_actions=max_trim_actions_per_route)
-        else:
-            actions, logits, entropy = model.plan_new_route(
-                route_state, greedy=greedy)
+        is_edit = model.action_spec.role == "edit"
+        env = bind_env(route_state, model, cost_obj, single_route=True,
+            max_route_edit_steps=max_route_edit_steps if is_edit else None,
+            max_trim_actions=max_trim_actions_per_route if is_edit else None,
+            force_nonhalt_first_step=force_nonhalt_first_step if is_edit else False)
+        trajectory = generate(env, model, "greedy" if greedy else "sample", return_trajectory=True)
+        actions, logits, entropy = trajectory.actions, trajectory.total_logp, trajectory.total_entropy
         planned_current_routes = _get_planned_current_routes(
             route_state, working_route_batch[:, route_idx], context_route_counts)
         route_logits.append(logits)
@@ -238,20 +240,10 @@ def rollout_lc_improvement(model, cost_obj, graph_batch, route_batch,
         working_route_batch[:, route_idx] = planned_tensor[:, 0]
         if return_actions:
             route_actions.append(actions.detach().clone())
-            if hasattr(model, "last_route_action_kinds"):
-                route_action_kinds.append(
-                    model.last_route_action_kinds.detach().clone())
-            else:
-                route_action_kinds.append(None)
+            route_action_kinds.append(trajectory.action_kinds.detach().clone() if is_edit else None)
             if return_step_data:
-                if hasattr(model, "last_route_step_logits"):
-                    route_step_logits.append(
-                        model.last_route_step_logits.detach().clone())
-                    route_step_entropies.append(
-                        model.last_route_step_entropies.detach().clone())
-                else:
-                    route_step_logits.append(None)
-                    route_step_entropies.append(None)
+                route_step_logits.append(trajectory.logp.detach().clone() if is_edit else None)
+                route_step_entropies.append(trajectory.entropy.detach().clone() if is_edit else None)
 
     final_routes = _assemble_routes_by_original_order(
         routes_by_route, graph_batch[STOP_KEY].x.device)
@@ -466,7 +458,7 @@ class D3POValueModule:
 
     def _features_from_state(self, state):
         if self._shared_critic:
-            return self.actor_model.get_critic_features(state)
+            return self.actor_model.get_critic_features(observe(state, self.actor_model.feature_set, allow_below_min=self.actor_model.allow_trim_below_min if self.actor_model.action_spec.role == "edit" else False))
         input_data = self.inputs_from_data(
             state.graph_data, state.cost_weights)
         glob_feats = global_state_features(state,
@@ -733,45 +725,20 @@ def _collect_lc_improvement_cfg_ppo_rollout(
             active = ~done_before
             allow_trim = _trim_actions_allowed(
                 trim_action_counts, max_trim_actions_per_route)
-            state_for_buffer = state.snapshot_for_buffer(device=torch.device("cpu"))
+
+            force_halt = max_route_edit_steps is not None and route_step_idx >= max_route_edit_steps
+            env = bind_env(state, model, cost_obj, normalize=False,
+                max_route_edit_steps=0 if force_halt else None,
+                mask=ActionMask(halt=not (force_nonhalt_first_step and route_step_idx == 0),
+                                trim_start=allow_trim, trim_end=allow_trim))
+            trajectory = policy_rollout(env, model, max_steps=1, critic=value_module)
+            state_for_buffer = trajectory.states[0]
             _clear_state_lazy_tensors(state_for_buffer)
             states.append(state_for_buffer)
-            value_estimates.append(value_module.from_state(state))
-
-            force_halt = max_route_edit_steps is not None and \
-                route_step_idx >= max_route_edit_steps
-            if force_halt:
-                step_actions = torch.full(
-                    (state.batch_size, 2), -1, dtype=torch.long,
-                    device=state.device)
-                step_kinds = torch.full(
-                    (state.batch_size,), ROUTE_ACTION_HALT,
-                    dtype=torch.long, device=state.device)
-                step_logits = torch.zeros(
-                    (state.batch_size,), dtype=torch.float32,
-                    device=state.device)
-                if supports_route_actions:
-                    state.apply_route_actions(step_kinds, step_actions)
-                else:
-                    state.shortest_path_action(step_actions)
-                score_mask = torch.zeros_like(active)
-            elif supports_route_actions:
-                step_kinds, step_actions, step_logits, _ = \
-                    model.step_route_action(
-                        state,
-                        mask=ActionMask(halt=not (
-                            force_nonhalt_first_step and route_step_idx == 0
-                        ), trim_start=allow_trim, trim_end=allow_trim))
-                state.apply_route_actions(step_kinds, step_actions)
-                score_mask = active
-            else:
-                step_actions, step_logits, _ = model.step(state)
-                step_kinds = torch.full(
-                    (state.batch_size,), ROUTE_ACTION_EXTEND,
-                    dtype=torch.long, device=state.device)
-                step_kinds[step_actions[:, 0] < 0] = ROUTE_ACTION_HALT
-                state.shortest_path_action(step_actions)
-                score_mask = active
+            value_estimates.append(trajectory.values[0])
+            out = trajectory.outputs[0]
+            step_kinds, step_actions, step_logits = out.action.kind, out.action.indices, out.logp
+            score_mask = torch.zeros_like(active) if force_halt else active
             route_step_idx += 1
             selected_trim = _is_trim_action(step_kinds) & active
             trim_action_counts = trim_action_counts + selected_trim.long()
@@ -954,16 +921,10 @@ def _update_lc_improvement_cfg_ppo_from_rollout(
                 last_critic_values = cv
                 last_critic_targets = ct
 
-            if supports_route_actions:
-                _, _, new_logits, entropy = model.step_route_action(
-                    mb_states, actions=mb_actions,
-                    action_kinds=mb_action_kinds,
-                    mask=ActionMask(trim_start=mb_trim_allowed if mb_trim_allowed is not None
-                        else True, trim_end=mb_trim_allowed if mb_trim_allowed is not None
-                        else True))
-            else:
-                _, new_logits, entropy = model.step(
-                    mb_states, actions=mb_actions)
+            out = evaluate_action(model, mb_states, mb_actions, mb_action_kinds if supports_route_actions else None,
+                ActionMask(trim_start=mb_trim_allowed if mb_trim_allowed is not None else True,
+                           trim_end=mb_trim_allowed if mb_trim_allowed is not None else True))
+            new_logits, entropy = out.logp, out.entropy
 
             if mb_advantages.numel() > 1:
                 mb_advantages = (mb_advantages - mb_advantages.mean()) / \
@@ -1094,46 +1055,21 @@ def _collect_lc_improvement_cfg_d3po_rollout(
             active = ~done_before
             allow_trim = _trim_actions_allowed(
                 trim_action_counts, max_trim_actions_per_route)
-            state_for_buffer = state.snapshot_for_buffer(device=torch.device("cpu"))
-            _clear_state_lazy_tensors(state_for_buffer)
-            states.append(state_for_buffer)
-            value_estimates.append(value_module.from_state(state))
             preferences.append(_get_state_preferences(cost_obj, state).detach())
 
-            force_halt = max_route_edit_steps is not None and \
-                route_step_idx >= max_route_edit_steps
-            if force_halt:
-                step_actions = torch.full(
-                    (state.batch_size, 2), -1, dtype=torch.long,
-                    device=state.device)
-                step_kinds = torch.full(
-                    (state.batch_size,), ROUTE_ACTION_HALT,
-                    dtype=torch.long, device=state.device)
-                step_logits = torch.zeros(
-                    (state.batch_size,), dtype=torch.float32,
-                    device=state.device)
-                if supports_route_actions:
-                    state.apply_route_actions(step_kinds, step_actions)
-                else:
-                    state.shortest_path_action(step_actions)
-                score_mask = torch.zeros_like(active)
-            elif supports_route_actions:
-                step_kinds, step_actions, step_logits, _ = \
-                    model.step_route_action(
-                        state,
-                        mask=ActionMask(halt=not (
-                            force_nonhalt_first_step and route_step_idx == 0
-                        ), trim_start=allow_trim, trim_end=allow_trim))
-                state.apply_route_actions(step_kinds, step_actions)
-                score_mask = active
-            else:
-                step_actions, step_logits, _ = model.step(state)
-                step_kinds = torch.full(
-                    (state.batch_size,), ROUTE_ACTION_EXTEND,
-                    dtype=torch.long, device=state.device)
-                step_kinds[step_actions[:, 0] < 0] = ROUTE_ACTION_HALT
-                state.shortest_path_action(step_actions)
-                score_mask = active
+            force_halt = max_route_edit_steps is not None and route_step_idx >= max_route_edit_steps
+            env = bind_env(state, model, cost_obj, normalize=False,
+                max_route_edit_steps=0 if force_halt else None,
+                mask=ActionMask(halt=not (force_nonhalt_first_step and route_step_idx == 0),
+                                trim_start=allow_trim, trim_end=allow_trim))
+            trajectory = policy_rollout(env, model, max_steps=1, critic=value_module)
+            state_for_buffer = trajectory.states[0]
+            _clear_state_lazy_tensors(state_for_buffer)
+            states.append(state_for_buffer)
+            value_estimates.append(trajectory.values[0])
+            out = trajectory.outputs[0]
+            step_kinds, step_actions, step_logits = out.action.kind, out.action.indices, out.logp
+            score_mask = torch.zeros_like(active) if force_halt else active
             route_step_idx += 1
             selected_trim = _is_trim_action(step_kinds) & active
             trim_action_counts = trim_action_counts + selected_trim.long()
@@ -1271,17 +1207,13 @@ def _estimate_d3po_diversity_loss(
         preferences, sigma, enabled_mask=enabled_mask)
     target = alpha * (preferences - neighbor_preferences).abs().sum(dim=-1)
 
-    step_kwargs = dict(actions=actions, return_distribution=True)
-    if supports_route_actions:
-        step_kwargs.update(
-            action_kinds=action_kinds,
-            mask=ActionMask(trim_start=trim_allowed if trim_allowed is not None else True,
-                            trim_end=trim_allowed if trim_allowed is not None else True))
-        step = model.step_route_action
-    else:
-        step = model.step
+    mask = ActionMask(trim_start=trim_allowed if trim_allowed is not None else True,
+                      trim_end=trim_allowed if trim_allowed is not None else True)
+    def replay():
+        return evaluate_action(model, states, actions,
+            action_kinds if supports_route_actions else None, mask).log_probs
     if action_log_probs is None:
-        action_log_probs = step(states, **step_kwargs)[-1]
+        action_log_probs = replay()
 
     # In-place cost_weights swap instead of states.clone() to avoid
     # a full RouteGenBatchState deepcopy on GPU. cost_weights tensors
@@ -1292,7 +1224,7 @@ def _estimate_d3po_diversity_loss(
     states.set_cost_weights(
         _preference_dict_from_tensor(neighbor_preferences))
     try:
-        neighbor_log_probs = step(states, **step_kwargs)[-1]
+        neighbor_log_probs = replay()
     finally:
         states.set_cost_weights(saved_weights)
 
@@ -1413,19 +1345,11 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
                 last_critic_values = cv
                 last_critic_targets = ct
 
-            if supports_route_actions:
-                step_output = model.step_route_action(
-                    mb_states, actions=mb_actions,
-                    action_kinds=mb_action_kinds,
-                    mask=ActionMask(trim_start=mb_trim_allowed if mb_trim_allowed is not None
-                        else True, trim_end=mb_trim_allowed if mb_trim_allowed is not None
-                        else True), return_distribution=diversity_weight > 0)
-                _, _, new_logits, entropy = step_output[:4]
-            else:
-                step_output = model.step(
-                    mb_states, actions=mb_actions,
-                    return_distribution=diversity_weight > 0)
-                _, new_logits, entropy = step_output[:3]
+            out = evaluate_action(model, mb_states, mb_actions, mb_action_kinds if supports_route_actions else None,
+                ActionMask(trim_start=mb_trim_allowed if mb_trim_allowed is not None else True,
+                           trim_end=mb_trim_allowed if mb_trim_allowed is not None else True))
+            new_logits, entropy = out.logp, out.entropy
+            step_output = (out.log_probs,)
 
             if normalize_advantages_per_objective:
                 mb_advantages = _normalize_minibatch_advantages(
@@ -2059,7 +1983,7 @@ def train_lc_improvement_cfg_ppo(
                 seed_routes=(cur_seed_routes
                              if adjustment_condition_current else None),
                 gap=adjustment_degree_gap, mode=adjustment_degree_mode)
-        state = model.setup_planning(state)
+        normalize_nodes(state, model.node_norm, model.feature_set)
 
         prev_route_idx_holder[0] = route_idx
         prev_context_counts_holder[0] = state.n_finished_routes.detach().clone()
@@ -2523,7 +2447,7 @@ def train_lc_improvement_cfg_d3po(
             cost_obj, cur_graph_batch, cur_working_routes, route_idx,
             min_route_len, max_route_len, cur_cost_weights,
             invalid_directly_connected=invalid_directly_connected)
-        state = model.setup_planning(state)
+        normalize_nodes(state, model.node_norm, model.feature_set)
 
         prev_route_idx_holder[0] = route_idx
         prev_context_counts_holder[0] = state.n_finished_routes.detach().clone()

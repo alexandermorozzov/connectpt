@@ -8,7 +8,7 @@ from typing import Any
 from ..run.runs import ExperimentRun, RunArtifact
 
 
-def copytier_config(dg, data) -> "CopyTierConfig":
+def copytier_config(dg, data, policy_profile, policy_cost, policy_seed) -> "CopyTierConfig":
     """The dataset-generation config from the ``dataset_build`` and ``dataset``
     parameters."""
     from connectpt.routes_generator.run.context import DATASETS_DIR
@@ -25,7 +25,8 @@ def copytier_config(dg, data) -> "CopyTierConfig":
         target_n_routes=int(data.target_n_routes), min_route_len=int(data.min_route_len),
         max_route_len=int(data.max_route_len),
         lc_n_samples=int(dg.lc_n_samples), tier_cfg=COPY_TIER_CFG,
-        force_regen=dg.force_regen)
+        force_regen=dg.force_regen, policy_profile=policy_profile,
+        policy_cost=policy_cost, policy_seed=policy_seed)
 
 
 def _graph_tensors(g):
@@ -58,7 +59,10 @@ class CopyTierConfig:
     max_route_len: int
     lc_n_samples: int
     tier_cfg: dict
-    force_regen: bool = False
+    force_regen: bool
+    policy_profile: Any
+    policy_cost: Any
+    policy_seed: int
 
 
 def build_copytier_dataset(cfg: CopyTierConfig):
@@ -79,7 +83,13 @@ def build_copytier_dataset(cfg: CopyTierConfig):
     from tqdm.auto import tqdm
 
     from connectpt.routes_generator.city.synthetic import DynamicCityGraphDataset
-    from connectpt.routes_generator.lc_eval import build_lc_cfg, run_lc_batch
+    from torch_geometric.loader import DataLoader
+    from ..city.graph import to_batch
+    from ..env.state import RouteGenBatchState
+    from ..policy.build import load_policy
+    from ..policy.generate import generate
+    from ..policy.rollout import bind_env
+    from ..run.context import seed_everything
     from connectpt.routes_generator.run.artifacts import save_routes
     from connectpt.routes_generator.network.routes import to_routes
     from connectpt.routes_generator.network.corruption import count_changed_routes, inject_route_copies, redundancy_stats, uncovered_demand_pct
@@ -103,7 +113,7 @@ def build_copytier_dataset(cfg: CopyTierConfig):
         # --- batched learned construction on the GPU --------------------------
         # Group graphs by LC objective combo (one cfg / one set of cost weights
         # per combo), then construct each group in GPU batches of LC_GEN_BATCH
-        # via run_lc_batch (one forward per batch) instead of one graph at a
+        # via generate (one forward per batch) instead of one graph at a
         # time -- this is what actually keeps the GPU busy during dataset gen.
         LC_GEN_BATCH = 64 if torch.cuda.is_available() else 8
         lc_routes = [None] * cfg.n_graphs
@@ -111,17 +121,19 @@ def build_copytier_dataset(cfg: CopyTierConfig):
             combo_idxs = [gi for gi in range(cfg.n_graphs) if gi % len(cfg.lc_combos) == _ci]
             if not combo_idxs:
                 continue
-            c = build_lc_cfg(run_name=f"copy_cur_{ctag}", n_routes=cfg.target_n_routes,
-                             min_route_len=cfg.min_route_len, max_route_len=cfg.max_route_len,
-                             demand_time_weight=d, route_time_weight=rt,
-                             median_connectivity_weight=cn)
+            cost = cfg.policy_cost.with_params(demand_time_weight=d, route_time_weight=rt,
+                                              median_connectivity_weight=cn)
             for _s in tqdm(range(0, len(combo_idxs), LC_GEN_BATCH),
                            desc=f"LC construct [{ctag}]"):
                 chunk = combo_idxs[_s:_s + LC_GEN_BATCH]
-                routes_b = run_lc_batch(
-                    c, [tensors_all[gi] for gi in chunk],
-                    run_name_prefix="copy_cur_", n_samples=cfg.lc_n_samples,
-                    batch_size=len(chunk))
+                seed_everything(cfg.policy_seed)
+                policy = load_policy(cfg.policy_profile)
+                graphs = [to_batch(tensors_all[gi]).to_data_list()[0] for gi in chunk]
+                data = next(iter(DataLoader(graphs, batch_size=len(chunk)))).to(cfg.policy_profile.device)
+                state = RouteGenBatchState(data, cost.constants, cfg.target_n_routes,
+                    cfg.min_route_len, cfg.max_route_len, preferences=cost.get_weights())
+                routes_b = generate(bind_env(state, policy, cost, normalize=False), policy,
+                    "sample", cfg.lc_n_samples, sample_batch_size=len(chunk))
                 for _j, gi in enumerate(chunk):
                     lc_routes[gi] = routes_b[_j]
 
@@ -183,8 +195,13 @@ class DatasetPreparationRun(ExperimentRun):
 
         cfg = self.cfg
         self.run_params = params(RunParams, cfg.run)
+        from ..run.policy import PolicyRun
+        from ..run.config import compose_policy_config
+        from ..run.context import resolve_device
+        policy_run = PolicyRun(compose_policy_config(), resolve_device())
+        policy_run.setup()
         self.dataset = copytier_config(params(DatasetBuildParams, cfg.dataset_build),
-                                       params(EditDatasetParams, cfg.dataset))
+            params(EditDatasetParams, cfg.dataset), policy_run.profile, policy_run.cost, policy_run.seed)
         self.run_dir = resolve_under_root(params(OutputPaths, cfg.paths).output_dir)
 
     def _artifact(self, seconds, dry_run):

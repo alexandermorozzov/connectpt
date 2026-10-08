@@ -29,6 +29,5 @@ model:
     kwargs:
       serial_halting: true
       allow_trim_below_min: true
-      n_adjustment_cond_feats: 0
 
 logger_list: [tensorboard, csv]

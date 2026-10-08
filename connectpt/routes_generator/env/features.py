@@ -277,6 +277,7 @@ class Observation:
     total_leg_use_count: Tensor
     trim_start: tuple
     trim_end: tuple
+    encoding: tuple | None = None
 
     def is_done(self):
         return self.done

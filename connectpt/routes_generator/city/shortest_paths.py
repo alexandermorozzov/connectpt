@@ -17,6 +17,9 @@
 
 
 """All-pairs shortest paths of a street graph and aggregation along them."""
+from itertools import count
+from heapq import heappush, heappop
+import networkx as nx
 import torch
 
 from ..common.tensors import get_variable_slice_mask
@@ -352,3 +355,120 @@ def get_path_edge_index(path, get_dense_edges=True, device=None):
         from_indices = path[:-1]
         to_indices = path[1:]
         return torch.tensor([from_indices, to_indices], dtype=int)
+
+
+def yen_k_shortest_paths(graph, source, target, kk=1, weight='weight'):
+    """Returns the k-shortest paths from source to target in a weighted graph G.
+
+    Parameters
+    ----------
+    G : NetworkX graph
+
+    source : node
+       Starting node
+
+    target : node
+       Ending node
+
+    k : integer, optional (default=1)
+        The number of shortest paths to find
+
+    weight: string, optional (default='weight')
+       Edge data key corresponding to the edge weight
+
+    Returns
+    -------
+    lengths, paths : lists
+       Returns a tuple with two lists.
+       The first list stores the length of each k-shortest path.
+       The second list stores each k-shortest path.
+
+    Raises
+    ------
+    NetworkXNoPath
+       If no path exists between source and target.
+
+    Examples
+    --------
+    >>> G=nx.complete_graph(5)
+    >>> print(k_shortest_paths(G, 0, 4, 4))
+    ([1, 2, 2, 2], [[0, 4], [0, 1, 4], [0, 2, 4], [0, 3, 4]])
+
+    Notes
+    ------
+    Edge weight attributes must be numerical and non-negative.
+    Distances are calculated as sums of weighted edges traversed.
+
+    """
+    if source == target:
+        return [[source]]
+
+    length, path = nx.single_source_dijkstra(graph, source, target, weight=weight)
+
+    lengths = [length]
+    paths = [path]
+    cc = count()
+    BB = []
+    G_original = graph.copy()
+
+    for _ in range(1, kk):
+        for jj in range(len(paths[-1]) - 1):
+            spur_node = paths[-1][jj]
+            root_path = paths[-1][:jj + 1]
+
+            edges_removed = []
+            for c_path in paths:
+                if len(c_path) > jj and root_path == c_path[:jj + 1]:
+                    uu = c_path[jj]
+                    vv = c_path[jj + 1]
+                    if graph.has_edge(uu, vv):
+                        edge_attr = graph[uu][vv]
+                        graph.remove_edge(uu, vv)
+                        edges_removed.append((uu, vv, edge_attr))
+
+            for n in range(len(root_path) - 1):
+                node = root_path[n]
+                # out-edges
+                node_edges = list(graph.edges(node, data=True))
+                for uu, vv, edge_attr in node_edges:
+                    graph.remove_edge(uu, vv)
+                    edges_removed.append((uu, vv, edge_attr))
+
+                if graph.is_directed():
+                    # in-edges
+                    for uu, vv, edge_attr in graph.in_edges_iter(node, data=True):
+                        graph.remove_edge(uu, vv)
+                        edges_removed.append((uu, vv, edge_attr))
+
+            try:
+                spur_path_length, spur_path = nx.single_source_dijkstra(graph,
+                    spur_node, target, weight=weight)
+                total_path = root_path[:-1] + spur_path
+                total_path_length = get_path_length(G_original, root_path, weight) + spur_path_length
+                heappush(BB, (total_path_length, next(cc), total_path))
+            except nx.NetworkXNoPath:
+                pass
+
+            for e in edges_removed:
+                uu, vv, edge_attr = e
+                graph.add_edge(uu, vv, **edge_attr)
+
+        if BB:
+            (ll, _, pp) = heappop(BB)
+            lengths.append(ll)
+            paths.append(pp)
+        else:
+            break
+
+    return paths
+
+def get_path_length(G, path, weight='weight'):
+    length = 0
+    if len(path) > 1:
+        for i in range(len(path) - 1):
+            u = path[i]
+            v = path[i + 1]
+
+            length += G[u][v].get(weight, 1)
+
+    return length

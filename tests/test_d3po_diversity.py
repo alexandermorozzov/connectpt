@@ -2,7 +2,7 @@ import torch
 import pytest
 
 from connectpt.routes_generator import improvement_learning as learning
-from connectpt.routes_generator.models import (
+from connectpt.routes_generator.policy.models import (
     TORCH_FMIN, _joint_route_action_log_probs,
 )
 
@@ -58,11 +58,13 @@ def test_diversity_squares_full_kl_and_is_independent_of_replayed_action(monkeyp
         def set_cost_weights(self, weights):
             self.cost_weights = weights
 
+    from types import SimpleNamespace
+    def replay(model, state, actions, kinds=None, mask=None):
+        probs = p if state.cost_weights['demand_time_weight'][0] < .5 else q
+        return SimpleNamespace(log_probs=probs.log())
+    monkeypatch.setattr(learning, "evaluate_action", replay)
     class Model:
-        def step(self, state, actions, return_distribution=False):
-            probs = p if state.cost_weights['demand_time_weight'][0] < .5 else q
-            logp = probs.log()
-            return actions, logp.gather(1, actions).squeeze(1), torch.zeros(1), logp
+        pass
 
     state = State()
     original = {k: v.clone() for k, v in state.cost_weights.items()}

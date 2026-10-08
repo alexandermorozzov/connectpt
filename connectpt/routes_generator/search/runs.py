@@ -30,7 +30,8 @@ from ..run.schemas import (AdjustmentParams, InstanceParams, SearchPaths, Search
                            SweepParams, params)
 from ..city.instances import load_instance
 from ..objectives.metrics import full_metric_row, select_metrics
-from ..model_factory import RouteModelFactory
+from ..policy.build import ModelProfileParams, load_policy
+from ..run.config import compose_policy_model, policy_profile
 from ..objectives.cost import build_cost
 from .bee_colony_runner import BeeColonyRunner
 from .bee_specs import parse_bee_specs
@@ -48,11 +49,6 @@ class SearchArtifact(RunArtifact):
 
 
 class BeeColonySearchRun(ExperimentRun):
-    _ROLE_BUILDER = {
-        "construction": RouteModelFactory.build_construction_model_by_name,
-        "edit": RouteModelFactory.build_edit_model_by_name,
-    }
-
     def setup(self) -> None:
         cfg = self.cfg
         self.run_params = params(SearchRunParams, cfg.run)
@@ -66,7 +62,8 @@ class BeeColonySearchRun(ExperimentRun):
         device = self.context.device
 
         # cost: the /cost group this run composed (single source).
-        self.cost_obj = build_cost(cfg.cost)
+        self.cost_obj = build_cost(cfg.cost, symmetric_routes=cfg.experiment.symmetric_routes,
+                                   low_memory_mode=cfg.experiment.low_memory_mode)
         self.cost_obj.to(device)
 
         # models: build (role-checked) + strict-load the checkpoint into the class
@@ -75,11 +72,12 @@ class BeeColonySearchRun(ExperimentRun):
             m_cfg = cfg.models.get(role)
             if m_cfg is None:
                 continue
-            model = self._ROLE_BUILDER[role](m_cfg.config)
-            CheckpointStore.load_model_weights(
-                model, resolve_weights_path(m_cfg.checkpoint_path, self.paths.weights_dir),
-                strict=True, map_location=device)
-            model.to(device)
+            profile = ModelProfileParams(**m_cfg)
+            model = load_policy(policy_profile(compose_policy_model(profile.config), cfg.cost,
+                cfg.experiment, device, checkpoint_path=resolve_weights_path(
+                    profile.checkpoint_path, self.paths.weights_dir)))
+            if model.action_spec.role != role:
+                raise ValueError(f"profile for {role} has actions {model.action_spec}")
             self.models[role] = model
 
         self.policies = build_policies(self.models)

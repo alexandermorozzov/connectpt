@@ -1,3 +1,5 @@
+from .env.construction import normalize_nodes
+from .training.replay import evaluate_action
 from .run.checkpoints import CheckpointStore
 from .env.features import global_state_features, critic_inputs, PREFERENCE_KEYS
 import copy
@@ -12,17 +14,17 @@ from .city.instances import load_instance
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Batch
 import numpy as np
-from omegaconf import DictConfig, OmegaConf
-import hydra
+from omegaconf import DictConfig
 
-from .city.graph import to_batch, STOP_KEY, DEMAND_KEY
+from .city.graph import to_batch
 from .city.synthetic import CityGraphDataset, get_default_train_and_eval_split, get_dynamic_training_set
 from .objectives.preferences import COST_WEIGHT_KEY_ORDER
 from .env.actions import ROUTE_ACTION_EXTEND
 from .env.state import RouteGenBatchState
-from . import utils as lrnu
-from .models import FeatureNorm, get_mlp, DEFAULT_PREFERENCE_GOALS
-from .eval_route_generator import eval_model
+from .policy.models import FeatureNorm, get_mlp, DEFAULT_PREFERENCE_GOALS
+from .policy.generate import evaluate_policy
+from .policy.rollout import bind_env, rollout as policy_rollout
+from .env.features import observe
 from .run.logger import log as log_metrics
 from .training.records import (ConstructionRolloutRecord, ConstructionTrainRecord,
                                DataCounts, ValidationRecord)
@@ -199,7 +201,7 @@ class NNBaseline:
     
     def _features_from_state(self, state):
         if self._shared_critic:
-            return self.actor_model.get_critic_features(state)
+            return self.actor_model.get_critic_features(observe(state, self.actor_model.feature_set, allow_below_min=self.actor_model.allow_trim_below_min if self.actor_model.action_spec.role == "edit" else False))
         input_data = self.inputs_from_data(state.graph_data,
                                            state.cost_weights)
         glob_feats = global_state_features(state,
@@ -233,9 +235,14 @@ def eval_model_over_nroutes(model, eval_dl, n_routes_range, eval_cfg, cost_obj,
     cached_eval_n_routes = eval_cfg.get('n_routes', None)
     for n_routes in n_routes_range:
         eval_cfg.n_routes = n_routes
-        mean_cost, metrics = \
-            eval_model(model, eval_dl, eval_cfg, cost_obj, silent=silent, 
-                       n_samples=n_samples, device=device if device is not None else next(model.parameters()).device)
+        first_graph = eval_dl.dataset[0]
+        target_device = next(model.parameters()).device if device is None else device
+        template = RouteGenBatchState(to_batch(first_graph, target_device), cost_obj.constants,
+            n_routes, eval_cfg.min_route_len, eval_cfg.max_route_len, preferences=cost_obj.get_weights())
+        env = bind_env(template, model, cost_obj, normalize=False)
+        metrics, _ = evaluate_policy(env, model, eval_dl, cost_obj.get_weights(),
+            "greedy" if n_samples is None else "sample", 1 if n_samples is None else n_samples)
+        mean_cost = metrics["cost"].mean()
         eval_costs.append(mean_cost)
 
         if all_metrics is None:
@@ -381,7 +388,7 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
                                        cfg.eval.min_route_len,
                                        cfg.eval.max_route_len,
                                        preferences=cost_weights)
-            state = model.setup_planning(state)
+            normalize_nodes(state, model.node_norm, model.feature_set)
             ep_finished = state.is_done()
             # A new graph batch starts new episodes; keep these across rollouts
             # only while the current batch is retained.
@@ -418,21 +425,14 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
         # roll out the specified number of steps
         with torch.no_grad():    
             for tt in range(horizon):
-                val_ests = val_module.from_state(state)
-                buf_val_ests[tt] = val_ests
-                buf_states.append(state.clone().to_device('cpu'))
-                if supports_route_actions:
-                    action_kinds, actions, logits, _ = \
-                        model.step_route_action(state)
-                    buf_action_kinds[tt] = action_kinds
-                else:
-                    actions, logits, _ = model.step(state)
+                env = bind_env(state, model, cost_obj, normalize=False)
+                trajectory = policy_rollout(env, model, max_steps=1, critic=val_module)
+                buf_val_ests[tt] = trajectory.values[0]
+                buf_states.append(trajectory.states[0])
+                out = trajectory.outputs[0]
+                actions, logits = out.action.indices, out.logp
+                buf_action_kinds[tt] = out.action.kind
                 buf_actions[tt] = actions
-                # update the states with the actions
-                if supports_route_actions:
-                    state.apply_route_actions(action_kinds, actions)
-                else:
-                    state.shortest_path_action(actions)
                 done = state.is_done().clone()
                 done_at_step_mask[tt] = done
     
@@ -563,13 +563,10 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
                 critic_values.append(value_stats['values'])
                 critic_targets.append(value_stats['targets'])
 
-                # step model forward
-                if supports_route_actions:
-                    _, _, logits, entropy = model.step_route_action(
-                        mb_states, actions=mb_acts, action_kinds=mb_action_kinds)
-                else:
-                    _, logits, entropy = model.step(mb_states, actions=mb_acts)
-            
+                out = evaluate_action(model, mb_states, mb_acts,
+                    mb_action_kinds if supports_route_actions else None)
+                logits, entropy = out.logp, out.entropy
+
                 # normalize advantages by the minibatch statistics
                 mb_advs = _normalize_minibatch_advantages(mb_advs)
 
@@ -675,9 +672,8 @@ def setup_and_train(cfg: DictConfig, *,
                     model=None, cost_obj=None, device=None, run_name=None,
                     logger_list=(), output_dir=None, iteration_callback=None,
                     return_training_result=False):
-    if model is None:
-        device, run_name, _, cost_obj, model = \
-            lrnu.process_standard_experiment_cfg(cfg, 'inductive_')
+    if model is None or cost_obj is None or device is None:
+        raise ValueError("setup_and_train requires a policy, cost and device from Run.setup")
     # model always has legal route lengths by construction, so we don't need
      # to penalize it for illegal routes
 

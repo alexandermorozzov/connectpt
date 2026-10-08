@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import torch
 
-from .actions import ActionSpec, RouteAction
+from .actions import ActionSpec, RouteAction, ROUTE_ACTION_HALT
 from .features import FeatureParams, observe, select_features, NODE_COLUMNS
 from .masks import ActionMask
 from .state import RouteGenBatchState
@@ -46,8 +46,9 @@ class ConstructionEnv:
         self.state = None
         self.steps = 0
         self.result = None
+        self.mask_override = None
 
-    def reset(self, graphs, preferences, seed_networks=None):
+    def reset(self, graphs, preferences, seed_networks=None, *, normalize=True):
         self.state = RouteGenBatchState(
             to_batch(graphs),
             self.cost.constants,
@@ -58,16 +59,21 @@ class ConstructionEnv:
         )
         if seed_networks is not None:
             self.state.add_new_routes(to_routes(seed_networks).to(self.state.device))
-        return self.bind(self.state)
+        return self.bind(self.state, normalize=normalize)
 
-    def bind(self, state, *, normalize=True):
+    def bind(self, state, *, normalize=True, single_route=False):
         self.state = state
         self.state.set_redundancy_feature_mode(self.feature_set.redundancy)
         if normalize:
             normalize_nodes(state, self.node_normalizer, self.feature_set)
         self.steps = 0
+        self.single_route = single_route
+        self.ended = torch.zeros(state.batch_size, dtype=torch.bool, device=state.device)
         self.result = self.cost(state)
         return self.observe(state)
+
+    def is_done(self):
+        return self.ended if self.single_route else self.state.is_done()
 
     def observe(self, state=None):
         state = self.state if state is None else state
@@ -75,7 +81,7 @@ class ConstructionEnv:
         return obs, self.action_mask(state)
 
     def action_mask(self, state):
-        return ActionMask(extend=True, trim_start=False, trim_end=False, halt=True)
+        return self.mask_override if self.mask_override is not None else ActionMask(extend=True, trim_start=False, trim_end=False, halt=True)
 
     def forced_halt(self):
         return False
@@ -88,12 +94,13 @@ class ConstructionEnv:
         return torch.cat((result.penalties[:, :2], zeros), dim=-1)
 
     def step(self, action: RouteAction):
-        active = ~self.state.is_done()
+        active = ~self.is_done()
         previous = self.result
         self._apply(action)
+        self.ended |= action.kind == ROUTE_ACTION_HALT
         self.steps += 1
         self.result = self.cost(self.state)
-        done = self.state.is_done()
+        done = self.is_done()
         if self.params.diff_reward:
             goals = previous.goals - self.result.goals
             penalties = self._penalties(previous) - self._penalties(self.result)

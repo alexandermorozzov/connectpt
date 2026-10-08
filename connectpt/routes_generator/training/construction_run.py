@@ -9,7 +9,8 @@ from ..run.logger import flush
 from ..run.context import resolve_weights_path, resolve_under_root
 from ..run.context import RunContext
 from ..run.schemas import ConstructionDatasetParams, TrainingPaths, TrainingRunParams, params
-from ..model_factory import RouteModelFactory
+from ..policy.build import load_policy
+from ..run.config import policy_profile
 from ..objectives.cost import build_cost
 from .runs import ExperimentRun, TrainingArtifact
 
@@ -26,7 +27,9 @@ class ConstructionTrainingRun(ExperimentRun):
                                          seed=run.seed, cpu=run.cpu)
         device = self.context.device
 
-        self.model = RouteModelFactory.build_construction_model(cfg.model, cfg.experiment)
+        self.model = load_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, device))
+        from ..env.actions import ActionSpec
+        ActionSpec("construction").validate(self.model.action_spec)
         self.model.to(device)
 
         if self.paths.init_checkpoint_path:
@@ -38,6 +41,7 @@ class ConstructionTrainingRun(ExperimentRun):
         self.cost_obj = build_cost(
             cfg.cost,
             symmetric_routes=bool(cfg.experiment.symmetric_routes),
+            low_memory_mode=cfg.experiment.low_memory_mode,
         )
         self.cost_obj.to(device)
         self.run_dir = self.context.output_dir

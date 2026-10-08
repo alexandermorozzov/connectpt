@@ -11,7 +11,8 @@ from torch_geometric.loader import DataLoader
 
 from ..run.artifacts import ArtifactStore
 from ..run.logger import flush, log
-from ..eval_route_generator import eval_model
+from ..policy.generate import evaluate_policy
+from ..policy.rollout import bind_env
 from ..env.state import RouteGenBatchState
 from ..objectives.pareto import canonical_network, summarize_evaluation
 from .records import ParetoRecord
@@ -36,13 +37,13 @@ def evaluate_test(model, data, cfg, cost, output, device, *, checkpoint='last',
                 torch.manual_seed(int(cfg.evaluation.seed) + pref_idx * 1000 + sample)
                 for start in range(0, len(data), int(cfg.batch_size)):
                     chunk = [data[i] for i in range(start, min(start + int(cfg.batch_size), len(data)))]
-                    # Reuse the original evaluator. Repeated n_samples=1 gives
-                    # independent draws without the multi-sample state slicing
-                    # limitation in sample_from_model; no best-of-N selection.
                     loader = DataLoader(chunk, batch_size=int(cfg.batch_size))
-                    _, _, _, routes = eval_model(model, loader, cfg.eval, fixed_cost,
-                        n_samples=None if mode == 'greedy' else 1,
-                        return_routes=True, silent=True, device=device)
+                    template = RouteGenBatchState(Batch.from_data_list(chunk).to(device), fixed_cost.constants,
+                        int(cfg.eval.n_routes), int(cfg.eval.min_route_len), int(cfg.eval.max_route_len),
+                        preferences=fixed_cost.get_weights())
+                    env = bind_env(template, model, fixed_cost, normalize=False)
+                    _, routes = evaluate_policy(env, model, loader, fixed_cost.get_weights(),
+                        "greedy" if mode == "greedy" else "sample", 1)
                     state = RouteGenBatchState(Batch.from_data_list(chunk).to(device), fixed_cost.constants,
                         int(cfg.eval.n_routes), int(cfg.eval.min_route_len), int(cfg.eval.max_route_len), preferences=fixed_cost.get_weights())
                     state.add_new_routes(routes.to(device))

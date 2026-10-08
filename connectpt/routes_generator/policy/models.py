@@ -1,7 +1,4 @@
 from connectpt.routes_generator.env.features import aggr_edges_over_sequences
-import sys
-import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 
 import copy
@@ -12,23 +9,24 @@ from collections import namedtuple
 import numpy as np
 import torch
 from torch import nn
-from torch_geometric.data import Batch, Data
+from torch_geometric.data import Batch
 from torch_geometric.nn import (GATv2Conv, GCNConv, MessagePassing, SGConv,
                                 BatchNorm, GraphNorm)
-from .city.shortest_paths import reconstruct_all_paths
-from .common.tensors import (get_update_at_mask,
+from ..city.shortest_paths import reconstruct_all_paths
+from ..common.tensors import (get_update_at_mask,
                              get_variable_slice_mask)
-from .network.routes import to_routes
+from ..network.routes import to_routes
 from .trunc_normal import TruncatedNormal
 
-from .city.graph import DEMAND_KEY, ROUTE_KEY
-from .env.features import halt_features, finite_time_features, extend_features, observe, dims as feature_dims, PREFERENCE_KEYS, global_state_features, pair_features, trim_candidate_features
-from .env.masks import (ActionMask, mask_action_family, set_invalid_scores_to_fmin,
+from ..city.graph import DEMAND_KEY, ROUTE_KEY
+from ..env.features import halt_features, finite_time_features, extend_features, Observation, dims as feature_dims, PREFERENCE_KEYS, global_state_features, pair_features, trim_candidate_features
+from ..env.masks import (mask_action_family, set_invalid_scores_to_fmin,
                         path_mask, extension_mask, construction_halt_scores, edit_halt_scores,
                         trim_coverage_mask, TORCH_FMIN, TORCH_FMAX)
-from .env.actions import ROUTE_ACTION_EXTEND, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_TRIM_START
-from .env.state import RouteGenBatchState
-from .env.actions import ActionSpec
+from ..env.actions import ROUTE_ACTION_EXTEND, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_TRIM_START
+from ..env.state import RouteGenBatchState
+from ..env.actions import ActionSpec, RouteAction
+from .output import PolicyOut
 
 Q_FUNC_MODE = "q function"
 PLCY_MODE = "policy"
@@ -983,7 +981,7 @@ class RouteGeneratorBase(nn.Module):
 
     def setup_planning(self, state):         
         # apply normalization to input features
-        from .env.construction import normalize_nodes
+        from ..env.construction import normalize_nodes
         normalize_nodes(state, self.node_norm, self.feature_set)
         return state
 
@@ -1162,7 +1160,6 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
                  halt_scorer_type='endpoints', n_halt_layers=3, n_halt_heads=4,
                  force_linking_unlinked=False, logit_clip=None,
                  serial_halting=True, max_act_len=None,
-                 n_adjustment_cond_feats=0,
                  use_redundancy_features=False, feature_norm_unbiased=False, **kwargs):
         """Generates routes by combining shortest paths.
 
@@ -1204,6 +1201,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
         assert self.only_routes_with_demand_are_valid is False, 'not supported'
         self.force_linking_unlinked = force_linking_unlinked
+        self.route_step_counts_log = []
 
         # Gated adjustment conditioning: when > 0, get_global_state_features
         # appends this many extra features (target + normalized weight), so the
@@ -1262,119 +1260,36 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         #                                 self.dropout, n_halt_layers)
 
     def clear_step_counts_log(self):
-        """Reset the per-route step-count log accumulated by forward/plan_new_route."""
+        """Clear the route step counts accumulated by rollout."""
         self.route_step_counts_log = []
 
     def _log_step_counts(self, counts: list):
-        if not hasattr(self, 'route_step_counts_log'):
-            self.route_step_counts_log = []
         self.route_step_counts_log.extend(counts)
 
-    def forward(self, state: RouteGenBatchState, greedy=False):
-        # do a full rollout
-        state = self.setup_planning(state)
+    def act(self, obs, mask, greedy=False):
+        if not isinstance(obs, Observation):
+            raise TypeError("policy execution requires an Observation")
+        return self._action_output(obs, mask, greedy, None)
 
-        log.debug("starting route-generation loop")
-        all_logits = []
-        all_entropy = 0
+    def forward(self, obs, mask, greedy=False):
+        return self.act(obs, mask, greedy)
 
-        # Track GNN calls per route using element 0 of the batch as the
-        # representative sample (works for any batch size).
-        _route_steps = []
-        _cur_steps = 0
-        _prev_n_finished = int(state.n_finished_routes[0].item())
+    def evaluate(self, obs, mask, action):
+        if not isinstance(obs, Observation):
+            raise TypeError("policy execution requires an Observation")
+        return self._action_output(obs, mask, False, action)
 
-        while not state.is_done().all():
-            action, logits, entropy = self.step(state, greedy)
-            # if the action is to add stops, the state must not be done
-            assert not state.is_done()[action[:, 0] > -1].any(), \
-                "non-null action when state is done!"
-            state.shortest_path_action(action)
+    def _action_output(self, obs, mask, greedy, action):
+        indices, logp, entropy, log_probs = self._decode(
+            obs, greedy, None if action is None else action.indices,
+            obs.encoding, mask=mask)
+        kind = torch.where(indices[:, 0] < 0, ROUTE_ACTION_HALT, ROUTE_ACTION_EXTEND)
+        return PolicyOut(RouteAction(kind, indices), logp, entropy, log_probs.exp())
 
-            all_logits.append(logits)
-            all_entropy += entropy
 
-            _cur_steps += 1
-            _new_n = int(state.n_finished_routes[0].item())
-            while _new_n > _prev_n_finished:
-                _route_steps.append(_cur_steps)
-                _cur_steps = 0
-                _prev_n_finished += 1
 
-        self._log_step_counts(_route_steps)
-
-        routes_tensor = to_routes(state.routes).to(state.device)
-        if len(all_logits) == 0:
-            logits = torch.empty((state.batch_size, 0), device=state.device)
-            entropy = torch.zeros((state.batch_size,), device=state.device)
-        else:
-            logits = torch.stack(all_logits, dim=1)
-        result = PlanResults(
-            state=state, stop_logits=None,
-            route_logits=logits, freq_logits=None, entropy=entropy, 
-            stops_tensor=None, routes_tensor=routes_tensor, freqs_tensor=None, 
-            stop_est_vals=None, route_est_vals=None, freq_est_vals=None
-        )
-        return result
-    
-    def plan_new_route(self, state: RouteGenBatchState, greedy=False, 
-                       actions=None):
-        state = self.setup_planning(state)
-        # generate the input batch
-        encoding = self._encode_graph(state)
-        init_n_routes = state.n_finished_routes
-
-        # while not all routes are done,
-        ext_actions_given = actions is not None
-        if not ext_actions_given:
-            actions = []
-        ended = torch.zeros((state.batch_size,), dtype=torch.bool,
-                            device=state.device)
-        all_logits = 0
-        all_entropy = 0.0
-        _plan_steps_0 = 0   # GNN calls until element-0's route halts
-        _elem0_done = False
-        while not ended.all():
-            # call step, passing in the input batch
-            if ext_actions_given:
-                # take the next action from the sequence
-                action = actions[:, 0]
-                actions = actions[:, 1:]
-            else:
-                action = None
-            action, logits, entropy = self.step(state, greedy, action,
-                                                encoding)
-
-            # sum the logits and entropy where a real action was taken
-            all_logits += logits * (~ended)
-            all_entropy += entropy * (~ended)
-            # update endedness
-            just_ended = action[:, 0] == -1
-            ended = ended | just_ended
-            # set the action to -1 if the route is already done
-            action[ended] = -1
-
-            # apply the action to the state
-            state.shortest_path_action(action)
-
-            if not _elem0_done:
-                _plan_steps_0 += 1
-                if just_ended[0]:
-                    _elem0_done = True
-
-            if not ext_actions_given:
-                # append the action to the collection
-                actions.append(action)
-
-        # log step count for the route just planned (element 0)
-        if not ext_actions_given:
-            self._log_step_counts([_plan_steps_0])
-            actions = torch.stack(actions, dim=1)
-
-        return actions, all_logits, all_entropy
-
-    def step(self, state: RouteGenBatchState, greedy=False, actions=None,
-             precalc_data=None, mask=None, return_distribution=False):
+    def _decode(self, state, greedy=False, actions=None,
+             precalc_data=None, *, mask):
         """Take an action for the given state.
         actions -- a batch_size x 2 tensor of predetermined actions to take. If
             None, the actions will be chosen by the model.  If the value is 
@@ -1383,8 +1298,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             add.
         """
         log.debug("stepping")
-        state = observe(state, self.feature_set, allow_below_min=getattr(self, "allow_trim_below_min", False))
-        mask = ActionMask() if mask is None else mask
+        if not isinstance(state, Observation):
+            raise TypeError("policy execution requires an Observation")
 
         if precalc_data is None:
             node_descs, node_pad_mask, np_embeds, path_scores = \
@@ -1439,15 +1354,14 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         start_scores = self._update_path_scores(state, path_scores, path_lens,
                                                 state.drive_times,
                                                 candidate_paths=path_seqs)
-        if return_distribution:
-            # The conditional continue branch must not depend on the replayed
-            # action: a sampled halt still needs every extension in its KL.
-            continuing = (~starting & ~old_route_is_done)[:, None, None]
-            all_scores = torch.where(continuing, ext_scores, start_scores)
-            all_valid = torch.where(continuing, ext_valid, ~paths_are_invalid)
-            action_log_probs = _joint_route_action_log_probs(
-                all_scores.flatten(1), all_valid.flatten(1), halt_scores,
-                self.serial_halting, self.temperature, old_route_is_done)
+        # The conditional continue branch must not depend on the replayed
+        # action: a sampled halt still needs every extension in its KL.
+        continuing = (~starting & ~old_route_is_done)[:, None, None]
+        all_scores = torch.where(continuing, ext_scores, start_scores)
+        all_valid = torch.where(continuing, ext_valid, ~paths_are_invalid)
+        action_log_probs = _joint_route_action_log_probs(
+            all_scores.flatten(1), all_valid.flatten(1), halt_scores,
+            self.serial_halting, self.temperature, old_route_is_done)
 
         route_is_done = old_route_is_done
         if self.serial_halting:
@@ -1529,12 +1443,11 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         # if (is_halt & badlen).any():
         #     log.warning("Halting a route that's too short!")
 
-        if return_distribution:
-            return folded_idxs, logits, entropy, action_log_probs
-        return folded_idxs, logits, entropy
+        return folded_idxs, logits, entropy, action_log_probs
 
     def _encode_graph(self, state: RouteGenBatchState):
-        state = observe(state, self.feature_set, allow_below_min=getattr(self, "allow_trim_below_min", False))
+        if not isinstance(state, Observation):
+            raise TypeError("policy execution requires an Observation")
         # assemble route data objects
         input_batch = copy.copy(state.graph_data)
         input_batch.x = state.norm_node_features
@@ -1600,7 +1513,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         rich state representation the actor sees, without destabilizing
         the policy via mixed value/policy gradients.
         """
-        state = observe(state, self.feature_set, allow_below_min=getattr(self, "allow_trim_below_min", False))
+        if not isinstance(state, Observation):
+            raise TypeError("policy execution requires an Observation")
         with torch.no_grad():
             node_descs, node_pad_mask, _, _ = self._encode_graph(state)
         node_descs = node_descs.detach()
@@ -1803,6 +1717,14 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
     supports_trim_actions = True
     action_spec = ActionSpec("edit")
 
+    def _action_output(self, obs, mask, greedy, action):
+        kind, indices, logp, entropy, log_probs = self._decode_actions(
+            obs, greedy, None if action is None else action.indices,
+            obs.encoding, None if action is None else action.kind,
+            mask=mask)
+        return PolicyOut(RouteAction(kind, indices), logp, entropy, log_probs.exp())
+
+
     def __init__(self, *args, n_trim_scorer_layers=3,
                  trim_scorer_hidden_dim=16,
                  forbid_halt_when_overlong=False,
@@ -1834,182 +1756,16 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                     in_dim=trim_scorer_indim, out_dim=1)
         )
 
-    def forward(self, state: RouteGenBatchState, greedy=False):
-        state = self.setup_planning(state)
 
-        log.debug("starting trim route-generation loop")
-        all_logits = []
-        all_entropy = 0
-        _route_steps = []
-        _cur_steps = 0
-        _prev_n_finished = int(state.n_finished_routes[0].item())
 
-        while not state.is_done().all():
-            action_kinds, action, logits, entropy = \
-                self.step_route_action(state, greedy)
-            assert not state.is_done()[action_kinds != ROUTE_ACTION_HALT].any(), \
-                "non-null action when state is done!"
-            state.apply_route_actions(action_kinds, action)
 
-            all_logits.append(logits)
-            all_entropy += entropy
-
-            _cur_steps += 1
-            _new_n = int(state.n_finished_routes[0].item())
-            while _new_n > _prev_n_finished:
-                _route_steps.append(_cur_steps)
-                _cur_steps = 0
-                _prev_n_finished += 1
-
-        self._log_step_counts(_route_steps)
-
-        routes_tensor = to_routes(state.routes).to(state.device)
-        if len(all_logits) == 0:
-            logits = torch.empty((state.batch_size, 0), device=state.device)
-            entropy = torch.zeros((state.batch_size,), device=state.device)
-        else:
-            logits = torch.stack(all_logits, dim=1)
-        return PlanResults(
-            state=state, stop_logits=None,
-            route_logits=logits, freq_logits=None, entropy=entropy,
-            stops_tensor=None, routes_tensor=routes_tensor, freqs_tensor=None,
-            stop_est_vals=None, route_est_vals=None, freq_est_vals=None
-        )
-
-    def plan_new_route(self, state: RouteGenBatchState, greedy=False,
-                       actions=None, action_kinds=None,
-                       force_nonhalt_first_step=False, max_steps=None,
-                       max_trim_actions=1):
-        state = self.setup_planning(state)
-
-        actions_given = actions is not None
-        kinds_given = action_kinds is not None
-        if not actions_given:
-            actions = []
-            action_kinds_log = []
-            step_logits_log = []
-            step_entropies_log = []
-
-        ended = torch.zeros((state.batch_size,), dtype=torch.bool,
-                            device=state.device)
-        all_logits = 0
-        all_entropy = 0.0
-        _plan_steps_0 = 0
-        _elem0_done = False
-        step_idx = 0
-        trim_action_counts = torch.zeros(
-            (state.batch_size,), dtype=torch.long, device=state.device)
-        while not ended.all():
-            was_ended = ended.clone()
-            force_halt = (
-                max_steps is not None and not actions_given and
-                step_idx >= max_steps
-            )
-            if force_halt:
-                step_kinds = torch.full(
-                    (state.batch_size,), ROUTE_ACTION_HALT,
-                    dtype=torch.long, device=state.device)
-                action = torch.full(
-                    (state.batch_size, 2), -1,
-                    dtype=torch.long, device=state.device)
-                logits = torch.zeros((state.batch_size,), device=state.device)
-                entropy = torch.zeros((state.batch_size,),
-                                      device=state.device)
-            elif actions_given:
-                action = actions[:, 0]
-                actions = actions[:, 1:]
-                if kinds_given:
-                    step_kinds = action_kinds[:, 0]
-                    action_kinds = action_kinds[:, 1:]
-                else:
-                    step_kinds = None
-            else:
-                action = None
-                step_kinds = None
-
-            if not force_halt:
-                allow_halt = not (
-                    force_nonhalt_first_step and not actions_given and
-                    step_idx == 0
-                )
-                allow_trim = True
-                if max_trim_actions is not None:
-                    allow_trim = trim_action_counts < int(max_trim_actions)
-                # Trim actions can materially change current_routes,
-                # route_mat/has_path, and global state features. Recompute the
-                # encoding each step so rollout/eval matches the step-wise
-                # training path.
-                encoding = self._encode_graph(state)
-                step_kinds, action, logits, entropy = self.step_route_action(
-                    state, greedy, action, encoding, step_kinds,
-                    mask=ActionMask(halt=allow_halt, trim_start=allow_trim, trim_end=allow_trim),
-                )
-
-            all_logits += logits * (~ended)
-            all_entropy += entropy * (~ended)
-            just_ended = step_kinds == ROUTE_ACTION_HALT
-            selected_trim = (
-                (step_kinds == ROUTE_ACTION_TRIM_START) |
-                (step_kinds == ROUTE_ACTION_TRIM_END)
-            ) & ~was_ended
-            trim_action_counts = trim_action_counts + selected_trim.long()
-            ended = ended | just_ended
-            step_kinds[ended] = ROUTE_ACTION_HALT
-            action[ended] = -1
-
-            state.apply_route_actions(step_kinds, action)
-
-            if not _elem0_done:
-                _plan_steps_0 += 1
-                if just_ended[0]:
-                    _elem0_done = True
-
-            if not actions_given:
-                actions.append(action)
-                action_kinds_log.append(step_kinds)
-                step_logits = logits.detach().clone()
-                step_entropies = entropy.detach().clone()
-                step_logits[was_ended] = 0
-                step_entropies[was_ended] = 0
-                step_logits_log.append(step_logits)
-                step_entropies_log.append(step_entropies)
-
-            step_idx += 1
-
-        if not actions_given:
-            self._log_step_counts([_plan_steps_0])
-            actions = torch.stack(actions, dim=1)
-            self.last_route_action_kinds = torch.stack(action_kinds_log, dim=1)
-            self.last_route_step_logits = torch.stack(step_logits_log, dim=1)
-            self.last_route_step_entropies = \
-                torch.stack(step_entropies_log, dim=1)
-
-        return actions, all_logits, all_entropy
-
-    def step(self, state: RouteGenBatchState, greedy=False, actions=None,
-             precalc_data=None):
-        action_kinds, actions, logits, entropy = self.step_route_action(
-            state, greedy, actions, precalc_data
-        )
-        selected_trim = (action_kinds == ROUTE_ACTION_TRIM_START) | \
-            (action_kinds == ROUTE_ACTION_TRIM_END)
-        if selected_trim.any():
-            raise RuntimeError(
-                "TrimPathCombiningRouteGenerator.step() cannot represent "
-                "trim actions in the legacy terminal-pair API. Use "
-                "step_route_action() and RouteGenBatchState.apply_route_actions()."
-            )
-        actions = actions.clone()
-        actions[action_kinds == ROUTE_ACTION_HALT] = -1
-        return actions, logits, entropy
-
-    def step_route_action(self, state: RouteGenBatchState, greedy=False,
+    def _decode_actions(self, state, greedy=False,
                           actions=None, precalc_data=None,
-                          action_kinds=None, mask=None, return_distribution=False):
+                          action_kinds=None, *, mask):
         """Take one typed route action for the given state."""
         log.debug("stepping with trim actions")
-        state = observe(state, self.feature_set, allow_below_min=getattr(self, "allow_trim_below_min", False))
-        mask = ActionMask() if mask is None else mask
+        if not isinstance(state, Observation):
+            raise TypeError("policy execution requires an Observation")
 
         if precalc_data is None:
             node_descs, node_pad_mask, np_embeds, path_scores = \
@@ -2110,10 +1866,9 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             trim_start_valid, trim_end_valid, self.force_linking_unlinked,
             self.forbid_halt_when_overlong, mask.halt)
 
-        if return_distribution:
-            action_log_probs = _joint_route_action_log_probs(
-                flat_route_scores, flat_route_valid, halt_scores,
-                self.serial_halting, self.temperature, old_route_is_done)
+        action_log_probs = _joint_route_action_log_probs(
+            flat_route_scores, flat_route_valid, halt_scores,
+            self.serial_halting, self.temperature, old_route_is_done)
 
         if self.serial_halting:
             continue_scores = -halt_scores
@@ -2183,9 +1938,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             logits = route_logit
             entropy = route_ent
 
-        if return_distribution:
-            return action_kinds, folded_idxs, logits, entropy, action_log_probs
-        return action_kinds, folded_idxs, logits, entropy
+        return action_kinds, folded_idxs, logits, entropy, action_log_probs
 
     def _coerce_action_kinds(self, actions, action_kinds, device):
         if action_kinds is not None:

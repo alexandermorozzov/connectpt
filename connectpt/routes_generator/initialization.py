@@ -1,3 +1,4 @@
+from .run.artifacts import load_routes
 import logging as log
 
 import torch
@@ -159,8 +160,8 @@ def john_init(state: RouteGenBatchState, alpha=None,
                 # Use Yen's k-shortest path algorithm (see ref. 22) with k=10 
                  # to see if a valid route between the nodes exists that 
                  # doesn't violate any constraints
-                from . import utils as lrnu
-                paths = lrnu.yen_k_shortest_paths(graph, src, dst, 10)
+                from .city.shortest_paths import yen_k_shortest_paths
+                paths = yen_k_shortest_paths(graph, src, dst, 10)
     
                 for path in paths:
                     # check if the path is valid
@@ -277,3 +278,34 @@ def get_direct_sat_dmd(stop_dmd, shortest_paths, symmetric):
     direct_sat_dmd[:, -1] = 0
     direct_sat_dmd[:, :, -1] = 0
     return direct_sat_dmd
+
+
+def init_from_cfg(state, init_cfg, routes_tensor):
+    """Initializes the network according to the configuration.
+
+    Args:
+        state: The initial state of the system, not including the routes.
+        init_cfg: The configuration for the initialization method.
+
+    Returns:
+        The initial network.
+    """
+    if init_cfg is None:
+        return None
+
+    if init_cfg.method == 'load':
+        init_network = load_routes(init_cfg.path, state.device)
+    elif init_cfg.method == 'tensor' and routes_tensor is not None:
+        init_network = routes_tensor
+    elif init_cfg.method == 'john':
+        alpha = init_cfg.alpha
+        init_network = john_init(state, alpha, init_cfg.prioritize_direct_connections)
+    elif init_cfg.method == 'nikolic':
+        init_network = nikolic_init(state)
+    else:
+        raise ValueError(f'Unknown initialization method: {init_cfg.method}')
+
+    if init_network is None:
+        return None
+    return to_routes(init_network, n_routes=int(state.n_routes_to_plan.min().item())).expand(
+        state.batch_size, -1, -1).to(state.device)

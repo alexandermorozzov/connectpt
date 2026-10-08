@@ -1,3 +1,6 @@
+from connectpt.routes_generator.env.features import observe
+from connectpt.routes_generator.env.masks import ActionMask
+from connectpt.routes_generator.training.replay import evaluate_action
 from connectpt.routes_generator.env.features import global_state_features, redundancy_global_features
 import torch
 import pytest
@@ -9,7 +12,8 @@ from hydra import compose, initialize_config_dir
 
 from connectpt.routes_generator.run.context import CFG_DIR
 from connectpt.routes_generator.city.synthetic import DynamicCityGraphDataset
-from connectpt.routes_generator.model_factory import RouteModelFactory
+from connectpt.routes_generator.policy.build import load_policy
+from connectpt.routes_generator.run.config import policy_profile
 from connectpt.routes_generator.objectives.cost import build_cost
 from connectpt.routes_generator.env.state import RouteGenBatchState
 from connectpt.routes_generator.improvement_learning import (
@@ -166,7 +170,7 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
     torch.manual_seed(9)
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
         cfg = compose(config_name='runs/train_construction')
-    model = RouteModelFactory.build_construction_model(cfg.model, cfg.experiment)
+    model = load_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, torch.device("cpu")))
     model.freeze_feature_norms()
     cost = build_cost(cfg.cost, symmetric_routes=True)
     data = DynamicCityGraphDataset(15, 15, data_type='voronoi')
@@ -180,9 +184,10 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
         for _ in range(30):
             phases.update(state.current_route_n_stops.tolist())
             active = ~state.is_done()
-            actions, logp, entropy = model.step(state)
-            _, replay, _, distribution = model.step(
-                state, actions=actions, return_distribution=True)
+            out = model.act(observe(state, model.feature_set), ActionMask())
+            actions, logp, entropy = out.action.indices, out.logp, out.entropy
+            replay_out = evaluate_action(model, state, actions)
+            replay, distribution = replay_out.logp, replay_out.log_probs
             assert torch.allclose((replay - logp).exp(), torch.ones_like(logp), atol=1e-6)
             selected = actions[:, 0] * state.max_n_nodes + actions[:, 1]
             selected[actions[:, 0] < 0] = distribution.shape[-1] - 1
@@ -296,7 +301,7 @@ def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
         cfg = compose(config_name='runs/train_construction')
         legacy = compose(config_name='runs/train_construction', overrides=['model=construction'])
-    model = RouteModelFactory.build_construction_model(cfg.model, cfg.experiment)
+    model = load_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, torch.device("cpu")))
     assert cfg.batch_size == cfg.ppo.minibatch_size == cfg.evaluation.graph_count == 64
     assert cfg.discount_rate == 1. and cfg.diff_reward
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
@@ -321,7 +326,7 @@ def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     features[:, -globals_.shape[-1]:] = globals_
     assert torch.equal(features[:, 9], degree)
     assert torch.equal(vector._features_from_state(state)[:, 9], degree)
-    legacy_model = RouteModelFactory.build_construction_model(legacy.model, legacy.experiment)
+    legacy_model = load_policy(policy_profile(legacy.model, legacy.cost, legacy.experiment, torch.device("cpu")))
     assert legacy_model.edge_feat_dim == 14
     CheckpointStore.assert_state_dict_compatible(legacy_model,
         'artifacts/model_weights/inductive_random_graphs_weighted_connectivity.pt')
@@ -342,7 +347,7 @@ def test_advantages_use_holliday_minibatch_sample_std_not_rollout():
 
 
 def test_holliday_feature_norm_sample_variance_and_singleton_safety():
-    from connectpt.routes_generator.models import FeatureNorm
+    from connectpt.routes_generator.policy.models import FeatureNorm
     layer = FeatureNorm(1, unbiased=True)
     output = layer(torch.tensor([[1.], [2.], [3.]]))
     assert torch.allclose(output, torch.tensor([[-1.], [0.], [1.]]), atol=1e-5)
@@ -382,7 +387,7 @@ def test_fixed_preference_evaluation_does_not_consume_training_rng():
         cfg = compose(config_name='runs/train_construction', overrides=[
             'batch_size=2', 'eval.n_routes=1', 'eval.max_route_len=5',
             'evaluation.preference_count=3', 'evaluation.stochastic_samples=2'])
-    model = RouteModelFactory.build_construction_model(cfg.model, cfg.experiment)
+    model = load_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, torch.device("cpu")))
     model.freeze_feature_norms()
     cost = build_cost(cfg.cost, symmetric_routes=True)
     dataset = DynamicCityGraphDataset(9, 9, data_type='voronoi')

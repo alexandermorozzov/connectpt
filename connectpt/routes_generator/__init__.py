@@ -61,11 +61,8 @@ from .initialization import (
 # The bee-colony engine is ``bee_colony.run_bee_colony_plan`` (plan-driven);
 # the search application wraps it via ``search.BeeColonySearchRun``.
 
-# === Evaluation & Sampling ===
-from .eval_route_generator import (
-    sample_from_model,
-    eval_model,
-)
+from .policy.generate import generate, evaluate_policy
+from .policy.build import load_policy
 
 # === Inductive Learning ===
 from .inductive_route_learning import (
@@ -73,7 +70,7 @@ from .inductive_route_learning import (
 )
 
 # === Models & Architectures ===
-from .models import (
+from .policy.models import (
     PathCombiningRouteGenerator,
     TrimPathCombiningRouteGenerator,
     RandomPathCombiningRouteGenerator,
@@ -92,19 +89,14 @@ from .models import (
 )
 
 # === Utilities & Helpers ===
-from .utils import (
-    build_model_from_cfg,
-    get_graphnet_from_cfg,
-    process_standard_experiment_cfg,
-    test_method,
-    yen_k_shortest_paths,
-)
+from .utils import test_method
+from .city.shortest_paths import yen_k_shortest_paths
 
 # === Torch Utilities ===
 from .run.artifacts import load_routes, save_routes
 from .network.routes import to_routes
 from .common.tensors import cat_var_size_tensors, get_update_at_mask, get_variable_slice_mask, unravel_indices
-from .models import get_indices_from_mask
+from .policy.models import get_indices_from_mask
 from .city.shortest_paths import AllShortestPaths
 
 # === Experiment orchestration API (M010 stage 6) ===

@@ -11,6 +11,7 @@ from __future__ import annotations
 from ..env.masks import ActionMask
 from ..env.actions import ROLE_CAPABILITIES, validate_actions
 from ..env.actions import ACTION_NAME_TO_KIND
+from ..env.features import observe
 
 
 class SearchPolicyAdapter:
@@ -41,7 +42,8 @@ class ConstructionSearchPolicy(SearchPolicyAdapter):
     def propose_action(self, state, *, allowed_actions, greedy=False):
         self.validate_actions(allowed_actions)
         # construction model exposes step() (extend/halt); no trim support
-        return self.model.step(state, greedy=greedy)
+        out = self.model.act(observe(state, self.model.feature_set), ActionMask.from_names(allowed_actions), greedy)
+        return out.action.indices, out.logp, out.entropy
 
 
 class EditSearchPolicy(SearchPolicyAdapter):
@@ -51,9 +53,9 @@ class EditSearchPolicy(SearchPolicyAdapter):
 
     def propose_action(self, state, *, allowed_actions, greedy=False):
         self.validate_actions(allowed_actions)
-        return self.model.step_route_action(
-            state, greedy=greedy, mask=ActionMask.from_names(allowed_actions)
-        )
+        out = self.model.act(observe(state, self.model.feature_set,
+            allow_below_min=self.model.allow_trim_below_min), ActionMask.from_names(allowed_actions), greedy)
+        return out.action.kind, out.action.indices, out.logp, out.entropy
 
 
 _ADAPTERS = {
