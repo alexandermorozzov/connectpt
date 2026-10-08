@@ -14,7 +14,7 @@ COST_WEIGHT_KEY_ORDER = (
 # needs one, and is assembled in a single place (get_cost_weights_tensor)
 # from an EXPLICIT key tuple supplied by the caller: the cost/reward math
 # passes COST_WEIGHT_KEY_ORDER; models pass the checkpoint-locked spec they
-# declare themselves (models.WEIGHT_FEATURE_KEYS / weight_feature_keys).
+# declare themselves (models.DEFAULT_PREFERENCE_GOALS / preference_goals).
 
 # Short, human-readable names for the three cost components, index-aligned
 # with COST_WEIGHT_KEY_ORDER. Used to enable / disable individual components.

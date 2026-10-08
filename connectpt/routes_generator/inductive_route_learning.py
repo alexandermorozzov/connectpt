@@ -1,3 +1,5 @@
+from .run.checkpoints import CheckpointStore
+from .env.features import global_state_features, critic_inputs, PREFERENCE_KEYS
 import copy
 import random
 import logging as log
@@ -16,9 +18,10 @@ import hydra
 from .city.graph import to_batch, STOP_KEY, DEMAND_KEY
 from .city.synthetic import CityGraphDataset, get_default_train_and_eval_split, get_dynamic_training_set
 from .objectives.preferences import COST_WEIGHT_KEY_ORDER
-from .env.state import ROUTE_ACTION_EXTEND, RouteGenBatchState
+from .env.actions import ROUTE_ACTION_EXTEND
+from .env.state import RouteGenBatchState
 from . import utils as lrnu
-from .models import FeatureNorm, get_mlp, WEIGHT_FEATURE_KEYS
+from .models import FeatureNorm, get_mlp, DEFAULT_PREFERENCE_GOALS
 from .eval_route_generator import eval_model
 from .run.logger import log as log_metrics
 from .training.records import (ConstructionRolloutRecord, ConstructionTrainRecord,
@@ -40,19 +43,19 @@ class NNBaseline:
     # Feature specs (checkpoint-locked, declared like on the actor models):
     # order of the cost-weight slots inside the shared global state features,
     # and inside this baseline's own legacy input tail (slot -1-ii = key ii).
-    weight_feature_keys = WEIGHT_FEATURE_KEYS
+    preference_goals = DEFAULT_PREFERENCE_GOALS
     weight_input_keys = COST_WEIGHT_KEY_ORDER
 
     def __init__(self, learning_rate=0.0005, decay=0.01, actor_model=None,
                  normalize_returns=False, huber=False, huber_delta=1.0,
                  value_clip=None, return_norm_momentum=0.05, device=None,
-                 weight_feature_keys=None, holliday_features=False):
+                 preference_goals=None, holliday_features=False):
         self.learning_rate = learning_rate
-        self._explicit_weight_features = weight_feature_keys is not None
-        if weight_feature_keys is not None:
-            self.weight_feature_keys = tuple(weight_feature_keys)
+        self._explicit_weight_features = preference_goals is not None
+        if preference_goals is not None:
+            self.preference_goals = tuple(preference_goals)
             self.weight_input_keys = tuple(k for k in COST_WEIGHT_KEY_ORDER
-                                           if k in self.weight_feature_keys)
+                                           if k in tuple(PREFERENCE_KEYS[goal] for goal in self.preference_goals))
         self.holliday_features = holliday_features
         self.device = device if device is not None else globals().get('DEVICE', torch.device('cpu'))
         self.decay = decay
@@ -99,7 +102,7 @@ class NNBaseline:
          # mean and std edge time weighted by demand on edge,
          # max num of mean stop features, # routes so far and # routes left,
          # weights of the two cost components
-        return 10 + 9 + len(self.weight_feature_keys) if self._explicit_weight_features else 21
+        return 10 + 9 + len(self.preference_goals) if self._explicit_weight_features else 21
 
     @property
     def input_dim(self):
@@ -179,41 +182,10 @@ class NNBaseline:
         }
 
     def inputs_from_data(self, graph_data, cost_weights):
-        dev = graph_data[STOP_KEY].x.device
-        input_data = torch.zeros(graph_data.num_graphs, self.input_dim, 
-                                 dtype=torch.float, device=dev)
-        input_data[:, 0] = graph_data.demand.sum(dim=(1,2))
-
-        for bi, dl in enumerate(graph_data.to_data_list()):
-            dmd_graph = dl[DEMAND_KEY]
-            input_data[bi, 1] = dmd_graph.num_edges
-            input_data[bi, 2] = dmd_graph.edge_attr[:, 0].mean()
-            if dmd_graph.num_edges > 1:
-                input_data[bi, 3] = dmd_graph.edge_attr[:, 0].std()
-            else:
-                input_data[bi, 3] = 0
-
-            dmd_weighted_times = dmd_graph.edge_attr[:, 0] * \
-                dmd_graph.edge_attr[:, 1]
-            input_data[bi, 4] = dmd_weighted_times.mean()
-            if self.holliday_features:
-                # Match the preserved upstream NNBaseline statistic exactly.
-                input_data[bi, 5] = dmd_weighted_times.mean()
-            elif dmd_graph.num_edges > 1:
-                input_data[bi, 5] = dmd_weighted_times.std()
-            else:
-                input_data[bi, 5] = 0
-            x_dim = dl[STOP_KEY].x.shape[1]
-            input_data[bi, 6:6+x_dim] = dl[STOP_KEY].x.mean(dim=0)
-
-        # Named dict -> fixed slots by the explicit key spec (never dict
-        # iteration order). A key absent from the dict (e.g. the {} passed by
-        # set_input_norm) leaves its slot at zero.
-        for ii, key in enumerate(self.weight_input_keys):
-            if key in cost_weights:
-                input_data[:, -(1 + ii)] = cost_weights[key]
-
-        return input_data
+        return critic_inputs(graph_data, cost_weights,
+                             input_dim=self.legacy_input_dim,
+                             holliday_features=self.holliday_features,
+                             weight_input_keys=self.weight_input_keys)
 
     def set_input_norm(self, all_graph_data):
         if not isinstance(all_graph_data, Batch):
@@ -230,8 +202,8 @@ class NNBaseline:
             return self.actor_model.get_critic_features(state)
         input_data = self.inputs_from_data(state.graph_data,
                                            state.cost_weights)
-        glob_feats = state.get_global_state_features(
-            weight_feature_keys=self.weight_feature_keys)
+        glob_feats = global_state_features(state,
+            preference_goals=self.preference_goals)
         input_data[..., -glob_feats.shape[-1]:] = glob_feats
         return input_data
 
@@ -331,7 +303,7 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
 
     # set up neural network baseline
     critic_kwargs = dict(learning_rate=cfg.baseline_lr, device=device,
-                         weight_feature_keys=model.weight_feature_keys,
+                         preference_goals=model.preference_goals,
                          holliday_features=bool(cfg.ppo.get('holliday_critic_features', False)))
     val_module = (D3POValueModule(n_objectives=len(objective_indices), **critic_kwargs)
                   if decomposed else NNBaseline(**critic_kwargs))
@@ -643,7 +615,7 @@ def _train_construction(model, min_n_routes, max_n_routes, cfg, optimizer,
         # save a checkpoint every val period
         if checkpoint_dir is not None and iteration % cfg.ppo.val_period == 0:
             ckpt_filename = checkpoint_dir / f"iter{iteration}.pt"
-            torch.save(model.state_dict(), ckpt_filename)
+            CheckpointStore.save_model_weights(model, ckpt_filename)
 
         pbar.update(1)
         completed_iterations = iteration + 1
@@ -811,5 +783,5 @@ def setup_and_train(cfg: DictConfig, *,
 
     if return_training_result:
         return best_model, best_cost
-    torch.save(best_model.state_dict(), output_dir / (run_name + '.pt'))
+    CheckpointStore.save_model_weights(best_model, output_dir / (run_name + '.pt'))
     return best_cost

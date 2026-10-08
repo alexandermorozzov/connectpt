@@ -46,7 +46,8 @@ from .city.synthetic import CityGraphDataset, DynamicCityGraphDataset, get_defau
 from .city.graph import InsertPosFeatures, RandomFlipCity, SpaceScaleTransform, DemandScaleTransform, CityGraphData
 
 # === Transit Time & Cost Estimation ===
-from .env.state import ExtraStateData, RouteGenBatchState, ROUTE_ACTION_EXTEND, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_TRIM_START
+from .env.actions import ROUTE_ACTION_EXTEND, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_TRIM_START
+from .env.state import ExtraStateData, RouteGenBatchState
 from .objectives.cost import CostHelperOutput, CostModule, MyCostModule, build_cost
 from .objectives.preferences import COST_WEIGHT_KEY_ORDER, COST_COMPONENT_NAMES
 

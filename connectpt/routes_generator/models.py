@@ -1,3 +1,4 @@
+from connectpt.routes_generator.env.features import aggr_edges_over_sequences
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -15,34 +16,25 @@ from torch_geometric.data import Batch, Data
 from torch_geometric.nn import (GATv2Conv, GCNConv, MessagePassing, SGConv,
                                 BatchNorm, GraphNorm)
 from .city.shortest_paths import reconstruct_all_paths
-from .common.tensors import (aggr_edges_over_sequences, get_update_at_mask,
+from .common.tensors import (get_update_at_mask,
                              get_variable_slice_mask)
-from .network.routes import get_route_leg_times, to_routes
+from .network.routes import to_routes
 from .trunc_normal import TruncatedNormal
 
-from .city.graph import DEMAND_KEY, STOP_KEY, STREET_KEY, ROUTE_KEY, CityGraphData
-from .objectives.cost import EPSILON, _finite_time_diameter
-from .env.state import ROUTE_ACTION_EXTEND, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_TRIM_START, RouteGenBatchState
+from .city.graph import DEMAND_KEY, ROUTE_KEY
+from .env.features import halt_features, finite_time_features, extend_features, observe, dims as feature_dims, PREFERENCE_KEYS, global_state_features, pair_features, trim_candidate_features
+from .env.masks import (ActionMask, mask_action_family, set_invalid_scores_to_fmin,
+                        path_mask, extension_mask, construction_halt_scores, edit_halt_scores,
+                        trim_coverage_mask, TORCH_FMIN, TORCH_FMAX)
+from .env.actions import ROUTE_ACTION_EXTEND, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_TRIM_START
+from .env.state import RouteGenBatchState
+from .env.actions import ActionSpec
 
 Q_FUNC_MODE = "q function"
 PLCY_MODE = "policy"
 GFLOW_MODE = "gflownet"
 
-# Cost-weight keys, in the order the CURRENT model checkpoints were trained
-# with. This is the models' feature spec: every place that turns the state's
-# NAMED cost-weight dict into a positional feature vector does so through an
-# explicit key tuple declared on the model (``weight_feature_keys`` class
-# attribute, defaulting to this). CHECKPOINT-LOCKED: the order equals the
-# historical implicit ``sorted(keys)`` the frozen checkpoints learned —
-# reordering it (or training a new model with a different tuple without
-# giving that model its own spec) silently permutes the meaning of the
-# feature slots. A model trained with a different order must override
-# ``weight_feature_keys`` next to its checkpoint.
-WEIGHT_FEATURE_KEYS = (
-    'demand_time_weight',
-    'median_connectivity_weight',
-    'route_time_weight',
-)
+DEFAULT_PREFERENCE_GOALS = ('ATT', 'WMC', 'RTT')
 
 # FEAT_NORM_MOMENTUM = 0.001
 FEAT_NORM_MOMENTUM = 0.0
@@ -50,8 +42,6 @@ FEAT_NORM_MOMENTUM = 0.0
 # minimum and maximum log probs to use when "forcing" an action selection
  # use this in place of -float('inf') to avoid nans in some badly-behaved
  # backprops
-TORCH_FMAX = 10**10
-TORCH_FMIN = -TORCH_FMAX
 
 
 GREEDY = False
@@ -82,33 +72,6 @@ FreqChoiceResults = namedtuple(
     )
 
 
-def _mask_flat_action_scores_by_batch_allowed(scores, valid, allowed):
-    """Mask whole batch rows when an action family is disabled."""
-    if isinstance(allowed, bool):
-        if allowed:
-            return scores, valid
-        return torch.full_like(scores, TORCH_FMIN), torch.zeros_like(valid)
-
-    allowed = torch.as_tensor(
-        allowed, dtype=torch.bool, device=scores.device)
-    if allowed.ndim == 0:
-        if bool(allowed.item()):
-            return scores, valid
-        return torch.full_like(scores, TORCH_FMIN), torch.zeros_like(valid)
-    if allowed.ndim != 1 or allowed.shape[0] != scores.shape[0]:
-        raise ValueError(
-            "Per-batch action allow mask must have shape (batch_size,), "
-            f"got {tuple(allowed.shape)} for batch size {scores.shape[0]}"
-        )
-    disallowed = ~allowed
-    if not disallowed.any():
-        return scores, valid
-
-    scores = scores.clone()
-    valid = valid.clone()
-    scores[disallowed] = TORCH_FMIN
-    valid[disallowed] = False
-    return scores, valid
 
 
 class SymmetricLogUnit(nn.Module):
@@ -769,14 +732,14 @@ class NodepairDotScorer(nn.Module):
 
 class RouteScorer(nn.Module):
     # Feature spec: order of the cost-weight slots inside global state
-    # features, locked to the trained checkpoints (see WEIGHT_FEATURE_KEYS).
-    weight_feature_keys = WEIGHT_FEATURE_KEYS
+    # features, locked to the trained checkpoints (see DEFAULT_PREFERENCE_GOALS).
+    preference_goals = DEFAULT_PREFERENCE_GOALS
 
     def __init__(self, embed_dim, nonlin_type, dropout, n_mlp_layers=2,
-                 mlp_width=None, n_extra_feats=14, weight_feature_keys=None):
+                 mlp_width=None, n_extra_feats=14, preference_goals=None):
         super().__init__()
-        if weight_feature_keys is not None:
-            self.weight_feature_keys = tuple(weight_feature_keys)
+        if preference_goals is not None:
+            self.preference_goals = tuple(preference_goals)
         self.embed_dim = embed_dim
         # route_feats (2) + global_state_features. Default 14 = 2 + 12; the edit
         # model with adjustment conditioning passes 16 = 2 + 14.
@@ -801,10 +764,7 @@ class RouteScorer(nn.Module):
         route_seqs = node_descs.gather(1, route_gather_idxs)
 
         route_len = (route_idxs > -1).sum(dim=1, dtype=torch.float)
-        route_feats = torch.stack((route_time, route_len), dim=1)
-        global_feats = state.get_global_state_features(
-            weight_feature_keys=self.weight_feature_keys)
-        extra_feats = torch.cat((route_feats, global_feats), dim=1)
+        extra_feats = halt_features(state, route_time, route_len)
 
         # pass sequences through encoder
         route_desc = self.encode(node_descs, route_seqs, node_padding_mask,
@@ -946,21 +906,23 @@ class RouteGeneratorBase(nn.Module):
     # Feature spec: order of the cost-weight slots in every positional
     # feature vector this model consumes (global state features, edge
     # planes, decoder context). Locked to the trained checkpoints (see
-    # WEIGHT_FEATURE_KEYS); a model trained with a different order overrides
+    # DEFAULT_PREFERENCE_GOALS); a model trained with a different order overrides
     # this next to its checkpoint.
-    weight_feature_keys = WEIGHT_FEATURE_KEYS
+    preference_goals = DEFAULT_PREFERENCE_GOALS
 
     def __init__(self, backbone_net, mean_stop_time_s, 
                  embed_dim, n_nodepair_layers, nonlin_type=DEFAULT_NONLIN, 
                  dropout=MLP_DEFAULT_DROPOUT, symmetric_routes=True, 
                  temperature=1, fixed_frequency_Hz=0.00074,
                  only_routes_with_demand_are_valid=False, 
-                 low_memory_mode=False, weight_feature_keys=None):
+                 low_memory_mode=False, feature_set=None):
         """nonlin_type: a nonlin, or the string name of a nonlin, like 'ReLU' 
             or 'LeakyReLU' or 'Tanh'"""
         super().__init__()
-        if weight_feature_keys is not None:
-            self.weight_feature_keys = tuple(weight_feature_keys)
+        if feature_set is None:
+            raise ValueError("policy requires a feature set")
+        self.feature_set = feature_set
+        self.preference_goals = feature_set.preference_goals
         # make this a parameter of the model so it will be kept in state_dict
         # mst = torch.tensor(mean_stop_time_s, dtype=torch.float32)
         self.mean_stop_time_s = mean_stop_time_s
@@ -1015,23 +977,14 @@ class RouteGeneratorBase(nn.Module):
             if isinstance(mod, FeatureNorm):
                 mod.freeze()
 
-    def _finite_time_features(self, state, times):
-        """Replace unreachable travel times with a finite graph penalty."""
-        penalty = 2.0 * _finite_time_diameter(state.drive_times)
-        penalty = penalty.to(device=times.device, dtype=times.dtype)
-        while penalty.ndim < times.ndim:
-            penalty = penalty.unsqueeze(-1)
-        return torch.where(torch.isfinite(times), times, penalty)
 
     def plan(self, *args, **kwargs):
         return self.forward_oldenv(*args, **kwargs)        
 
     def setup_planning(self, state):         
-        state.set_redundancy_feature_mode(
-            getattr(self, 'use_redundancy_features', False))
         # apply normalization to input features
-        norm_stops_x = self.node_norm(state.graph_data[STOP_KEY].x)
-        state.set_normalized_features(norm_stops_x)
+        from .env.construction import normalize_nodes
+        normalize_nodes(state, self.node_norm, self.feature_set)
         return state
 
     def step(self, state, greedy):
@@ -1073,71 +1026,12 @@ class RouteGeneratorBase(nn.Module):
         return state, logits, entropy
     
     def _get_edge_features(self, state):
-        # edge feats: demand, drive time, has route, route time, has street,
-         # street time, has 1-transfer path, has 2-transfer path, has any path,
-         # shortest transit path time, is same node
-        edge_feature_parts = [state.demand]
-        # has a direct route
-        has_direct_route = state.route_mat.isfinite()
-        edge_feature_parts.append(has_direct_route)
-        # time on direct route 
-        finite_direct_times = get_update_at_mask(state.route_mat,
-                                                    ~has_direct_route)
-        edge_feature_parts.append(finite_direct_times)
-        # has street
-        has_street = state.graph_data.street_adj.isfinite()
-        edge_feature_parts.append(has_street)
-        # street time
-        street_times = get_update_at_mask(state.graph_data.street_adj,
-                                             ~has_street)
-        edge_feature_parts.append(street_times)
-        # has 1-transfer path, 2-transfer path, any path, shortest transit
-        # compute route shortest path lengths
-        edge_feature_parts.append(state.has_path)
-        # times of existing paths
-        state.transit_times[~state.has_path] = 0
-        edge_feature_parts.append(state.transit_times)
-        is_direct_path = state.directly_connected
-        flt_is_direct_path = is_direct_path.to(torch.float32)
-        flt_upto_1trnsfr_path = flt_is_direct_path.bmm(flt_is_direct_path)
-        flt_upto_2trnsfr_path = flt_upto_1trnsfr_path.bmm(flt_is_direct_path)
-        upto_1trnsfr_path = flt_upto_1trnsfr_path.bool()
-        is_1trnsfr_path = upto_1trnsfr_path ^ is_direct_path
-        edge_feature_parts.append(is_1trnsfr_path)
-        upto_2trnsfr_path = flt_upto_2trnsfr_path.bool()
-        is_2trnsfr_path = upto_2trnsfr_path ^ upto_1trnsfr_path
-        edge_feature_parts.append(is_2trnsfr_path)
-
-        # is same node
-        eye = torch.eye(state.max_n_nodes, device=state.device)
-        eye = eye.expand(state.batch_size, -1, -1)
-        edge_feature_parts.append(eye)
-        if getattr(self, 'use_redundancy_features', False):
-            context_counts = state.context_leg_use_count.to(torch.float32)
-            current_counts = state.current_leg_use_count.to(torch.float32)
-            total_counts = state.total_leg_use_count.to(torch.float32)
-            edge_feature_parts.extend((
-                torch.log1p(context_counts),
-                torch.log1p(current_counts),
-                torch.log1p(total_counts),
-                total_counts > 1,
-            ))
-        edge_features = torch.stack(edge_feature_parts, dim=-1)
-
-        # add planes with cost weights (named dict -> vector via the model's
-        # declared key spec)
-        cost_weight_planes = state.get_cost_weights_tensor(
-            self.weight_feature_keys)[:, None, None, :]
-        cost_weight_planes = cost_weight_planes.expand(-1, state.max_n_nodes, 
-                                                        state.max_n_nodes, -1)
-        edge_features = torch.cat((edge_features, cost_weight_planes), dim=-1)
-        edge_features = self.edge_norm(edge_features)
-
-        finite_drive_times = self._finite_time_features(state, state.drive_times)
+        raw = pair_features(state, use_redundancy=self.use_redundancy_features,
+                            preference_goals=self.preference_goals)
+        edge_features = self.edge_norm(raw)
+        finite_drive_times = finite_time_features(state, state.drive_times)
         drive_times = self.time_norm(finite_drive_times[..., None])
-        edge_features = torch.cat((edge_features, drive_times), dim=-1)
-
-        return edge_features
+        return torch.cat((edge_features, drive_times), dim=-1)
 
     # def _get_edge_features(self, state):
     #     # edge feats: demand, drive time, has route, route time, has street,
@@ -1251,22 +1145,6 @@ class RouteGeneratorBase(nn.Module):
         
         return folded_node_descs, node_pad_mask
 
-    def set_invalid_scores_to_fmin(self, scores, valid_terminals_mat):
-        scores_holder = torch.full_like(scores, TORCH_FMIN)
-        no_valid_options = valid_terminals_mat.sum(dim=(1,2)) == 0
-        if no_valid_options.any():
-            # no valid options, so make all terminal pairs equally likely
-            off_diag = ~torch.eye(scores.shape[-1], device=scores.device, 
-                                  dtype=bool)
-            where_nvo = torch.where(no_valid_options)[0]
-            scores_holder[where_nvo[:, None], off_diag] = 0
-
-        # valid_terminals_mat keeps changing, so clone so pytorch doesn't 
-         # complain during backprop
-        vtm = valid_terminals_mat.clone()
-        scores_holder[vtm] = scores[vtm]
-
-        return scores_holder
 
     def get_biased_scores(self, scores, bias, are_connected):
         # no bias for demand that's already covered
@@ -1279,6 +1157,7 @@ class RouteGeneratorBase(nn.Module):
 
 
 class PathCombiningRouteGenerator(RouteGeneratorBase):
+    action_spec = ActionSpec("construction")
     def __init__(self, *args, n_pathscorer_layers=3, pathscorer_hidden_dim=16,
                  halt_scorer_type='endpoints', n_halt_layers=3, n_halt_heads=4,
                  force_linking_unlinked=False, logit_clip=None,
@@ -1330,12 +1209,10 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         # appends this many extra features (target + normalized weight), so the
         # scorers that consume global features must widen by the same amount.
         # Default 0 keeps the construction-model dims (and frozen weights) intact.
-        self.n_adjustment_cond_feats = n_adjustment_cond_feats
-        _halt_n_extra = 11 + len(self.weight_feature_keys) + n_adjustment_cond_feats + \
-            self.n_redundancy_global_feats
+        self.n_adjustment_cond_feats = len(self.feature_set.adjustment_features)
+        _halt_n_extra = feature_dims(self.feature_set)["halt"]
 
-        path_scorer_indim = 14 + len(self.weight_feature_keys) + n_adjustment_cond_feats + \
-            self.n_redundancy_global_feats + self.n_redundancy_path_feats
+        path_scorer_indim = feature_dims(self.feature_set)["extend"]
         # self.path_input_norm = FeatureNorm(FEAT_NORM_MOMENTUM,
         #                                    path_scorer_indim - 1)
         self.path_scorer = nn.Sequential(
@@ -1350,13 +1227,13 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
                                                     self.dropout,
                                                     n_halt_layers,
                                                     n_extra_feats=_halt_n_extra,
-                                                    weight_feature_keys=self.weight_feature_keys)
+                                                    preference_goals=self.preference_goals)
         elif halt_scorer_type == "mean":
             self.halt_scorer = RouteMeanScorer(self.embed_dim,
                                                self.nonlin_type,
                                                self.dropout,
                                                n_extra_feats=_halt_n_extra,
-                                               weight_feature_keys=self.weight_feature_keys)
+                                               preference_goals=self.preference_goals)
         elif halt_scorer_type == "transformer":
             self.halt_scorer = RouteTransformerScorer(n_halt_heads,
                                                       n_halt_layers,
@@ -1364,14 +1241,14 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
                                                       self.nonlin_type,
                                                       self.dropout,
                                                       n_extra_feats=_halt_n_extra,
-                                                      weight_feature_keys=self.weight_feature_keys)
+                                                      preference_goals=self.preference_goals)
         elif halt_scorer_type == "latent":
             self.halt_scorer = RouteLatentScorer(n_halt_heads, n_halt_layers,
                                                  self.embed_dim,
                                                  self.nonlin_type,
                                                  self.dropout,
                                                  n_extra_feats=_halt_n_extra,
-                                                 weight_feature_keys=self.weight_feature_keys)
+                                                 preference_goals=self.preference_goals)
         elif halt_scorer_type == "alpha":
             self.halt_scorer = RouteAlphaScorer()
 
@@ -1497,7 +1374,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         return actions, all_logits, all_entropy
 
     def step(self, state: RouteGenBatchState, greedy=False, actions=None,
-             precalc_data=None, allow_halt=True, return_distribution=False):
+             precalc_data=None, mask=None, return_distribution=False):
         """Take an action for the given state.
         actions -- a batch_size x 2 tensor of predetermined actions to take. If
             None, the actions will be chosen by the model.  If the value is 
@@ -1506,6 +1383,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             add.
         """
         log.debug("stepping")
+        state = observe(state, self.feature_set, allow_below_min=getattr(self, "allow_trim_below_min", False))
+        mask = ActionMask() if mask is None else mask
 
         if precalc_data is None:
             node_descs, node_pad_mask, np_embeds, path_scores = \
@@ -1517,30 +1396,9 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         batch_size = state.batch_size
             
         # don't choose segments greater than the max route length
-        path_lens = (path_seqs > -1).sum(dim=-1)
-        current_route_lens = state.current_route_n_stops
-        # When extending a non-empty route the chosen shortest path shares one
-        # endpoint with the route, so only path_len - 1 new stops are added.
-        overlap = (current_route_lens > 0)[:, None, None].to(path_lens.dtype)
-        added_path_lens = (path_lens - overlap).clamp_min(0)
-        post_ext_lens = current_route_lens[:, None, None] + added_path_lens
-        exts_are_too_long = post_ext_lens > state.max_route_len[:, None, None]
-        paths_are_invalid = exts_are_too_long | ~state.valid_terms_mat
-
-        # experimentally, only allow adding one node at a time
-        if self.max_act_len is not None:
-            path_too_long = path_lens > self.max_act_len
-            paths_are_invalid = paths_are_invalid | path_too_long
-        
-        if self.force_linking_unlinked:
-            # don't choose segments that don't extend coverage, if coverage is
-             # not complete
-            extends_coverage_if_needed = check_extensions_add_connections(
-                state.has_path, path_seqs)
-            paths_are_invalid |= ~extends_coverage_if_needed
-
-        # set all invalid path scores to FMIN
-        path_scores = self.set_invalid_scores_to_fmin(path_scores,
+        path_lens, current_route_lens, paths_are_invalid = path_mask(
+            state, path_seqs, self.max_act_len, self.force_linking_unlinked)
+        path_scores = set_invalid_scores_to_fmin(path_scores,
                                                       ~paths_are_invalid)
         no_valid_options = paths_are_invalid.all(-1).all(-1)
         old_route_is_done = state.is_done() | no_valid_options
@@ -1571,22 +1429,10 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         # compute the scores for halting
         halt_scores = self.halt_scorer(state, node_descs, state.current_routes, 
                                        state.current_route_time, node_pad_mask)
-        if self.force_linking_unlinked:
-            # don't halt if the system is not fully linked and we can
-             # continue
-            not_fully_linked = ~(state.has_path.all(-1).all(-1))
-            halt_scores[not_fully_linked] = TORCH_FMIN
-
-        # don't halt if the route is too short
-        halt_scores[current_route_lens < state.min_route_len] = TORCH_FMIN
-        # but do halt if it's done, including if there are no extensions
-        halt_scores[old_route_is_done] = TORCH_FMAX
         ext_valid = prev_valid | next_valid
-        no_valid_ext = ~ext_valid.any(-1).any(-1)
-        halt_scores[~starting & no_valid_ext] = TORCH_FMAX
-        if not allow_halt:
-            halt_scores = halt_scores.clone()
-            halt_scores[~old_route_is_done] = TORCH_FMIN
+        halt_scores = construction_halt_scores(
+            state, halt_scores, current_route_lens, old_route_is_done,
+            starting, ext_valid, self.force_linking_unlinked, mask.halt)
 
         ext_scores = prev_scores * prev_valid + next_scores * next_valid + \
             TORCH_FMIN * ~ext_valid
@@ -1688,7 +1534,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         return folded_idxs, logits, entropy
 
     def _encode_graph(self, state: RouteGenBatchState):
-        state.set_redundancy_feature_mode(self.use_redundancy_features)
+        state = observe(state, self.feature_set, allow_below_min=getattr(self, "allow_trim_below_min", False))
         # assemble route data objects
         input_batch = copy.copy(state.graph_data)
         input_batch.x = state.norm_node_features
@@ -1754,6 +1600,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         rich state representation the actor sees, without destabilizing
         the policy via mixed value/policy gradients.
         """
+        state = observe(state, self.feature_set, allow_below_min=getattr(self, "allow_trim_below_min", False))
         with torch.no_grad():
             node_descs, node_pad_mask, _, _ = self._encode_graph(state)
         node_descs = node_descs.detach()
@@ -1775,8 +1622,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         route_embed = (route_node_descs * route_valid).sum(dim=1) / \
             route_valid.sum(dim=1).clamp_min(1.0)
 
-        global_feats = state.get_global_state_features(
-            weight_feature_keys=self.weight_feature_keys).to(node_descs.dtype)
+        global_feats = global_state_features(state,
+            preference_goals=self.preference_goals).to(node_descs.dtype)
         return torch.cat([graph_embed, route_embed, global_feats], dim=-1)
 
     def _get_extension_scores(self, state: RouteGenBatchState, route_lens, 
@@ -1828,7 +1675,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
                                           routes_but_terminal]
 
         # use a neural network to compute scores and lengths
-        times_on_route = self._finite_time_features(state, times_on_route)
+        times_on_route = finite_time_features(state, times_on_route)
         norm_times = self.time_norm(times_on_route.flatten(0, 2)[:, None])
         norm_times = norm_times.reshape_as(times_on_route)[..., None]
         log.debug("updating edge scores...")
@@ -1871,16 +1718,9 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
         assert ext_scores.isfinite().all()
 
-        revisits = are_on_routes[batch_idxs[:, None, None], extension_paths]            
-        revisits = revisits.any(dim=-1)
-        is_empty_path = path_lens[batch_idxs, terminal_nodes] == 0
-        invalid = revisits | is_empty_path | \
-            (new_lens > state.max_route_len[:, None])
-
-        if self.force_linking_unlinked:
-            extends_coverage_if_needed = check_extensions_add_connections(
-                state.has_path, raw_extension_paths)
-            invalid |= ~extends_coverage_if_needed
+        invalid = extension_mask(state, are_on_routes, extension_paths,
+                                 raw_extension_paths, path_lens, terminal_nodes,
+                                 new_lens, self.force_linking_unlinked)
 
         out_scores = torch.zeros_like(path_scores)
         out_scores[batch_idxs, terminal_nodes] = ext_scores
@@ -1910,7 +1750,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
     #     update_in = torch.stack((base_path_scores, new_drive_times,
     #                              new_path_lens), dim=-1)
 
-    #     global_feat = state.get_global_state_features()
+    #     global_feat = global_state_features(state, )
     #     update_in = nn.functional.pad(update_in, (0, global_feat.shape[-1]))
     #     for _ in range(update_in.ndim - global_feat.ndim):
     #         global_feat = global_feat.unsqueeze(1)
@@ -1933,43 +1773,9 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         """Update the path scores based on the new path lengths and drive times.
         """
         is_valid = base_path_scores > TORCH_FMIN
-        if prev_len is None:
-            prev_len = torch.zeros_like(new_path_lens)
-        else:
-            # add a dimension to match new_path_lens
-            prev_len = prev_len[:, None]
-            prev_len = prev_len.expand(-1, new_path_lens.shape[-1])
-        if prev_drive_time is None:
-            prev_drive_time = torch.zeros_like(new_drive_times)
-        else:
-            # add a dimension to match new_drive_times
-            prev_drive_time = prev_drive_time[:, None]
-            prev_drive_time = prev_drive_time.expand(-1, 
-                                                     new_drive_times.shape[-1])
-        new_drive_times = self._finite_time_features(state, new_drive_times)
-        prev_drive_time = self._finite_time_features(state, prev_drive_time)
-        
-        update_in = torch.stack((base_path_scores, new_drive_times,
-                                 new_path_lens, prev_drive_time, prev_len), 
-                                 dim=-1)
-
-        if self.use_redundancy_features:
-            if candidate_paths is None:
-                raise ValueError(
-                    "Redundancy-aware path scoring requires candidate paths")
-            redundancy_feats = self._get_added_redundancy_features(
-                state, candidate_paths, update_in.dtype)
-            update_in = torch.cat((update_in, redundancy_feats), dim=-1)
-
-        global_feat = state.get_global_state_features(
-            include_redundancy=self.use_redundancy_features,
-            weight_feature_keys=self.weight_feature_keys)
-        update_in = nn.functional.pad(update_in, (0, global_feat.shape[-1]))
-        for _ in range(update_in.ndim - global_feat.ndim):
-            global_feat = global_feat.unsqueeze(1)
-
-        update_in[..., -global_feat.shape[-1]:] = global_feat
-
+        update_in = extend_features(state, base_path_scores, new_path_lens,
+                                    new_drive_times, prev_len, prev_drive_time,
+                                    candidate_paths)
         update_in = update_in[is_valid]
 
         updated_path_scores_wo_infs = self.path_scorer(update_in).squeeze(-1)
@@ -1982,69 +1788,6 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
         return updated_path_scores
 
-    def _get_added_redundancy_features(self, state, candidate_paths, dtype):
-        """Describe how each candidate shortest path changes leg reuse."""
-        paths = candidate_paths.to(device=state.device, dtype=torch.long)
-        from_nodes = paths[..., :-1]
-        to_nodes = paths[..., 1:]
-        valid = (from_nodes >= 0) & (to_nodes >= 0)
-        safe_from = from_nodes.clamp(min=0)
-        safe_to = to_nodes.clamp(min=0)
-
-        batch_idxs = torch.arange(
-            state.batch_size, device=state.device)
-        for _ in range(from_nodes.ndim - 1):
-            batch_idxs = batch_idxs.unsqueeze(-1)
-        batch_idxs = batch_idxs.expand_as(from_nodes)
-
-        context_counts = state.context_leg_use_count
-        total_counts = state.total_leg_use_count
-        path_context_counts = context_counts[
-            batch_idxs, safe_from, safe_to]
-        path_total_counts = total_counts[batch_idxs, safe_from, safe_to]
-        adds_context_overlap = valid & (path_context_counts > 0)
-        adds_excess = valid & (path_total_counts > 0)
-        adds_new_coverage = valid & (path_total_counts == 0)
-
-        valid_counts = valid.sum(dim=-1)
-        denom = valid_counts.clamp_min(1).to(dtype=dtype)
-        added_context_overlap_fraction = \
-            adds_context_overlap.to(dtype=dtype).sum(dim=-1) / denom
-        added_excess_count = adds_excess.to(dtype=dtype).sum(dim=-1)
-        added_new_coverage_fraction = \
-            adds_new_coverage.to(dtype=dtype).sum(dim=-1) / denom
-
-        leg_times = state.drive_times[batch_idxs, safe_from, safe_to]
-        mean_stop_time = state.mean_stop_time
-        for _ in range(leg_times.ndim - 1):
-            mean_stop_time = mean_stop_time.unsqueeze(-1)
-        leg_times = (leg_times + mean_stop_time) * valid
-        path_times = leg_times.sum(dim=-1)
-        excess_times = (leg_times * adds_excess).sum(dim=-1)
-        added_excess_time_fraction = excess_times / \
-            path_times.clamp_min(EPSILON)
-
-        mirror_factor = 2 if state.symmetric_routes else 1
-        all_total_counts = total_counts.to(dtype=dtype)
-        old_traversals = all_total_counts.sum(dim=(1, 2)) / mirror_factor
-        old_excess = (all_total_counts - 1).clamp_min(0).sum(
-            dim=(1, 2)) / mirror_factor
-        old_redundancy = old_excess / old_traversals.clamp_min(1)
-        for _ in range(valid_counts.ndim - 1):
-            old_traversals = old_traversals.unsqueeze(-1)
-            old_excess = old_excess.unsqueeze(-1)
-            old_redundancy = old_redundancy.unsqueeze(-1)
-        new_redundancy = (old_excess + added_excess_count) / \
-            (old_traversals + valid_counts).clamp_min(1)
-        redundancy_delta_if_extend = new_redundancy - old_redundancy
-
-        return torch.stack((
-            added_context_overlap_fraction,
-            added_excess_count,
-            added_excess_time_fraction,
-            added_new_coverage_fraction,
-            redundancy_delta_if_extend,
-        ), dim=-1)
     
 
 
@@ -2058,6 +1801,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
     """
 
     supports_trim_actions = True
+    action_spec = ActionSpec("edit")
 
     def __init__(self, *args, n_trim_scorer_layers=3,
                  trim_scorer_hidden_dim=16,
@@ -2072,10 +1816,9 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         self.trim_overlap_feat_dim = 8
         self.trim_redundancy_feat_dim = \
             5 if self.use_redundancy_features else 0
-        # Matches RouteGenBatchState.get_global_state_features(): 12 base,
+        # Matches global_features(RouteGenBatchState, ): 12 base,
         # optional redundancy summaries, plus adjustment conditioning.
-        self.trim_global_feat_dim = 12 + self.n_redundancy_global_feats + \
-            self.n_adjustment_cond_feats
+        self.trim_global_feat_dim = feature_dims(self.feature_set)["global"]
         self.trim_action_feat_dim = (
             self.trim_base_feat_dim +
             self.trim_overlap_feat_dim +
@@ -2199,9 +1942,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                 encoding = self._encode_graph(state)
                 step_kinds, action, logits, entropy = self.step_route_action(
                     state, greedy, action, encoding, step_kinds,
-                    allow_halt=allow_halt,
-                    allow_trim_start=allow_trim,
-                    allow_trim_end=allow_trim,
+                    mask=ActionMask(halt=allow_halt, trim_start=allow_trim, trim_end=allow_trim),
                 )
 
             all_logits += logits * (~ended)
@@ -2264,11 +2005,11 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
 
     def step_route_action(self, state: RouteGenBatchState, greedy=False,
                           actions=None, precalc_data=None,
-                          action_kinds=None, allow_halt=True,
-                          allow_extend=True, allow_trim_start=True,
-                          allow_trim_end=True, return_distribution=False):
+                          action_kinds=None, mask=None, return_distribution=False):
         """Take one typed route action for the given state."""
         log.debug("stepping with trim actions")
+        state = observe(state, self.feature_set, allow_below_min=getattr(self, "allow_trim_below_min", False))
+        mask = ActionMask() if mask is None else mask
 
         if precalc_data is None:
             node_descs, node_pad_mask, np_embeds, path_scores = \
@@ -2278,24 +2019,9 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
 
         batch_size = state.batch_size
         path_seqs = state.get_shortest_path_sequences()
-        path_lens = (path_seqs > -1).sum(dim=-1)
-        current_route_lens = state.current_route_n_stops
-        overlap = (current_route_lens > 0)[:, None, None].to(path_lens.dtype)
-        added_path_lens = (path_lens - overlap).clamp_min(0)
-        post_ext_lens = current_route_lens[:, None, None] + added_path_lens
-        exts_are_too_long = post_ext_lens > state.max_route_len[:, None, None]
-        paths_are_invalid = exts_are_too_long | ~state.valid_terms_mat
-
-        if self.max_act_len is not None:
-            path_too_long = path_lens > self.max_act_len
-            paths_are_invalid = paths_are_invalid | path_too_long
-
-        if self.force_linking_unlinked:
-            extends_coverage_if_needed = check_extensions_add_connections(
-                state.has_path, path_seqs)
-            paths_are_invalid |= ~extends_coverage_if_needed
-
-        path_scores = self.set_invalid_scores_to_fmin(path_scores,
+        path_lens, current_route_lens, paths_are_invalid = path_mask(
+            state, path_seqs, self.max_act_len, self.force_linking_unlinked)
+        path_scores = set_invalid_scores_to_fmin(path_scores,
                                                       ~paths_are_invalid)
         trim_np_embeds = np_embeds
 
@@ -2330,12 +2056,9 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         trim_end_scores, trim_end_valid = self._get_trim_action_scores(
             state, trim_np_embeds, trim_start=False)
 
-        if self.force_linking_unlinked:
-            not_fully_linked = ~(state.has_path.all(-1).all(-1))
-            trim_start_scores[not_fully_linked] = TORCH_FMIN
-            trim_end_scores[not_fully_linked] = TORCH_FMIN
-            trim_start_valid[not_fully_linked] = False
-            trim_end_valid[not_fully_linked] = False
+        trim_start_scores, trim_start_valid, trim_end_scores, trim_end_valid = trim_coverage_mask(
+            state, trim_start_scores, trim_start_valid, trim_end_scores, trim_end_valid,
+            self.force_linking_unlinked)
 
         no_route_action_yet = torch.zeros((batch_size,), dtype=torch.bool,
                                           device=state.device)
@@ -2358,15 +2081,15 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         flat_trim_end_valid = trim_end_valid.reshape(batch_size, -1)
 
         flat_extend_scores, flat_extend_valid = \
-            _mask_flat_action_scores_by_batch_allowed(
-                flat_extend_scores, flat_extend_valid, allow_extend)
+            mask_action_family(
+                flat_extend_scores, flat_extend_valid, mask.extend)
         flat_trim_start_scores, flat_trim_start_valid = \
-            _mask_flat_action_scores_by_batch_allowed(
+            mask_action_family(
                 flat_trim_start_scores, flat_trim_start_valid,
-                allow_trim_start)
+                mask.trim_start)
         flat_trim_end_scores, flat_trim_end_valid = \
-            _mask_flat_action_scores_by_batch_allowed(
-                flat_trim_end_scores, flat_trim_end_valid, allow_trim_end)
+            mask_action_family(
+                flat_trim_end_scores, flat_trim_end_valid, mask.trim_end)
 
         flat_route_scores = torch.cat((
             flat_extend_scores,
@@ -2382,23 +2105,10 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
 
         halt_scores = self.halt_scorer(state, node_descs, state.current_routes,
                                        state.current_route_time, node_pad_mask)
-        if self.force_linking_unlinked:
-            not_fully_linked = ~(state.has_path.all(-1).all(-1))
-            halt_scores[not_fully_linked] = TORCH_FMIN
-
-        halt_scores[current_route_lens < state.min_route_len] = TORCH_FMIN
-        old_route_is_done = state.is_done() | no_route_action_yet
-        halt_scores[old_route_is_done] = TORCH_FMAX
-        if self.forbid_halt_when_overlong:
-            overlong_routes = current_route_lens > state.max_route_len
-            can_trim = trim_start_valid.reshape(batch_size, -1).any(-1) | \
-                trim_end_valid.reshape(batch_size, -1).any(-1)
-            repairable_overlong = overlong_routes & can_trim & \
-                ~old_route_is_done
-            halt_scores[repairable_overlong] = TORCH_FMIN
-        if not allow_halt:
-            halt_scores = halt_scores.clone()
-            halt_scores[~old_route_is_done] = TORCH_FMIN
+        halt_scores, old_route_is_done = edit_halt_scores(
+            state, halt_scores, current_route_lens, no_route_action_yet,
+            trim_start_valid, trim_end_valid, self.force_linking_unlinked,
+            self.forbid_halt_when_overlong, mask.halt)
 
         if return_distribution:
             action_log_probs = _joint_route_action_log_probs(
@@ -2543,9 +2253,9 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         """
         batch_size = state.batch_size
         route_capacity = state.current_routes.shape[1]
-        global_features = state.get_global_state_features(
+        global_features = global_state_features(state,
             include_redundancy=self.use_redundancy_features,
-            weight_feature_keys=self.weight_feature_keys)
+            preference_goals=self.preference_goals)
         global_features = global_features.to(
             device=state.device,
             dtype=nodepair_embeds.dtype,
@@ -2557,8 +2267,10 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                 f"{global_features.shape[-1]}"
             )
         candidate_features, candidate_valid, from_nodes, to_nodes = \
-            self._get_trim_candidate_features(
-                state, global_features, nodepair_embeds.dtype, trim_start)
+            trim_candidate_features(
+                state, global_features, nodepair_embeds.dtype, trim_start,
+                use_redundancy=self.use_redundancy_features,
+                allow_below_min=self.allow_trim_below_min)
         candidate_valid = candidate_valid & (from_nodes >= 0) & (to_nodes >= 0)
         scores = torch.full((batch_size, route_capacity), TORCH_FMIN,
                             device=state.device, dtype=nodepair_embeds.dtype)
@@ -2575,262 +2287,9 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             scores[candidate_valid] = scored
         return scores, candidate_valid
 
-    def _get_trim_candidate_features(self, state, global_features, dtype,
-                                     trim_start):
-        routes = state.current_routes.to(dtype=torch.long)
-        batch_size, route_capacity = routes.shape
-        route_lens = state.current_route_n_stops.to(dtype=torch.long)
-        positions = torch.arange(route_capacity, device=state.device)
-        pos = positions[None].expand(batch_size, -1)
 
-        min_lens = state.min_route_len.to(device=state.device,
-                                          dtype=torch.long)
-        # Absolute trim floor: normally min_route_len, but if below-min trims
-        # are allowed a route may be shortened down to 2 stops (still a path).
-        trim_floor = (torch.full_like(min_lens, 2)
-                      if getattr(self, 'allow_trim_below_min', False)
-                      else min_lens)
-        max_lens = state.max_route_len.to(device=state.device,
-                                          dtype=dtype).clamp_min(1)
-        route_lens_f = route_lens.to(dtype=dtype).clamp_min(1)
-        route_time = state.current_route_time.to(dtype=dtype).clamp_min(EPSILON)
-        times_from_start = state.current_route_times_from_start.to(dtype=dtype)
 
-        if trim_start:
-            from_nodes = routes[:, :1].expand(-1, route_capacity)
-            to_nodes = routes
-            removed_len = pos
-            remaining_len = route_lens[:, None] - pos
-            removed_time = times_from_start
-            remaining_time = route_time[:, None] - removed_time
-            direction_flag = torch.zeros_like(route_lens_f)[:, None].expand_as(
-                times_from_start)
-            valid = (pos >= 1) & (pos < route_lens[:, None]) & \
-                (remaining_len >= trim_floor[:, None])
-        else:
-            last_pos = (route_lens - 1).clamp_min(0)
-            old_end = routes.gather(1, last_pos[:, None])
-            from_nodes = routes
-            to_nodes = old_end.expand(-1, route_capacity)
-            remaining_len = pos + 1
-            removed_len = route_lens[:, None] - remaining_len
-            remaining_time = times_from_start
-            removed_time = route_time[:, None] - remaining_time
-            direction_flag = torch.ones_like(route_lens_f)[:, None].expand_as(
-                times_from_start)
-            valid = (pos < (route_lens - 1)[:, None]) & \
-                (remaining_len >= trim_floor[:, None])
 
-        valid = valid & (route_lens[:, None] > trim_floor[:, None])
-        route_len_frac = (
-            route_lens.to(dtype=dtype)[:, None] / max_lens[:, None]
-        ).expand_as(pos)
-        base_features = torch.stack((
-            removed_len.to(dtype=dtype) / route_lens_f[:, None],
-            remaining_len.to(dtype=dtype) / max_lens[:, None],
-            route_len_frac,
-            removed_time / route_time[:, None],
-            remaining_time / route_time[:, None],
-            direction_flag.to(dtype=dtype),
-        ), dim=-1)
-        overlap_features = self._get_vectorized_trim_overlap_features(
-            state, positions, trim_start, dtype)
-        if self.use_redundancy_features:
-            redundancy_features = \
-                self._get_vectorized_trim_redundancy_features(
-                    state, positions, trim_start, dtype)
-        else:
-            redundancy_features = torch.zeros(
-                (batch_size, route_capacity, 0),
-                device=state.device,
-                dtype=dtype,
-            )
-        expanded_global = global_features[:, None].expand(
-            -1, route_capacity, -1)
-        features = torch.cat(
-            (base_features, overlap_features, redundancy_features,
-             expanded_global), dim=-1)
-        return features, valid, from_nodes, to_nodes
-
-    def _get_vectorized_trim_overlap_features(self, state, positions,
-                                              trim_start, dtype):
-        routes = state.current_routes.to(dtype=torch.long)
-        batch_size, route_capacity = routes.shape
-        route_lens = state.current_route_n_stops.to(dtype=torch.long)
-        node_pos = positions[None, None]
-        cand_pos = positions[None, :, None]
-        route_valid = routes >= 0
-
-        other_node_masks, other_edge_masks = \
-            self._get_other_route_overlap_masks(state)
-        safe_routes = routes.clamp(min=0)
-        covered_route_nodes = other_node_masks.gather(1, safe_routes) & \
-            route_valid
-
-        if trim_start:
-            removed_node_pos = node_pos < cand_pos
-            kept_node_pos = (node_pos >= cand_pos) & \
-                (node_pos < route_lens[:, None, None])
-        else:
-            removed_node_pos = (node_pos > cand_pos) & \
-                (node_pos < route_lens[:, None, None])
-            kept_node_pos = node_pos <= cand_pos
-        removed_node_pos = removed_node_pos & route_valid[:, None]
-        kept_node_pos = kept_node_pos & route_valid[:, None]
-
-        removed_node_overlap = self._masked_candidate_fraction(
-            covered_route_nodes, removed_node_pos, dtype)
-        kept_node_overlap = self._masked_candidate_fraction(
-            covered_route_nodes, kept_node_pos, dtype)
-
-        if route_capacity > 1:
-            edge_pos = positions[:-1][None, None]
-            from_nodes = routes[..., :-1]
-            to_nodes = routes[..., 1:]
-            valid_edges = (from_nodes >= 0) & (to_nodes >= 0)
-            edge_batch_idxs = torch.arange(
-                batch_size, device=state.device)[:, None]
-            safe_from = from_nodes.clamp(min=0)
-            safe_to = to_nodes.clamp(min=0)
-            covered_route_edges = other_edge_masks[
-                edge_batch_idxs, safe_from, safe_to] & valid_edges
-
-            if trim_start:
-                removed_edge_pos = edge_pos < cand_pos
-                kept_edge_pos = (edge_pos >= cand_pos) & \
-                    (edge_pos < (route_lens - 1)[:, None, None])
-            else:
-                removed_edge_pos = (edge_pos >= cand_pos) & \
-                    (edge_pos < (route_lens - 1)[:, None, None])
-                kept_edge_pos = edge_pos < cand_pos
-            removed_edge_pos = removed_edge_pos & valid_edges[:, None]
-            kept_edge_pos = kept_edge_pos & valid_edges[:, None]
-            removed_edge_overlap = self._masked_candidate_fraction(
-                covered_route_edges, removed_edge_pos, dtype)
-            kept_edge_overlap = self._masked_candidate_fraction(
-                covered_route_edges, kept_edge_pos, dtype)
-        else:
-            empty = torch.zeros(
-                (batch_size, route_capacity), device=state.device,
-                dtype=dtype)
-            removed_edge_overlap = empty
-            kept_edge_overlap = empty
-
-        one = torch.ones((), device=state.device, dtype=dtype)
-        return torch.stack((
-            removed_node_overlap,
-            one - removed_node_overlap,
-            removed_edge_overlap,
-            one - removed_edge_overlap,
-            kept_node_overlap,
-            one - kept_node_overlap,
-            kept_edge_overlap,
-            one - kept_edge_overlap,
-        ), dim=-1)
-
-    def _masked_candidate_fraction(self, covered_items, candidate_mask, dtype):
-        covered = covered_items[:, None] & candidate_mask
-        counts = candidate_mask.sum(dim=-1)
-        denom = counts.clamp_min(1).to(dtype=dtype)
-        frac = covered.to(dtype=dtype).sum(dim=-1) / denom
-        return torch.where(
-            counts > 0,
-            frac,
-            torch.zeros_like(frac),
-        )
-
-    def _get_vectorized_trim_redundancy_features(
-            self, state, positions, trim_start, dtype):
-        """Describe which repeated legs each possible trim action removes."""
-        routes = state.current_routes.to(dtype=torch.long)
-        batch_size, route_capacity = routes.shape
-        route_lens = state.current_route_n_stops.to(dtype=torch.long)
-        edge_positions = positions[:-1]
-        edge_pos = edge_positions[None, None]
-        cand_pos = positions[None, :, None]
-
-        from_nodes = routes[..., :-1]
-        to_nodes = routes[..., 1:]
-        valid_edges = (from_nodes >= 0) & (to_nodes >= 0)
-        safe_from = from_nodes.clamp(min=0)
-        safe_to = to_nodes.clamp(min=0)
-        edge_batch_idxs = torch.arange(
-            batch_size, device=state.device)[:, None]
-
-        total_edge_counts = state.total_leg_use_count[
-            edge_batch_idxs, safe_from, safe_to]
-        current_edge_counts = state.current_leg_use_count[
-            edge_batch_idxs, safe_from, safe_to]
-        excess_edges = valid_edges & (total_edge_counts > 1)
-        self_repeat_edges = valid_edges & (current_edge_counts > 1)
-
-        if trim_start:
-            removed_edge_pos = edge_pos < cand_pos
-            kept_edge_pos = (edge_pos >= cand_pos) & \
-                (edge_pos < (route_lens - 1)[:, None, None])
-        else:
-            removed_edge_pos = (edge_pos >= cand_pos) & \
-                (edge_pos < (route_lens - 1)[:, None, None])
-            kept_edge_pos = edge_pos < cand_pos
-        removed_edge_pos = removed_edge_pos & valid_edges[:, None]
-        kept_edge_pos = kept_edge_pos & valid_edges[:, None]
-
-        removed_excess_fraction = self._masked_candidate_fraction(
-            excess_edges, removed_edge_pos, dtype)
-        removed_self_repeat_fraction = self._masked_candidate_fraction(
-            self_repeat_edges, removed_edge_pos, dtype)
-        kept_excess_fraction = self._masked_candidate_fraction(
-            excess_edges, kept_edge_pos, dtype)
-
-        leg_times = get_route_leg_times(
-            state.current_routes, state.drive_times, state.mean_stop_time)
-        redundant_leg_times = leg_times * excess_edges
-        removed_excess_time = (
-            redundant_leg_times[:, None] *
-            removed_edge_pos.to(dtype=leg_times.dtype)
-        ).sum(dim=-1)
-        removed_excess_time_fraction = removed_excess_time / \
-            leg_times.sum(dim=-1)[:, None].clamp_min(EPSILON)
-
-        mirror_factor = 2 if state.symmetric_routes else 1
-        total_counts = state.total_leg_use_count.to(dtype=dtype)
-        old_traversals = total_counts.sum(dim=(1, 2)) / mirror_factor
-        old_excess = (total_counts - 1).clamp_min(0).sum(
-            dim=(1, 2)) / mirror_factor
-        old_redundancy = old_excess / old_traversals.clamp_min(1)
-
-        if state.symmetric_routes:
-            compare_from = torch.minimum(safe_from, safe_to)
-            compare_to = torch.maximum(safe_from, safe_to)
-        else:
-            compare_from = safe_from
-            compare_to = safe_to
-        same_edge = (compare_from[:, :, None] == compare_from[:, None]) & \
-            (compare_to[:, :, None] == compare_to[:, None])
-        earlier_edge = edge_positions[None, :, None] > \
-            edge_positions[None, None]
-        prior_removed_same = (
-            removed_edge_pos[:, :, :, None] &
-            same_edge[:, None] &
-            earlier_edge[:, None]
-        ).sum(dim=-1)
-        count_before_removal = \
-            total_edge_counts[:, None] - prior_removed_same
-        removed_excess = (
-            removed_edge_pos & (count_before_removal > 1)
-        ).sum(dim=-1).to(dtype=dtype)
-        removed_count = removed_edge_pos.sum(dim=-1).to(dtype=dtype)
-        new_redundancy = (old_excess[:, None] - removed_excess) / \
-            (old_traversals[:, None] - removed_count).clamp_min(1)
-        redundancy_delta_if_trim = old_redundancy[:, None] - new_redundancy
-
-        return torch.stack((
-            removed_excess_fraction,
-            removed_excess_time_fraction,
-            removed_self_repeat_fraction,
-            kept_excess_fraction,
-            redundancy_delta_if_trim,
-        ), dim=-1)
 
     def _write_trim_features(self, features, valid, batch_idx, from_node,
                              to_node, removed_len, remaining_len, route_len,
@@ -2860,42 +2319,6 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         ))
         valid[batch_idx, from_node, to_node] = True
 
-    def _get_other_route_overlap_masks(self, state):
-        if hasattr(state.extra_data, "context_node_covered_mask") and \
-                hasattr(state.extra_data, "context_edge_covered_mask"):
-            return (
-                state.context_node_covered_mask.to(
-                    device=state.device, dtype=torch.bool),
-                state.context_edge_covered_mask.to(
-                    device=state.device, dtype=torch.bool),
-            )
-        node_masks = torch.zeros(
-            (state.batch_size, state.max_n_nodes),
-            dtype=torch.bool,
-            device=state.device,
-        )
-        edge_masks = torch.zeros(
-            (state.batch_size, state.max_n_nodes, state.max_n_nodes),
-            dtype=torch.bool,
-            device=state.device,
-        )
-
-        for bi, batch_routes in enumerate(state._finished_routes):
-            for route in batch_routes:
-                route = route.to(device=state.device, dtype=torch.long)
-                route = route[route > -1]
-                if route.numel() == 0:
-                    continue
-                node_masks[bi, route] = True
-                if route.numel() < 2:
-                    continue
-                from_nodes = route[:-1]
-                to_nodes = route[1:]
-                edge_masks[bi, from_nodes, to_nodes] = True
-                if state.symmetric_routes:
-                    edge_masks[bi, to_nodes, from_nodes] = True
-
-        return node_masks, edge_masks
 
     def _get_trim_overlap_features(self, removed_nodes, removed_edge_nodes,
                                    kept_nodes, kept_edge_nodes,
@@ -3056,7 +2479,7 @@ class UnbiasedPathCombiner(RouteGeneratorBase):
         global_feats = torch.cat(
             ((state.total_route_time / state.n_routes_to_plan)[..., None],
              state.get_n_routes_features(),
-             state.get_cost_weights_tensor(self.weight_feature_keys)), dim=-1)
+             state.get_cost_weights_tensor(tuple(PREFERENCE_KEYS[goal] for goal in self.preference_goals))), dim=-1)
         global_feats = self.global_extras_norm(global_feats)
         # get average node descriptor
         avg_node = mean_pool_sequence(node_descs, node_pad_mask)
@@ -3737,20 +3160,6 @@ def get_node_pair_descs(node_descs):
     return torch.cat((exp_src_nodes, exp_dst_nodes), dim=-1)
 
 
-def check_extensions_add_connections(is_linked, extensions):
-    # determine if any path on its own makes new connections
-    path_makes_new_connection = \
-        aggr_edges_over_sequences(extensions, (~is_linked[..., None]))
-    path_makes_new_connection = path_makes_new_connection.bool().squeeze(-1)
-
-    # if a graph is not fully connected, then any path that doesn't make a 
-     # new connection is invalid.
-    is_fully_connected = is_linked.all(dim=-1).all(dim=-1)
-    while is_fully_connected.ndim < path_makes_new_connection.ndim:
-        is_fully_connected.unsqueeze_(-1)
-    has_valid_coverage = is_fully_connected | path_makes_new_connection
-
-    return has_valid_coverage
 
 
 def update_connections_matrix(is_linked, new_routes, symmetric_routes=False):

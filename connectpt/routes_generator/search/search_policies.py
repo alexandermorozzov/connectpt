@@ -8,8 +8,9 @@ them by ``allowed_actions``. The capability check uses the central
 """
 from __future__ import annotations
 
-from ..model_capabilities import ROLE_CAPABILITIES, validate_actions
-from ..core.actions import ACTION_NAME_TO_KIND
+from ..env.masks import ActionMask
+from ..env.actions import ROLE_CAPABILITIES, validate_actions
+from ..env.actions import ACTION_NAME_TO_KIND
 
 
 class SearchPolicyAdapter:
@@ -27,15 +28,6 @@ class SearchPolicyAdapter:
 
     def validate_actions(self, allowed_actions) -> None:
         validate_actions(self.role, allowed_actions)
-
-    def _allow_flags(self, allowed_actions) -> dict[str, bool]:
-        allowed = set(allowed_actions)
-        return {
-            "allow_extend": "extend" in allowed,
-            "allow_halt": "halt" in allowed,
-            "allow_trim_start": "trim_start" in allowed,
-            "allow_trim_end": "trim_end" in allowed,
-        }
 
     def propose_action(self, state, *, allowed_actions, greedy=False):
         raise NotImplementedError
@@ -60,7 +52,7 @@ class EditSearchPolicy(SearchPolicyAdapter):
     def propose_action(self, state, *, allowed_actions, greedy=False):
         self.validate_actions(allowed_actions)
         return self.model.step_route_action(
-            state, greedy=greedy, **self._allow_flags(allowed_actions)
+            state, greedy=greedy, mask=ActionMask.from_names(allowed_actions)
         )
 
 

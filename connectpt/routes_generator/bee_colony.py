@@ -1,3 +1,4 @@
+from connectpt.routes_generator.env.masks import ActionMask
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -13,11 +14,12 @@ import hydra
 
 from .run.logger import log as log_metrics
 from .search.records import METRIC_FIELDS, SearchBestRecord
-from .models import check_extensions_add_connections
+from .env.masks import check_extensions_add_connections
 from .city.shortest_paths import reconstruct_all_paths
 from .common.tensors import get_update_at_mask
 from .network.routes import to_routes
-from .env.state import ROUTE_ACTION_HALT, RouteGenBatchState
+from .env.actions import ROUTE_ACTION_HALT
+from .env.state import RouteGenBatchState
 from .import utils as lrnu
 from .initialization import get_direct_sat_dmd
 
@@ -588,26 +590,20 @@ def get_neural_extend_variants(model, env_state, bee_networks, chosen_route_idxs
             if supports_trim_actions:
                 action_kinds, action, _, _ = model.step_route_action(
                     env_state, greedy=greedy,
-                    allow_extend=True,
-                    allow_trim_start=False,
-                    allow_trim_end=False,
-                    allow_halt=allow_halt)
+                    mask=ActionMask(extend=True, trim_start=False, trim_end=False, halt=allow_halt))
             else:
                 action, _, _ = model.step(
-                    env_state, greedy=greedy, allow_halt=allow_halt)
+                    env_state, greedy=greedy, mask=ActionMask(halt=allow_halt))
         finally:
             env_state.extra_data.max_route_len = original_max_route_len
     else:
         if supports_trim_actions:
             action_kinds, action, _, _ = model.step_route_action(
                 env_state, greedy=greedy,
-                allow_extend=True,
-                allow_trim_start=False,
-                allow_trim_end=False,
-                allow_halt=allow_halt)
+                mask=ActionMask(extend=True, trim_start=False, trim_end=False, halt=allow_halt))
         else:
             action, _, _ = model.step(
-                env_state, greedy=greedy, allow_halt=allow_halt)
+                env_state, greedy=greedy, mask=ActionMask(halt=allow_halt))
 
     if supports_trim_actions:
         halted = action_kinds == ROUTE_ACTION_HALT
@@ -710,19 +706,13 @@ def get_neural_edit_variants(model, env_state, bee_networks, chosen_route_idxs,
         try:
             action_kinds, action, _, _ = model.step_route_action(
                 env_state, greedy=greedy,
-                allow_extend=allow_extend,
-                allow_trim_start=allow_trim_start,
-                allow_trim_end=allow_trim_end,
-                allow_halt=allow_halt)
+                mask=ActionMask(extend=allow_extend, trim_start=allow_trim_start, trim_end=allow_trim_end, halt=allow_halt))
         finally:
             env_state.extra_data.max_route_len = original_max_route_len
     else:
         action_kinds, action, _, _ = model.step_route_action(
             env_state, greedy=greedy,
-            allow_extend=allow_extend,
-            allow_trim_start=allow_trim_start,
-            allow_trim_end=allow_trim_end,
-            allow_halt=allow_halt)
+            mask=ActionMask(extend=allow_extend, trim_start=allow_trim_start, trim_end=allow_trim_end, halt=allow_halt))
 
     halted = action_kinds == ROUTE_ACTION_HALT
     if n_cond > 0:

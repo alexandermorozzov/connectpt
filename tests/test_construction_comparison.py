@@ -1,3 +1,4 @@
+from connectpt.routes_generator.env.features import global_state_features, redundancy_global_features
 import torch
 import pytest
 import json
@@ -301,19 +302,19 @@ def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
         d3po = compose(config_name='runs/train_construction', overrides=['trainer=d3po_construction'])
     assert d3po.discount_rate == .95 and d3po.diff_reward
-    assert model.weight_feature_keys == ('demand_time_weight', 'route_time_weight')
+    assert model.preference_goals == ('ATT', 'RTT')
     assert model.edge_feat_dim == 13
     assert model.path_scorer[0].running_mean.numel() == 16
     assert model.halt_scorer.n_extra_feats == 13
-    assert model.halt_scorer.weight_feature_keys == model.weight_feature_keys
-    scalar = NNBaseline(weight_feature_keys=model.weight_feature_keys, holliday_features=True)
-    vector = D3POValueModule(n_objectives=2, weight_feature_keys=model.weight_feature_keys, holliday_features=True)
+    assert model.halt_scorer.preference_goals == model.preference_goals
+    scalar = NNBaseline(preference_goals=model.preference_goals, holliday_features=True)
+    vector = D3POValueModule(n_objectives=2, preference_goals=model.preference_goals, holliday_features=True)
     assert scalar.input_dim == vector.legacy_input_dim == 21
     dataset = DynamicCityGraphDataset(9, 9, data_type='voronoi')
     graphs = [dataset.transform(dataset.generate_graph()) for _ in range(2)]
     cost = build_cost(cfg.cost, symmetric_routes=True)
     state = RouteGenBatchState(graphs, cost.constants, 1, 2, 5, preferences=cost.get_weights())
-    globals_ = state.get_global_state_features(weight_feature_keys=model.weight_feature_keys)
+    globals_ = global_state_features(state, preference_goals=model.preference_goals)
     assert globals_.shape[-1] == 11
     features = scalar.inputs_from_data(state.graph_data, state.cost_weights)
     degree = features[:, 9].clone()

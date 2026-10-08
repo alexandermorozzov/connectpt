@@ -5,7 +5,7 @@ from tqdm import tqdm
 import networkx as nx
 
 from .network.routes import to_routes
-from .common.tensors import aggr_edges_over_sequences
+from .env.features import aggr_edges_over_sequences
 from .city.shortest_paths import reconstruct_all_paths
 from .env.state import RouteGenBatchState
 

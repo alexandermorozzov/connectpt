@@ -45,6 +45,12 @@ class CheckpointStore:
     ):
         """Load weights straight into ``model`` (no wrapper, no key rewriting)."""
         obj = torch.load(path, map_location=map_location)
+        if isinstance(obj, dict) and "feature_names" in obj:
+            actual = model.feature_set.metadata()
+            if obj["feature_names"] != actual["feature_names"] or obj["dims"] != actual["dims"]:
+                raise ValueError(
+                    f"checkpoint features {obj['feature_names']} differ from policy features {actual['feature_names']}"
+                )
         state_dict = CheckpointStore.extract_state_dict(obj)
         return model.load_state_dict(state_dict, strict=strict)
 
@@ -69,6 +75,8 @@ class CheckpointStore:
             "model_class": type(model).__name__,
             "state_dict": model.state_dict(),
         }
+        payload.update(model.feature_set.metadata())
+        payload["objectives"] = list(model.objectives)
 
         if cfg is not None and OmegaConf is not None:
             payload["config"] = OmegaConf.to_container(cfg, resolve=True)

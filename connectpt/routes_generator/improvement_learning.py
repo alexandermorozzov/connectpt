@@ -1,3 +1,6 @@
+from .run.checkpoints import CheckpointStore
+from connectpt.routes_generator.env.masks import ActionMask
+from .env.features import global_state_features, critic_inputs, PREFERENCE_KEYS
 import math
 import random
 from pathlib import Path
@@ -10,8 +13,9 @@ from .run.logger import flush, log as log_metrics
 from .training.records import EditTrainRecord, EditValRecord
 from .city.graph import DEMAND_KEY, STOP_KEY, DemandScaleTransform, SpaceScaleTransform
 from .objectives.preferences import COST_WEIGHT_KEY_ORDER
-from .env.state import ROUTE_ACTION_EXTEND, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_TRIM_START, RouteGenBatchState
-from .models import FeatureNorm, get_mlp, WEIGHT_FEATURE_KEYS
+from .env.actions import ROUTE_ACTION_EXTEND, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_TRIM_START
+from .env.state import RouteGenBatchState
+from .models import FeatureNorm, get_mlp, DEFAULT_PREFERENCE_GOALS
 from .network.routes import to_routes
 from .city.graph import to_batch
 from .objectives.penalties import edit_step_penalty as step_penalty, forced_halt_penalty as halt_penalty
@@ -409,18 +413,18 @@ class D3POValueModule:
     # Feature specs (checkpoint-locked, declared like on the actor models):
     # order of the cost-weight slots inside the shared global state features,
     # and inside this critic's own legacy input tail (slot -1-ii = key ii).
-    weight_feature_keys = WEIGHT_FEATURE_KEYS
+    preference_goals = DEFAULT_PREFERENCE_GOALS
     weight_input_keys = COST_WEIGHT_KEY_ORDER
 
     def __init__(self, learning_rate=0.0005, n_objectives=3, decay=0.01,
-                 device=None, actor_model=None, weight_feature_keys=None,
+                 device=None, actor_model=None, preference_goals=None,
                  holliday_features=False):
         self.learning_rate = learning_rate
-        self._explicit_weight_features = weight_feature_keys is not None
-        if weight_feature_keys is not None:
-            self.weight_feature_keys = tuple(weight_feature_keys)
+        self._explicit_weight_features = preference_goals is not None
+        if preference_goals is not None:
+            self.preference_goals = tuple(preference_goals)
             self.weight_input_keys = tuple(k for k in COST_WEIGHT_KEY_ORDER
-                                           if k in self.weight_feature_keys)
+                                           if k in tuple(PREFERENCE_KEYS[goal] for goal in self.preference_goals))
         self.holliday_features = holliday_features
         self.decay = decay
         self.n_objectives = int(n_objectives)
@@ -442,7 +446,7 @@ class D3POValueModule:
 
     @property
     def legacy_input_dim(self):
-        return 10 + 9 + len(self.weight_feature_keys) if self._explicit_weight_features else 21
+        return 10 + 9 + len(self.preference_goals) if self._explicit_weight_features else 21
 
     def _build_model(self, input_dim):
         self.model = torch.nn.Sequential(
@@ -455,55 +459,18 @@ class D3POValueModule:
             weight_decay=self.decay)
 
     def inputs_from_data(self, graph_data, cost_weights):
-        dev = graph_data[STOP_KEY].x.device
-        input_data = torch.zeros(graph_data.num_graphs,
-                                 self.legacy_input_dim,
-                                 dtype=torch.float, device=dev)
-        input_data[:, 0] = graph_data.demand.sum(dim=(1, 2))
-
-        for bi, dl in enumerate(graph_data.to_data_list()):
-            dmd_graph = dl[DEMAND_KEY]
-            input_data[bi, 1] = dmd_graph.num_edges
-            input_data[bi, 2] = dmd_graph.edge_attr[:, 0].mean()
-            if dmd_graph.num_edges > 1:
-                input_data[bi, 3] = dmd_graph.edge_attr[:, 0].std()
-            else:
-                input_data[bi, 3] = 0
-
-            dmd_weighted_times = dmd_graph.edge_attr[:, 0] * \
-                dmd_graph.edge_attr[:, 1]
-            input_data[bi, 4] = dmd_weighted_times.mean()
-            if self.holliday_features:
-                input_data[bi, 5] = dmd_weighted_times.mean()
-            elif dmd_graph.num_edges > 1:
-                input_data[bi, 5] = dmd_weighted_times.std()
-            else:
-                input_data[bi, 5] = 0
-            x_dim = dl[STOP_KEY].x.shape[1]
-            input_data[bi, 6:6 + x_dim] = dl[STOP_KEY].x.mean(dim=0)
-
-        # Named dict -> fixed slots by the explicit key spec (never dict
-        # iteration order). A key absent from the dict leaves its slot at
-        # zero.
-        for ii, key in enumerate(self.weight_input_keys):
-            if key not in cost_weights:
-                continue
-            cw = cost_weights[key]
-            data_idx = -(1 + ii)
-            if torch.is_tensor(cw):
-                input_data[:, data_idx] = cw.to(dev)
-            else:
-                input_data[:, data_idx] = cw
-
-        return input_data
+        return critic_inputs(graph_data, cost_weights,
+                             input_dim=self.legacy_input_dim,
+                             holliday_features=self.holliday_features,
+                             weight_input_keys=self.weight_input_keys)
 
     def _features_from_state(self, state):
         if self._shared_critic:
             return self.actor_model.get_critic_features(state)
         input_data = self.inputs_from_data(
             state.graph_data, state.cost_weights)
-        glob_feats = state.get_global_state_features(
-            weight_feature_keys=self.weight_feature_keys)
+        glob_feats = global_state_features(state,
+            preference_goals=self.preference_goals)
         input_data[..., -glob_feats.shape[-1]:] = glob_feats
         return input_data
 
@@ -792,11 +759,9 @@ def _collect_lc_improvement_cfg_ppo_rollout(
                 step_kinds, step_actions, step_logits, _ = \
                     model.step_route_action(
                         state,
-                        allow_halt=not (
+                        mask=ActionMask(halt=not (
                             force_nonhalt_first_step and route_step_idx == 0
-                        ),
-                        allow_trim_start=allow_trim,
-                        allow_trim_end=allow_trim)
+                        ), trim_start=allow_trim, trim_end=allow_trim))
                 state.apply_route_actions(step_kinds, step_actions)
                 score_mask = active
             else:
@@ -993,14 +958,9 @@ def _update_lc_improvement_cfg_ppo_from_rollout(
                 _, _, new_logits, entropy = model.step_route_action(
                     mb_states, actions=mb_actions,
                     action_kinds=mb_action_kinds,
-                    allow_trim_start=(
-                        mb_trim_allowed if mb_trim_allowed is not None
-                        else True
-                    ),
-                    allow_trim_end=(
-                        mb_trim_allowed if mb_trim_allowed is not None
-                        else True
-                    ))
+                    mask=ActionMask(trim_start=mb_trim_allowed if mb_trim_allowed is not None
+                        else True, trim_end=mb_trim_allowed if mb_trim_allowed is not None
+                        else True))
             else:
                 _, new_logits, entropy = model.step(
                     mb_states, actions=mb_actions)
@@ -1161,11 +1121,9 @@ def _collect_lc_improvement_cfg_d3po_rollout(
                 step_kinds, step_actions, step_logits, _ = \
                     model.step_route_action(
                         state,
-                        allow_halt=not (
+                        mask=ActionMask(halt=not (
                             force_nonhalt_first_step and route_step_idx == 0
-                        ),
-                        allow_trim_start=allow_trim,
-                        allow_trim_end=allow_trim)
+                        ), trim_start=allow_trim, trim_end=allow_trim))
                 state.apply_route_actions(step_kinds, step_actions)
                 score_mask = active
             else:
@@ -1317,8 +1275,8 @@ def _estimate_d3po_diversity_loss(
     if supports_route_actions:
         step_kwargs.update(
             action_kinds=action_kinds,
-            allow_trim_start=trim_allowed if trim_allowed is not None else True,
-            allow_trim_end=trim_allowed if trim_allowed is not None else True)
+            mask=ActionMask(trim_start=trim_allowed if trim_allowed is not None else True,
+                            trim_end=trim_allowed if trim_allowed is not None else True))
         step = model.step_route_action
     else:
         step = model.step
@@ -1459,14 +1417,9 @@ def _update_lc_improvement_cfg_d3po_from_rollout(
                 step_output = model.step_route_action(
                     mb_states, actions=mb_actions,
                     action_kinds=mb_action_kinds,
-                    allow_trim_start=(
-                        mb_trim_allowed if mb_trim_allowed is not None
-                        else True
-                    ),
-                    allow_trim_end=(
-                        mb_trim_allowed if mb_trim_allowed is not None
-                        else True
-                    ), return_distribution=diversity_weight > 0)
+                    mask=ActionMask(trim_start=mb_trim_allowed if mb_trim_allowed is not None
+                        else True, trim_end=mb_trim_allowed if mb_trim_allowed is not None
+                        else True), return_distribution=diversity_weight > 0)
                 _, _, new_logits, entropy = step_output[:4]
             else:
                 step_output = model.step(
@@ -2220,7 +2173,7 @@ def train_lc_improvement_cfg_ppo(
                 adjustment_mode=adjustment_degree_mode)
             if last_val["final_cost"] < best_val_cost:
                 best_val_cost = last_val["final_cost"]
-                torch.save(model.state_dict(), best_model_path)
+                CheckpointStore.save_model_weights(model, best_model_path)
 
         ratio_mean = ppo_stats["ratio_sum"] / max(ppo_stats["ratio_count"], 1)
         clip_fraction = ppo_stats["clipped_count"] / \
@@ -2658,7 +2611,7 @@ def train_lc_improvement_cfg_d3po(
                 adjustment_use_current=adjustment_condition_current)
             if last_val["final_cost"] < best_val_cost:
                 best_val_cost = last_val["final_cost"]
-                torch.save(model.state_dict(), best_model_path)
+                CheckpointStore.save_model_weights(model, best_model_path)
 
         ratio_mean = d3po_stats["ratio_sum"] / \
             max(d3po_stats["ratio_count"], 1)

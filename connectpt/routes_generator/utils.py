@@ -9,7 +9,7 @@ from heapq import heappush, heappop
 import torch
 from tqdm import tqdm
 import numpy as np
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 import networkx as nx
 
 from . import models
@@ -34,9 +34,15 @@ PM_COMB = "combiner"
 STOP_FEAT_DIM = 8
 
 def build_model_from_cfg(model_cfg, exp_cfg):
+    from .env.features import FeatureParams, dims
+    feature_set = FeatureParams.from_values(model_cfg.features)
+    feature_dims = dims(feature_set)
     common_cfg = model_cfg.common
 
-    backbone_gn = get_graphnet_from_cfg(model_cfg.backbone_gn, common_cfg)
+    net_cfg = OmegaConf.create(OmegaConf.to_container(model_cfg.backbone_gn))
+    net_cfg.kwargs.in_node_dim = feature_dims["node"]
+    net_cfg.kwargs.in_edge_dim = feature_dims["pair"]
+    backbone_gn = get_graphnet_from_cfg(net_cfg, common_cfg)
 
     mean_stop_time_s = exp_cfg.cost_function.kwargs.mean_stop_time_s
     gen_type = model_cfg.route_generator.type
@@ -55,12 +61,13 @@ def build_model_from_cfg(model_cfg, exp_cfg):
 
     low_mem_mode = exp_cfg.get('low_memory_mode', False)
 
-    model = gen_class(backbone_net=backbone_gn, 
+    model = gen_class(backbone_net=backbone_gn, feature_set=feature_set,
                       mean_stop_time_s=mean_stop_time_s, 
                       symmetric_routes=exp_cfg.symmetric_routes,
                       low_memory_mode=low_mem_mode, **model_cfg.common, 
                       **model_cfg.route_generator.kwargs)
                 
+    model.objectives = tuple(exp_cfg.cost_function.kwargs.objectives)
     return model
 
 

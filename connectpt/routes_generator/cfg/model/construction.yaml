@@ -1,5 +1,6 @@
 defaults:
   - route_generator: biased
+  - /features@features: construction_v1
   - _self_
 
 common:
@@ -16,8 +17,6 @@ backbone_gn:
   net_type: graph attn
   kwargs:
     n_layers: 5
-    in_node_dim: 4
-    in_edge_dim: 14
     use_norm: false
     n_heads: 4
     dense: false

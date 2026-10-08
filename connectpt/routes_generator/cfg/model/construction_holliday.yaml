@@ -1,10 +1,7 @@
 defaults:
   - construction
+  - override /features@features: construction_holliday
   - _self_
 route_generator:
   kwargs:
-    weight_feature_keys: [demand_time_weight, route_time_weight]
     feature_norm_unbiased: true
-backbone_gn:
-  kwargs:
-    in_edge_dim: 13
