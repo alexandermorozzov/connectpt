@@ -48,15 +48,20 @@ def policy_profile(model_cfg, cost_cfg, experiment, device, *, checkpoint_path=N
     return PolicyProfile(
         ModelParams.from_values(OmegaConf.to_container(model_cfg, resolve=True)),
         CostConstants(experiment.symmetric_routes, values["mean_stop_time_s"], values["avg_transfer_wait_time_s"]),
-        tuple(values["objectives"]), experiment.low_memory_mode, checkpoint_path, device)
+        tuple(values["objectives"]),
+        experiment.low_memory_mode,
+        checkpoint_path,
+        device,
+    )
 
 
 def compose_policy_config(name="construction_v1"):
     """Compose the groups used by standalone policy runs."""
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        cfg = compose(config_name=None, overrides=[
-            "+cost=rtt_wmc", "+adjustment=cap", "+experiment=standard",
-            f"+model_profile={name}"])
+        cfg = compose(
+            config_name=None,
+            overrides=["+cost=rtt_wmc", "+adjustment=cap", "+experiment=standard", f"+model_profile={name}"],
+        )
     return cfg
 
 
@@ -133,7 +138,16 @@ def build_experiment(
             _set_run_dir(cfg)
         # -- method (group choice already applied at compose; size + name here) --
         if n_bees is not None:
-            cfg.search.n_bees = int(n_bees)
+            counts = cfg.method.bees
+            total = sum(spec.count for spec in counts.values())
+            if n_bees <= 0 or total <= 0:
+                raise ValueError("n_bees and configured bee counts must be positive")
+            allocated = 0
+            entries = list(counts.values())
+            for spec in entries[:-1]:
+                spec.count = int(n_bees * spec.count / total)
+                allocated += spec.count
+            entries[-1].count = int(n_bees) - allocated
         if label is not None:
             cfg.run.label = label
         # -- data / instance --

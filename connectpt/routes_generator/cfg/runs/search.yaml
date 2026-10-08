@@ -9,7 +9,7 @@ defaults:
   - _self_
 
 run:
-  type: bee_colony_search
+  type: search
   name: search
   seed: 0
   cpu: false
@@ -25,8 +25,6 @@ cost:
     ignore_stops_oob: false
 
 models: {}
-search:
-  process_neural_bees_sequentially: false
 
 metrics: [RTT, WMC, ATT, adj_vs_seed, d0, d1, d2, d_un, cost]
 

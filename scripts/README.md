@@ -6,7 +6,7 @@
 |---|---|
 | `run_search.py` | Оптимизация сети: EA, NEA, NEA-Edit, NEA-Combined. |
 | `run.py` | Один конфиг `cfg/runs/<имя>.yaml`: датасет edit, обучение, сравнение. |
-| `make_init_routes.py` | Строит начальные сети бенчмарков. Запускается один раз. |
+| `make_init_routes.py` | Строит начальные сети бенчмарков: `--generator lc`, `john`, `nikolic`. |
 | `data_plot.py` | Рисует маршруты поверх УДС. |
 | `launch.ps1` / `launch.sh` | Любой из скриптов выше в фоне, с логом. |
 
@@ -67,6 +67,8 @@ python scripts/run_search.py --dry-run --methods ea nea nea_edit nea_combined
 | `nea_combined` | нейросетевая перестройка | обученный trim / extend | construction + edit |
 
 Состав пчёл и модели метода — `cfg/method/<метод>.yaml`. Цель — `cfg/cost/rtt_wmc.yaml`.
+Группы `method.bees` исполняются по порядку записи. `allowed_actions` задаёт
+всю маску нейронного edit-оператора. Общие настройки колонии также лежат в `method`.
 
 ## 2. Инстансы
 

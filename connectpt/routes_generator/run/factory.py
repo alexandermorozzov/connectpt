@@ -14,9 +14,9 @@ class ExperimentRunFactory:
         if run_type == "training":
             from ..training.runs import TrainingRun
             return TrainingRun(cfg)
-        if run_type == "bee_colony_search":
-            from ..search.runs import BeeColonySearchRun
-            return BeeColonySearchRun(cfg)
+        if run_type == "search":
+            from ..search.runs import SearchRun
+            return SearchRun(cfg)
         if run_type == "comparison":
             from ..training.runs import ComparisonRun
             return ComparisonRun(cfg)

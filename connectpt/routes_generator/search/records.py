@@ -31,8 +31,14 @@ class SearchBestRecord:
 
 # cost-module metric name -> SearchBestRecord field
 METRIC_FIELDS = {
-    "cost": "cost", "ATT": "att", "RTT": "rtt", "$d_0$": "d0", "$d_1$": "d1", "$d_2$": "d2",
-    "$d_{un}$": "d_un", "# disconnected node pairs": "disconnected_pairs",
+    "cost": "cost",
+    "ATT": "att",
+    "RTT": "rtt",
+    "$d_0$": "d0",
+    "$d_1$": "d1",
+    "$d_2$": "d2",
+    "$d_{un}$": "d_un",
+    "# disconnected node pairs": "disconnected_pairs",
     "# stops out of bounds": "stops_oob",
     "median_connectivity_weighted": "wmc",
 }

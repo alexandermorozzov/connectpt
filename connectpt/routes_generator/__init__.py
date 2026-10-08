@@ -52,7 +52,7 @@ from .objectives.cost import CostHelperOutput, CostModule, MyCostModule, build_c
 from .objectives.preferences import COST_WEIGHT_KEY_ORDER, COST_COMPONENT_NAMES
 
 # === Initialization Methods ===
-from .initialization import (
+from .search.initial import (
     john_init,
     nikolic_init,
 )
@@ -84,7 +84,6 @@ from .policy.models import (
 )
 
 # === Utilities & Helpers ===
-from .utils import test_method
 from .city.shortest_paths import yen_k_shortest_paths
 
 # === Torch Utilities ===
