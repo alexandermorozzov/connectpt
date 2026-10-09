@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from .search import SearchRun
-from .training import ComparisonRun, DatasetRun, TrainingRun
+from .training import DatasetRun, TrainingRun
 
 
-RUNS = {"training": TrainingRun, "search": SearchRun, "comparison": ComparisonRun, "dataset_prepare": DatasetRun}
+RUNS = {"training": TrainingRun, "search": SearchRun, "dataset_prepare": DatasetRun}
 
 
 def make_run(cfg):

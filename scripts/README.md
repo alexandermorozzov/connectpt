@@ -244,13 +244,13 @@ python -m connectpt.routes_generator.city.synthetic datasets/construction/20_nod
 
 | Файл | Содержимое |
 |---|---|
-| `run.json` | commit, seed, argv, status: `running`, `iterations`, `time_budget` или `failed` |
+| `run.json` | commit, seed, argv, status; evaluation_protocol: split, индексы графов, seed, сетки, reference и бюджеты |
 | `config.yaml` | собранный конфиг |
 | `history.csv` | строка на шаг, столбец на метрику (те же теги, что в TensorBoard) |
 | `tensorboard/` | события TensorBoard |
 | `critic_snapshot.pt` | параметры критика, последние значения и targets |
 
-Кроме того: чекпоинты итераций, `last.pt`, `best.pt` (в корне весов), JSON теста.
+Кроме того: чекпоинты итераций, `last.pt`, `best.pt` (в корне весов).
 
 | Тег | Смысл |
 |---|---|
@@ -259,6 +259,7 @@ python -m connectpt.routes_generator.city.synthetic datasets/construction/20_nod
 | `rollout/{cost,att_minutes,rtt_minutes}` | метрики завершённых сетей |
 | `eval/cost`, `eval/objective/*`, `eval/penalty/*`, `eval/monitor/*` | валидация; по cost выбирается best |
 | `pareto/{greedy,stochastic}/*` | HV, EU, число различных и недоминируемых сетей |
+| `eval/test/{last,best}/{greedy,stochastic}/*` | итоговый cost, цели, штрафы, мониторинг; Pareto при его включении |
 | `train/{value_loss,clip_fraction,entropy_loss,approx_kl}` | критик и обновление политики |
 | `time/total_timesteps` | число переходов среды |
 
@@ -278,13 +279,14 @@ foreach ($a in 'ppo', 'd3po') {
     .\scripts\launch.ps1 --wait run.py --config-name runs/train_construction algorithm=$a `
         run.name=$a run.seed=0 --runs-dir $cmp/runs --weights-dir $cmp/weights
 }
-.\scripts\launch.ps1 --wait run.py --config-name runs/compare paths.output_dir=$cmp
 ```
 
-- `runs/compare` (`comparison.names`, `checkpoint`, `mode`, `budget_mode`) пишет
-  `comparison.json` в папку сравнения.
-- Сравнение требует одинаковых seed, commit и бюджета (`budget_mode`: равные
-  transitions или равное время `train_loop.max_seconds`).
+- Сопоставляйте скаляры прогонов в общем TensorBoard и `history.csv`.
+- Для сравнения задайте одинаковые seed, commit, данные, split, протокол оценки
+  и бюджет: transitions или `train_loop.max_seconds`.
+- `evaluation.pareto_enabled=true` подключает HV / EU; construction включает его
+  по умолчанию, edit выключает. Выключенный монитор не выполняет дополнительные
+  оценки сетки. Итоговый test cost записывается и без Pareto.
 - Для каждого seed берите новую папку.
 
 ### 5.5. Ночной запуск
@@ -302,7 +304,8 @@ $cmp = 'artifacts/comparisons/construction_overnight_seed0'
   1 stochastic draw, `train_loop.max_seconds: 25200` (7 часов обучения).
 - Supervisor и пороги памяти не используются.
 - Перед запуском проверьте команды: `--wait ... --dry-run`.
-- Утром: `run.py --config-name runs/compare paths.output_dir=$cmp comparison.budget_mode=wall_time`.
+- Утром: сопоставьте теги `eval/test/best/*` в общем TensorBoard;
+  проверьте протоколы в `run.json` и бюджеты в `config.yaml`.
 - Не уменьшайте batch и horizon без решения Руслана.
 
 ## 6. Папки вывода

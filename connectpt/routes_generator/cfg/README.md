@@ -5,7 +5,7 @@
 
 ```text
 cfg/
-├── runs/            # точки входа: search, train, train_construction, train_construction_overnight, prepare_dataset, compare, init_routes (scripts/make_init_routes.py)
+├── runs/            # точки входа: search, train, train_construction, train_construction_overnight, prepare_dataset, init_routes (scripts/make_init_routes.py)
 ├── instance/        # путь к бенчмарку и ограничения маршрутов
 ├── method/          # методы поиска: ea, nea, nea_edit, nea_combined
 ├── initial/         # настройки эвристических начальных сетей
@@ -50,12 +50,22 @@ python scripts/run.py --config-name runs/prepare_dataset
 сети задаёт `adjustment/cap.yaml`. Выключить штраф: `cost.kwargs.penalties.adjustment=0`
 (в поиске — `--adj-weight 0`). Режим «цель»: `cost.kwargs.adjustment_degree_objective=target`.
 
-`run.type`: `search`, `training`, `dataset_prepare`, `comparison`.
+`run.type`: `search`, `training`, `dataset_prepare`.
 Seed запуска задаётся через `run.seed`, выбор CPU — через `run.cpu=true`.
 `features` задаёт имена и порядок входных признаков модели.
 
 Логирование содержит только скаляры: `rollout`, `train`, `eval`, `pareto`, `search`,
 `time`. TensorBoard читает общую папку `artifacts/`.
+
+`evaluation.pareto_enabled` включает мониторинг Pareto / HV / EU: включён в
+construction, выключен в edit. Частоту задаёт `evaluation.pareto_period`, сетку
+мониторинга — `pareto_preference_count`, число стохастических выборок —
+`pareto_stochastic_samples`. `hv_reference` задаёт точку отсчёта HV по порядку
+активных целей; `eu_preference_count` — размер сетки запросов EU.
+`evaluation.final_test` включает итоговую оценку last / best в режимах greedy /
+stochastic; её сетку и выборки задают `preference_count` и `stochastic_samples`.
+Протокол и выбранные индексы графов записываются в `run.json`, собранные параметры
+— в `config.yaml`, значения метрик — в `history.csv` и TensorBoard.
 
 YAML содержит только значения. Комментарии в конфигах не пишутся.
 

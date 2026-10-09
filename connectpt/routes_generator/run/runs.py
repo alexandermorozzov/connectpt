@@ -40,11 +40,11 @@ def _commit() -> str | None:
         return None
 
 
-def write_run_json(run_dir, *, seed, status: str) -> None:
+def write_run_json(run_dir, *, seed, status: str, metadata=None) -> None:
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run.json").write_text(json.dumps(
-        {"commit": _commit(), "seed": seed, "argv": sys.argv, "status": status},
+        {**(metadata or {}), "commit": _commit(), "seed": seed, "argv": sys.argv, "status": status},
         indent=2), encoding="utf-8")
 
 
@@ -57,6 +57,11 @@ class ExperimentRun:
         self.run_dir: Path | None = None
         self.stop_reason = "iterations"
         self.logger_list = []
+        self.metadata = {}
+
+    def write_metadata(self, status="running") -> None:
+        """Persist the run's current protocol together with its lifecycle status."""
+        write_run_json(self.run_dir, seed=int(self.cfg.run.seed), status=status, metadata=self.metadata)
 
     def setup(self) -> None:
         raise NotImplementedError
@@ -72,16 +77,15 @@ class ExperimentRun:
         names = logger_names(self.cfg.logger_list)
         if dry_run:
             return self.dry_run_artifact()
-        seed = int(self.cfg.run.seed)
-        write_run_json(self.run_dir, seed=seed, status="running")
+        self.write_metadata()
         OmegaConf.save(self.cfg, self.run_dir / "config.yaml", resolve=True)
         self.logger_list = make_loggers(names, self.run_dir)
         try:
             artifact = self.execute()
         except BaseException:
-            write_run_json(self.run_dir, seed=seed, status="failed")
+            self.write_metadata("failed")
             raise
         finally:
             close(self.logger_list)
-        write_run_json(self.run_dir, seed=seed, status=self.stop_reason)
+        self.write_metadata(self.stop_reason)
         return artifact

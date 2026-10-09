@@ -7,8 +7,6 @@ import torch
 import pytest
 import json
 import math
-from pathlib import Path
-from uuid import uuid4
 from hydra import compose, initialize_config_dir
 
 from connectpt.routes_generator.run.const import CFG_DIR
@@ -27,7 +25,7 @@ from connectpt.routes_generator.training.algorithms.base import (
     AlgorithmParams,
 )
 
-from connectpt.routes_generator.objectives.pareto import hypervolume_2d, coverage, nondominated
+from connectpt.routes_generator.objectives.pareto import hypervolume_2d, nondominated
 
 
 def evaluate_action(policy, state, indices, kinds=None, mask=None):
@@ -83,9 +81,6 @@ def test_two_objective_metrics_have_known_geometry():
     assert hypervolume_2d(front, [3, 3]) == 3
     assert hypervolume_2d([], [3, 3]) == 0
     assert len(nondominated(front)) == 2
-    assert coverage([[1, 1]], [[1, 1], [2, 2], [0, 2], [2, 2]]) == 2 / 3
-    assert coverage([], [[1, 1]]) == 0
-    assert coverage([[1, 1]], []) is None
 
 
 def test_existing_preference_perturbation_preserves_simplex_and_inactive_component():
@@ -139,66 +134,6 @@ def test_common_sampler_matches_holliday_and_respects_fixed_weights():
     assert torch.equal(sampled["median_connectivity_weight"], torch.zeros(4096))
     cost = cost.with_params(variable_weights=False, demand_time_weight=0.2, route_time_weight=0.8)
     assert torch.allclose(cost.sample_variable_weights(5)["demand_time_weight"], torch.full((5,), 0.2))
-
-
-def test_three_way_comparison_separates_conditioned_utility_and_archive(tmp_path):
-    from connectpt.routes_generator.run.comparison import compare_runs
-
-    for name in ("ppo", "ablation", "d3po"):
-        run = tmp_path / "runs" / name
-        run.mkdir(parents=True)
-        # Wrong conditioned outputs: the archive can pick the opposite point.
-        rows = [
-            dict(
-                graph=0,
-                preference=w,
-                sample=0,
-                penalized_0=x,
-                penalized_1=y,
-                objective_0=x,
-                objective_1=y,
-                feasible=True,
-                unserved_fraction=0,
-            )
-            for w, x, y in [(0.0, 1.0, 5.0), (1.0, 5.0, 1.0)]
-        ]
-        (run / "test_evaluation.json").write_text(json.dumps({"rows": rows, "eu_preference_count": 101}))
-        write_run(run, status="iterations", timesteps=2048, max_seconds=None)
-    report = compare_runs(tmp_path, names=("ppo", "ablation", "d3po"))
-    assert report["summary"]["ppo"]["eu_conditioned_penalized"] == -5.0
-    assert report["summary"]["ppo"]["eu_archive_penalized"] > -5.0
-    assert report["summary"]["ppo"]["active_steps"] == 2048
-    assert report["summary"]["ppo"]["iterations"] == 2
-    assert len(report["paired_differences"]) == 3
-    assert not list(tmp_path.rglob("*.md"))
-    write_run(tmp_path / "runs/d3po", status="iterations", timesteps=1024, max_seconds=None)
-    with pytest.raises(ValueError, match="budgets differ"):
-        compare_runs(tmp_path, names=("ppo", "ablation", "d3po"))
-    for name in ("ppo", "ablation", "d3po"):
-        write_run(tmp_path / "runs" / name, status="time_budget", timesteps=2048, max_seconds=14400)
-    report = compare_runs(tmp_path, names=("ppo", "d3po"), budget_mode="wall_time")
-    assert set(report["summary"]) == {"ppo", "d3po"}
-    assert report["budget"] == "equal training wall time"
-    assert report["time_limit_seconds"] == 14400
-    write_run(tmp_path / "runs/d3po", status="time_budget", timesteps=2048, max_seconds=7200)
-    with pytest.raises(ValueError, match="time budgets differ"):
-        compare_runs(tmp_path, names=("ppo", "d3po"), budget_mode="wall_time")
-    write_run(tmp_path / "runs/d3po", status="time_budget", timesteps=2048, max_seconds=14400, commit="other")
-    with pytest.raises(ValueError, match="seeds or commits differ"):
-        compare_runs(tmp_path, names=("ppo", "d3po"), budget_mode="wall_time")
-
-
-def write_run(run, *, status, timesteps, max_seconds, commit="same"):
-    """run.json, config.yaml and history.csv as a finished training run leaves them."""
-    (run / "run.json").write_text(json.dumps(dict(commit=commit, seed=42, argv=[], status=status)))
-    (run / "config.yaml").write_text(
-        f"train_loop:\n  max_seconds: {'null' if max_seconds is None else max_seconds}\n"
-        "  resample_preferences_on_terminal: false\n"
-    )
-    (run / "history.csv").write_text(
-        "step,eval/cost,time/total_timesteps,time/time_elapsed\n"
-        f"0,1.0,{timesteps // 2},0.5\n1,,{timesteps},1.0\n2,0.9,,\n"
-    )
 
 
 def test_replayed_action_and_existing_d3po_diversity_restore_state():
@@ -258,8 +193,9 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
     assert 0 in phases and any(x > 0 for x in phases)
 
 
-@pytest.mark.parametrize("trainer", ["ppo", "d3po"])
-def test_construction_uses_legacy_data_setup_and_existing_updates(trainer, tmp_path):
+@pytest.mark.parametrize("trainer,pareto", [("ppo", True), ("d3po", True), ("ppo", False)],
+                         ids=["ppo", "d3po", "ppo_pareto_disabled"])
+def test_construction_uses_legacy_data_setup_and_existing_updates(trainer, pareto, tmp_path):
     import pickle
     from connectpt.routes_generator.city.synthetic import RAW_GRAPH_FILENAME
     from connectpt.routes_generator.run.training import TrainingRun
@@ -293,6 +229,7 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer, tmp_p
                 "evaluation.test_graph_count=1",
                 "evaluation.pareto_preference_count=3",
                 "evaluation.pareto_period=1",
+                f"evaluation.pareto_enabled={str(pareto).lower()}",
                 f"dataset.kwargs.path={data_dir.as_posix()}",
                 "dataset.kwargs.split=0.75",
                 f"dataset.test_path={test_dir.as_posix()}",
@@ -303,7 +240,7 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer, tmp_p
     run = TrainingRun(cfg)
     artifact = run.run()
     info = json.loads((artifact.output_dir / "run.json").read_text())
-    assert set(info) == {"commit", "seed", "argv", "status"} and info["status"] == "iterations"
+    assert set(info) == {"commit", "seed", "argv", "status", "evaluation_protocol"} and info["status"] == "iterations"
     import pandas as pd
 
     history = pd.read_csv(artifact.output_dir / "history.csv", float_precision="round_trip")
@@ -311,9 +248,11 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer, tmp_p
     assert len(history) == 2 and history[-1]["time/total_timesteps"] == 32
     assert artifact.checkpoint_path.exists()
     assert artifact.checkpoint_path.with_name("best.pt").exists()
-    test_protocol = json.loads((artifact.output_dir / "test_protocol.json").read_text())
+    test_protocol = info["evaluation_protocol"]["test"]
     assert test_protocol["split"] == "independent test" and len(test_protocol["indices"]) == 1
-    assert (artifact.output_dir / "test_evaluation_best_stochastic.json").exists()
+    assert not list(artifact.output_dir.glob("test_*.json"))
+    assert not list(artifact.output_dir.glob("pareto/*.json"))
+    assert test_protocol["outcomes_per_checkpoint"] == {"greedy": 3, "stochastic": 3}
     from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
     events = EventAccumulator(str(artifact.output_dir / "tensorboard")).Reload()
@@ -322,16 +261,30 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer, tmp_p
         "rollout/att_minutes",
         "rollout/rtt_minutes",
         "eval/cost",
-        "pareto/greedy/hv",
-        "pareto/stochastic/eu_archive",
-        "pareto/greedy/distinct_networks",
-        "pareto/greedy/distinct_pareto_networks",
+        "eval/test/best/stochastic/cost",
+        "eval/test/last/greedy/objective/ATT",
+        "eval/test/last/greedy/penalty/constraints",
     )
     assert all(tag in events.Tags()["scalars"] for tag in required_tags)
+    if pareto:
+        assert {"pareto/greedy/hv", "pareto/stochastic/eu_archive", "pareto/greedy/distinct_networks",
+                "pareto/greedy/distinct_pareto_networks"} <= set(events.Tags()["scalars"])
+    else:
+        assert not any(tag.startswith("pareto/") or tag.endswith("/hv") for tag in events.Tags()["scalars"])
+        assert info["evaluation_protocol"]["monitor"]["outcomes_per_call"] == {
+            "validation": {"greedy": 0, "stochastic": 0},
+        }
+    all_history = pd.read_csv(artifact.output_dir / "history.csv", float_precision="round_trip")
+    for label in ("last", "best"):
+        for mode in ("greedy", "stochastic"):
+            tag = f"eval/test/{label}/{mode}/cost"
+            value = all_history[tag].dropna().iloc[-1]
+            assert math.isfinite(value)
+            assert events.Scalars(tag)[-1].value == pytest.approx(value)
     assert not events.Tags()["images"]
-    protocol = json.loads((artifact.output_dir / "pareto/validation_protocol.json").read_text())
+    protocol = info["evaluation_protocol"]["validation"]
     assert len(protocol["indices"]) == 3
-    assert protocol["reference"] == [3.0, 3.0]
+    assert info["evaluation_protocol"]["monitor"]["reference"] == [3.0, 3.0]
     for tag in ("rollout/ep_rew_mean", "rollout/ep_len_mean"):
         recorded = events.Scalars(tag)
         assert len(recorded) == len(history)
@@ -488,7 +441,6 @@ def test_fixed_preference_evaluation_does_not_consume_training_rng():
     cost = build_cost(cost_params(cfg.cost), low_memory_mode=False, symmetric_routes=True)
     dataset = DynamicCityGraphDataset(9, 9, data_type="voronoi")
     graphs = [dataset.transform(dataset.generate_graph()) for _ in range(2)]
-    output = Path("artifacts/audits/construction_holliday_64_20261005") / f"rng_{uuid4().hex}"
     before = torch.random.get_rng_state().clone()
     profile = EvaluationProfile(
         params(EvaluationParams, cfg.evaluation),
@@ -497,11 +449,11 @@ def test_fixed_preference_evaluation_does_not_consume_training_rng():
         cfg.experiment.symmetric_routes,
     )
     rows = evaluate_preferences(
-        model, graphs, profile, cost, output, torch.device("cpu"), mode="stochastic", save_artifacts=False
+        model, graphs, profile, cost, torch.device("cpu"), mode="stochastic"
     )
     assert torch.equal(torch.random.get_rng_state(), before)
     repeated = evaluate_preferences(
-        model, graphs, profile, cost, output, torch.device("cpu"), mode="stochastic", save_artifacts=False
+        model, graphs, profile, cost, torch.device("cpu"), mode="stochastic"
     )
     assert rows == repeated
     assert len(rows) == 12

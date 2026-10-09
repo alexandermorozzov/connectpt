@@ -48,7 +48,7 @@ class TrainingPaths:
 
 @dataclass(frozen=True)
 class OutputPaths:
-    """Runs with one output folder (dataset, comparison)."""
+    """Dataset preparation output folder."""
     output_dir: str | None
 
 
@@ -75,15 +75,6 @@ class AdjustmentParams:
         values = OmegaConf.to_container(cost_kwargs, resolve=True)
         return cls(adjustment_degree_weight=values["penalties"]["adjustment"],
                    **{k: v for k, v in values.items() if k.startswith("adjustment_degree_")})
-
-
-@dataclass(frozen=True)
-class ComparisonParams:
-    """Runs under ``<paths.output_dir>/runs/<name>``, compared on one test grid."""
-    names: list
-    checkpoint: str
-    mode: str
-    budget_mode: str
 
 
 @dataclass(frozen=True)

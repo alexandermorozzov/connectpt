@@ -24,15 +24,6 @@ def hypervolume_2d(points, reference):
     return float(volume)
 
 
-def coverage(a, b):
-    """Fraction of unique B points weakly dominated by A (minimization)."""
-    b = np.unique(np.asarray(b).reshape(-1, 2), axis=0)
-    a = np.asarray(a).reshape(-1, 2)
-    if not len(b):
-        return None
-    return float(np.mean([np.any(np.all(a <= p, axis=1)) for p in b]))
-
-
 def canonical_network(routes, symmetric_routes=True):
     """Route order and bidirectional reversal do not create a new network.
 

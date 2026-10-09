@@ -1,7 +1,7 @@
 """Training run artifacts (lifecycle base lives in run.runs)."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
@@ -26,17 +26,16 @@ from ..training.params import CurriculumParams, DatasetBuildParams, EditDatasetP
 from ..training.records import DataCounts
 from ..training.validate import (
     ConstructionValidation, EditValidation, EvaluationParams, EvaluationProfile,
-    evaluate_preferences, log_pareto_metrics,
+    evaluate_preferences, log_evaluation_metrics, log_pareto_metrics,
 )
 from .artifacts import ArtifactStore
-from .comparison import compare_runs
 from .config import compose_policy_config, cost_params, policy_profile
 from .const import DATASETS_DIR
 from .context import RunContext, resolve_device, resolve_under_root, resolve_weights_path
 from .instances import load_instance
 from .policy import PolicyRun
 from .runs import ExperimentRun, RunArtifact
-from .schemas import ComparisonParams, OutputPaths, RunParams, TrainingPaths, TrainingRunParams, params
+from .schemas import OutputPaths, TrainingPaths, TrainingRunParams, params
 
 
 @dataclass
@@ -44,28 +43,6 @@ class TrainingArtifact(RunArtifact):
     """Result of a training run: the saved checkpoint (metrics: ``history.csv``)."""
 
     checkpoint_path: Path | None = None
-
-
-class ComparisonRun(ExperimentRun):
-    """Compare finished construction runs (``compare_runs``) on their test grid."""
-
-    def setup(self) -> None:
-        self.run_params = params(RunParams, self.cfg.run)
-        self.comparison = params(ComparisonParams, self.cfg.comparison)
-        output_dir = params(OutputPaths, self.cfg.paths).output_dir
-        if output_dir is None:
-            raise ValueError("set paths.output_dir to the comparison folder")
-        self.run_dir = resolve_under_root(output_dir)
-
-    def dry_run_artifact(self) -> RunArtifact:
-        return RunArtifact(self.run_params.name, self.run_dir, {"dry_run": True})
-
-    def execute(self) -> RunArtifact:
-        c = self.comparison
-        report = compare_runs(
-            self.run_dir, tuple(c.names), checkpoint=c.checkpoint, mode=c.mode, budget_mode=c.budget_mode
-        )
-        return RunArtifact(self.run_params.name, self.run_dir, {"summary": report["summary"]})
 
 
 class TrainingRun(ExperimentRun):
@@ -143,6 +120,62 @@ class TrainingRun(ExperimentRun):
             self.checkpoint,
         )
 
+    def evaluation_protocol(self, data, val_cost):
+        """Describe the actual split, fixed evaluation inputs and configured budgets."""
+        evaluation = self.evaluation
+        if self.env_name == "construction":
+            validation = dict(split="held-out validation", indices=data.validation_indices, n_routes=list(data.n_routes))
+            monitor_counts = {"validation": data.validation_count}
+        else:
+            validation = dict(
+                split="held-out validation", indices=data.all_val_indices.tolist(),
+                stages=[
+                    dict(
+                        until=stage.until, label=stage.label,
+                        indices=torch.cat([data.curriculum.validation_by_tier[t] for t in stage.tiers]).tolist(),
+                    )
+                    for stage in data.curriculum.stages
+                ],
+            )
+            monitor_counts = {stage["label"]: len(stage["indices"]) for stage in validation["stages"]}
+        validation.update(
+            graph_count=data.validation_count, mode=evaluation.validation_mode,
+            action_rng="training torch RNG" if evaluation.validation_mode != "greedy" else "greedy",
+            preference_weights={key: torch.as_tensor(value).cpu().tolist() for key, value in val_cost.get_weights().items()},
+        )
+        return dict(
+            seed=evaluation.seed,
+            grid_action_seed_rule="seed + preference_index * 1000 + sample_index",
+            objectives=list(self.cost.objectives),
+            env=asdict(self.env_params),
+            validation=validation,
+            monitor=dict(
+                enabled=evaluation.pareto_enabled, period=evaluation.pareto_period,
+                preference_count=evaluation.pareto_preference_count,
+                preference_grid="linspace(0, 1, preference_count)",
+                samples_per_preference=dict(greedy=1, stochastic=evaluation.pareto_stochastic_samples),
+                reference=evaluation.hv_reference, eu_preference_count=evaluation.eu_preference_count,
+                outcomes_per_call={
+                    stage: {
+                        mode: count * evaluation.pareto_preference_count * samples if evaluation.pareto_enabled else 0
+                        for mode, samples in (("greedy", 1), ("stochastic", evaluation.pareto_stochastic_samples))
+                    }
+                    for stage, count in monitor_counts.items()
+                },
+            ),
+            test=dict(
+                enabled=evaluation.final_test, preference_count=evaluation.preference_count,
+                preference_grid="linspace(0, 1, preference_count)",
+                samples_per_preference=dict(greedy=1, stochastic=evaluation.stochastic_samples),
+                checkpoints=["last", "best"],
+            ),
+            budget=dict(
+                training=asdict(self.loop_params),
+                validation_period=self.loop_params.val_period,
+                validation_before_update=self.loop_params.validate_before_update,
+            ),
+        )
+
     def execute(self):
         device, lp = self.context.device, self.loop_params
         opt = self.optimizer_params
@@ -158,6 +191,8 @@ class TrainingRun(ExperimentRun):
             self.curriculum,
             lp.resample_preferences_on_terminal,
         )
+        self.metadata["evaluation_protocol"] = self.evaluation_protocol(data, val_cost)
+        self.write_metadata()
         log(
             self.logger_list,
             DataCounts(training_graphs=data.training_count, validation_graphs=data.validation_count),
@@ -171,8 +206,7 @@ class TrainingRun(ExperimentRun):
             node_normalizer=self.policy.node_norm,
         )
         data.validation = {"construction": ConstructionValidation, "edit": EditValidation}[self.env_name](
-            data, val_cost, val_env, self.evaluation_profile, self.run_dir, device,
-            save_json=ArtifactStore(self.run_dir).save_json,
+            data, val_cost, val_env, self.evaluation_profile, device,
         )
         critic = ValueHead(
             self.algorithm.value_dim,
@@ -207,6 +241,7 @@ class TrainingRun(ExperimentRun):
         )
         if self.evaluation.final_test:
             test_data, test_seeds = data.test()
+            indices = list(range(len(test_data)))
             if self.evaluation.test_graph_count is not None:
                 generator = torch.Generator().manual_seed(self.evaluation.seed)
                 indices = (
@@ -217,12 +252,17 @@ class TrainingRun(ExperimentRun):
                 test_data = [test_data[index] for index in indices]
                 if test_seeds is not None:
                     test_seeds = test_seeds[indices]
-                ArtifactStore(self.run_dir).save_json(
-                    dict(
-                        indices=indices, seed=self.evaluation.seed, split="independent test", graph_count=len(test_data)
-                    ),
-                    "test_protocol.json",
-                )
+            test_protocol = self.metadata["evaluation_protocol"]["test"]
+            test_protocol.update(
+                split="independent test" if self.env_name == "construction" else "held-out validation",
+                indices=indices if self.env_name == "construction" else data.all_val_indices[indices].tolist(),
+                graph_count=len(test_data),
+                outcomes_per_checkpoint={
+                    mode: len(test_data) * self.evaluation.preference_count * samples
+                    for mode, samples in test_protocol["samples_per_preference"].items()
+                },
+            )
+            self.write_metadata()
             for label, actor in (("last", self.policy), ("best", result.best_policy)):
                 for mode in ("greedy", "stochastic"):
                     rows = evaluate_preferences(
@@ -230,22 +270,20 @@ class TrainingRun(ExperimentRun):
                         test_data,
                         self.evaluation_profile,
                         self.cost,
-                        self.run_dir,
                         device,
-                        checkpoint=label,
                         mode=mode,
                         seed_networks=test_seeds,
-                        save_json=ArtifactStore(self.run_dir).save_json,
                     )
+                    prefix = f"eval/test/{label}/{mode}"
+                    log_evaluation_metrics(rows, self.logger_list, result.iterations, prefix)
                     if self.evaluation.pareto_enabled:
-                        report = log_pareto_metrics(
+                        log_pareto_metrics(
                             rows,
                             self.evaluation_profile,
                             self.logger_list,
                             result.iterations,
-                            f"eval/test/{label}/{mode}",
+                            prefix,
                         )
-                        ArtifactStore(self.run_dir).save_json(report, f"test_pareto_{label}_{mode}.json")
         if result.iterations < lp.n_iterations:
             self.stop_reason = "time_budget"
         return TrainingArtifact(self.run_params.name, self.run_dir, {}, self.checkpoint)

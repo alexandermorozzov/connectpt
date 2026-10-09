@@ -1,9 +1,8 @@
-"""Run one config from ``cfg/runs/``: training, dataset, comparison.
+"""Run one config from ``cfg/runs/``: training, dataset.
 
     python scripts/run.py --config-name runs/prepare_dataset          # once: the edit dataset
     python scripts/run.py --config-name runs/train                    # edit training
     python scripts/run.py --config-name runs/train_construction algorithm=d3po
-    python scripts/run.py --config-name runs/compare paths.output_dir=artifacts/comparisons/<name>
     python scripts/run.py --config-name runs/train --dry-run
 
 ``--dry-run`` builds every object and checks the config, then stops. Positional

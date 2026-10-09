@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, replace
-from pathlib import Path
-from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -18,6 +16,7 @@ from ..env.state import RouteGenBatchState
 from ..env.base import EnvParams
 from ..objectives.penalties import STATE_PENALTIES
 from ..objectives.pareto import canonical_network, summarize_evaluation
+from ..objectives.metrics import evaluate_network
 from .records import ParetoRecord, ValidationRecord
 
 
@@ -47,13 +46,10 @@ class EvaluationProfile:
 
 
 class Validation:
-    def __init__(self, data, cost, env, profile, output, device, *, save_json: Callable[[dict[str, Any] | list, str], Path] | None = None):
+    def __init__(self, data, cost, env, profile, device):
         self.data, self.cost, self.env = data, cost, env
-        self.profile, self.output, self.device = profile, output, device
+        self.profile, self.device = profile, device
         self.last_monitor_step = None
-        self.save_json = save_json
-        if profile.evaluation.pareto_enabled and save_json is None:
-            raise ValueError("Pareto validation requires an artifact writer")
 
     def batches(self, progress):
         raise NotImplementedError
@@ -114,19 +110,6 @@ class Validation:
 
 
 class ConstructionValidation(Validation):
-    def __init__(self, data, cost, env, profile, output, device, *, save_json: Callable[[dict[str, Any] | list, str], Path] | None = None):
-        super().__init__(data, cost, env, profile, output, device, save_json=save_json)
-        if profile.evaluation.pareto_enabled:
-            self.save_json(
-                dict(
-                    indices=data.validation_indices,
-                    seed=profile.evaluation.seed,
-                    reference=profile.evaluation.hv_reference,
-                    split="held-out validation; independent test reserved for final evaluation",
-                ),
-                "pareto/validation_protocol.json",
-            )
-
     def batches(self, progress):
         for count in self.data.n_routes:
             for graphs in self.data.validation_loader:
@@ -140,11 +123,9 @@ class ConstructionValidation(Validation):
                 self.data.validation_loader.dataset,
                 self.profile,
                 self.cost,
-                self.output,
                 self.device,
                 logger_list,
                 step,
-                save_json=self.save_json,
             )
             self.last_monitor_step = step
 
@@ -166,12 +147,10 @@ class EditValidation(Validation):
                 graphs.to_data_list(),
                 self.profile,
                 self.cost,
-                self.output,
                 self.device,
                 logger_list,
                 step,
                 seed_networks=seeds,
-                save_json=self.save_json,
             )
             self.last_monitor_step = step
 
@@ -181,20 +160,20 @@ def evaluate_preferences(
     data,
     profile,
     cost,
-    output,
     device,
     *,
-    checkpoint="last",
     mode="greedy",
     preference_count=None,
     stochastic_samples=None,
-    save_artifacts=True,
     seed_networks=None,
-    save_json: Callable[[dict[str, Any] | list, str], Path] | None = None,
 ):
-    if save_artifacts and save_json is None:
-        raise ValueError("saving evaluation requires an artifact writer")
-    rows, networks = [], []
+    """Return per-network results on a fixed grid; preserve the torch RNG.
+
+    The seed networks stay aligned with data order. Cost includes all configured
+    penalties, including adjustment against these seeds. Logging and Pareto
+    aggregation consume the returned values without scoring the network again.
+    """
+    rows = []
     count = int(preference_count if preference_count is not None else profile.evaluation.preference_count)
     samples = (
         1
@@ -251,6 +230,7 @@ def evaluate_preferences(
                     if seeds is not None:
                         state.set_adjustment_seed(seeds)
                     result = fixed_cost(state)
+                    metrics = evaluate_network(result)
                     from ..objectives.preferences import GOAL_NAMES
 
                     columns = [GOAL_NAMES.index(name) for name in fixed_cost.objectives]
@@ -271,40 +251,40 @@ def evaluate_preferences(
                                 penalized_0=float(penalized[i, 0]),
                                 penalized_1=float(penalized[i, 1]),
                                 scalar_cost=float(result.cost[i]),
+                                objective={name: float(result.goals[i, j]) for j, name in enumerate(cost.objectives)},
+                                penalty={name: float(result.penalties[i, j]) for j, name in enumerate(STATE_PENALTIES)},
+                                monitor={
+                                    name: float(metrics[key][i])
+                                    for name, key in (
+                                        ("ATT", "ATT"), ("RTT", "RTT"), ("WMC", "median_connectivity_weighted"),
+                                        ("d0", "$d_0$"), ("d1", "$d_1$"), ("d2", "$d_2$"),
+                                        ("d_un", "$d_{un}$"), ("n_disconnected", "# disconnected node pairs"),
+                                    )
+                                    if name in cost.monitor
+                                },
                                 feasible=bool(feasible[i]),
                                 unserved_fraction=float(result.unserved_demand[i] / result.total_demand[i]),
                                 network_signature=canonical_network(route_list, profile.symmetric_routes),
                             )
                         )
-                        if save_artifacts:
-                            networks.append(
-                                dict(graph=start + i, preference=float(preference), sample=sample, routes=route_list)
-                            )
-    suffix = "" if checkpoint == "last" and mode == "greedy" else f"_{checkpoint}_{mode}"
-    if save_artifacts:
-        save_json(
-            {
-                "rows": rows,
-                "checkpoint": checkpoint,
-                "mode": mode,
-                "samples_per_preference": samples,
-                "hv_reference": list(profile.evaluation.hv_reference),
-                "objectives": list(cost.objectives),
-                "eu_preference_count": int(profile.evaluation.eu_preference_count),
-                "protocol": dict(
-                    graph_count=len(data),
-                    preference_count=count,
-                    seed=int(profile.evaluation.seed),
-                    n_routes=int(profile.env.n_routes),
-                    min_route_len=int(profile.env.min_route_len),
-                    max_route_len=int(profile.env.max_route_len),
-                ),
-                "mean_cost": float(np.mean([r["scalar_cost"] for r in rows])),
-            },
-            f"test_evaluation{suffix}.json",
-        )
-        save_json(networks, f"test_routes{suffix}.json")
     return rows
+
+
+def log_evaluation_metrics(rows, logger_list, step, prefix):
+    """Log the evaluated cost/goals/penalties, independently of Pareto monitoring."""
+    log(
+        logger_list,
+        ValidationRecord(
+            cost=float(np.mean([row["scalar_cost"] for row in rows])),
+            **{
+                field: {name: float(np.mean([row[field][name] for row in rows])) for name in rows[0][field]}
+                for field in ("objective", "penalty", "monitor")
+            },
+            feasible_fraction=float(np.mean([row["feasible"] for row in rows])),
+        ),
+        step,
+        prefix=prefix,
+    )
 
 
 def log_pareto_metrics(rows, profile, logger_list, step, prefix):
@@ -329,7 +309,7 @@ def log_pareto_metrics(rows, profile, logger_list, step, prefix):
     return report
 
 
-def evaluate_pareto(model, data, profile, cost, output, device, logger_list, step, *, seed_networks=None, save_json: Callable[[dict[str, Any] | list, str], Path]):
+def evaluate_pareto(model, data, profile, cost, device, logger_list, step, *, seed_networks=None):
     """Fixed held-out cities/preferences/action seeds, isolated from training RNG."""
     for mode in ("greedy", "stochastic"):
         started = time.monotonic()
@@ -338,18 +318,12 @@ def evaluate_pareto(model, data, profile, cost, output, device, logger_list, ste
             data,
             profile,
             cost,
-            output,
             device,
             mode=mode,
             preference_count=int(profile.evaluation.pareto_preference_count),
             stochastic_samples=int(profile.evaluation.pareto_stochastic_samples),
-            save_artifacts=False,
             seed_networks=seed_networks,
         )
-        report = log_pareto_metrics(rows, profile, logger_list, step, f"pareto/{mode}")
-        report["evaluation_seconds"] = time.monotonic() - started
-        log(logger_list, ParetoRecord(evaluation_seconds=report["evaluation_seconds"]), step, prefix=f"pareto/{mode}")
-        example = [r for r in rows if r["graph"] == 0 and r["sample"] == 0]
-        report["example_front"] = example
-        save_json(report, f"pareto/iter{step:05d}_{mode}.json")
+        log_pareto_metrics(rows, profile, logger_list, step, f"pareto/{mode}")
+        log(logger_list, ParetoRecord(evaluation_seconds=time.monotonic() - started), step, prefix=f"pareto/{mode}")
     flush(logger_list)
