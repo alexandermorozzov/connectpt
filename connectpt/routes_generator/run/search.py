@@ -7,21 +7,21 @@ from pathlib import Path
 from omegaconf import OmegaConf
 from typing import Any
 
-_log = logging.getLogger("connectpt.sweep")
-
-
-from ..run.context import resolve_weights_path, safe_run_name
-from ..run.runs import ExperimentRun, RunArtifact
-from ..run.context import RunContext
-from ..run.schemas import AdjustmentParams, InstanceParams, SearchPaths, SearchRunParams, SweepParams, params
-from ..city.instances import load_instance
+from .context import resolve_weights_path, safe_run_name
+from .runs import ExperimentRun, RunArtifact
+from .context import RunContext
+from ..city.instances import InstanceParams
+from .schemas import AdjustmentParams, SearchPaths, SearchRunParams, SweepParams, params
+from .instances import load_instance
 from ..objectives.metrics import evaluate_network, select_metrics
 from ..policy.build import ModelProfileParams, load_policy
-from ..run.config import compose_policy_model, policy_profile
+from .config import compose_policy_model, cost_params, policy_profile
 from ..objectives.cost import build_cost
-from .plan import MethodParams, ExecutablePlan
-from .search import run_search
+from ..search.plan import MethodParams, ExecutablePlan
+from ..search.search import run_search
 
+
+_log = logging.getLogger("connectpt.sweep")
 
 @dataclass
 class SearchArtifact(RunArtifact):
@@ -46,7 +46,7 @@ class SearchRun(ExperimentRun):
 
         # cost: the /cost group this run composed (single source).
         self.cost_obj = build_cost(
-            cfg.cost, symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
+            cost_params(cfg.cost), symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
         )
         self.cost_obj.to(device)
 

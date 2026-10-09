@@ -1,16 +1,8 @@
-"""Load a problem instance from ``datasets/instances/<name>/``.
+"""Load physical city tensors from an absolute directory.
 
-One folder per instance, always the same four files:
-
-* ``Coords.txt``      -- first line is the node count N, then N lines of "x y";
-* ``TravelTimes.txt`` -- N x N street travel times **in minutes**;
-* ``Demand.txt``      -- N x N OD demand;
-* ``Routes.txt``      -- the initial network: one route per line, whitespace-
-  separated **0-indexed** node ids, ``#`` comments and blank lines ignored.
-
-Route counts and length bounds come from ``cfg/instance/<name>.yaml``; the loader
-validates the files against them. A new city is a new folder plus that yaml.
-"""
+Coords.txt contains a node count and N coordinate pairs; TravelTimes.txt
+contains an N x N matrix in minutes; Demand.txt contains N x N OD demand.
+Configuration and initial route loading are assembled by the caller."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -20,29 +12,17 @@ from typing import Any
 import numpy as np
 import torch
 
-from ..run.const import DATASETS_DIR
-from ..run.context import resolve_under_root
-from omegaconf import OmegaConf
-from ..network.routes import read_routes_txt
-from .const import EKB_COORD_CRS, TRAVEL_TIME_SCALE
-
-INSTANCE_CONFIG_DIR = Path(__file__).resolve().parents[1] / "cfg" / "instance"
+from .const import TRAVEL_TIME_SCALE
 
 
-def instance_spec(name: str):
-    """The instance spec from ``cfg/instance/<name>.yaml`` -- route count, length
-    bounds and any extras (``crs``). One file per instance, same name as its
-    folder under ``datasets/instances/``."""
-    path = INSTANCE_CONFIG_DIR / f"{name}.yaml"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"no spec for instance {name!r}: expected {path} with n_routes / "
-            f"min_route_len / max_route_len"
-        )
-    return OmegaConf.load(path)
-
-
-INSTANCES_DIR = DATASETS_DIR / "instances"
+@dataclass(frozen=True)
+class InstanceParams:
+    name: str
+    path: Path
+    n_routes: int
+    min_route_len: int
+    max_route_len: int
+    crs: str | None
 
 
 @dataclass
@@ -58,9 +38,11 @@ class Instance:
     meta: dict = field(default_factory=dict)
 
 
-def _load_matrices(instance_dir) -> dict:
+def load_city_tensors(instance_dir: Path) -> dict:
     """``node_locs`` / ``street_adj`` / ``demand`` from the three text files."""
     d = Path(instance_dir)
+    if not d.is_absolute():
+        raise ValueError("instance directory must be an absolute Path")
     node_locs = torch.tensor(
         np.atleast_2d(np.genfromtxt(d / "Coords.txt", skip_header=1)), dtype=torch.float32
     )
@@ -77,44 +59,29 @@ def _load_matrices(instance_dir) -> dict:
     return {"node_locs": node_locs, "street_adj": street_adj, "demand": demand}
 
 
-def load_instance(instance, *, instances_dir=None, require_routes=True) -> Instance:
-    """Load an instance (``InstanceParams`` or a ``cfg/instance`` name) as an
-    :class:`Instance`."""
-    from ..run.schemas import InstanceParams, params
-
-    if isinstance(instance, (str, Path)):
-        path = resolve_under_root(instance)
-        if path.is_dir():
-            instances_dir = path.parent
-            instance = path.name
-        instance = params(InstanceParams, instance_spec(str(instance)))
+def load_city(instance: InstanceParams) -> Instance:
+    """Read physical city data from resolved parameters; routes are bound by run."""
+    if not isinstance(instance, InstanceParams):
+        raise TypeError("load_city requires InstanceParams")
     name = instance.name
-    if instances_dir is not None:
-        d = Path(instances_dir) / name
-    else:
-        d = resolve_under_root(instance.path)
+    d = Path(instance.path)
     if not d.is_dir():
         raise FileNotFoundError(
             f"instance folder not found: {d}. An instance is a folder with "
-            f"Coords.txt / TravelTimes.txt / Demand.txt / Routes.txt."
+            f"Coords.txt / TravelTimes.txt / Demand.txt."
         )
-    tensors = _load_matrices(d)
+    tensors = load_city_tensors(d)
     spec = {
         "city": name,
         "n_routes": instance.n_routes,
         "min_route_len": instance.min_route_len,
         "max_route_len": instance.max_route_len,
     }
-    routes = (
-        read_routes_txt(d / "Routes.txt", n_nodes=tensors["node_locs"].shape[0], spec=spec)
-        if require_routes
-        else None
-    )
     meta = {"crs": instance.crs} if instance.crs is not None else {}
     return Instance(
         label=name,
         tensors=tensors,
-        init_routes=routes,
+        init_routes=None,
         spec=spec,
         coords=tensors["node_locs"],
         street_adj=tensors["street_adj"],

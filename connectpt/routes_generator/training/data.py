@@ -2,13 +2,14 @@
 import random
 import torch
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
 class ConstructionDataset:
     type: str
     kwargs: dict
-    test_path: str
+    test_path: Path
 
     def prepare(self, cost, batch_size, evaluation, device, env_params, curriculum, resample_preferences):
         data = self.load(batch_size, evaluation, device, env_params, resample_preferences=resample_preferences)
@@ -22,8 +23,6 @@ class ConstructionDataset:
         from torch_geometric.loader import DataLoader
         from ..city.synthetic import CityGraphDataset, get_default_train_and_eval_split, get_dynamic_training_set
         from ..city.graph import to_batch
-        from ..city.instances import load_instance
-        from ..run.context import resolve_under_root
 
         validation_batch_size = batch_size * 4
         if self.type == "pickle":
@@ -31,12 +30,12 @@ class ConstructionDataset:
             train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, drop_last=True)
         elif self.type == "dynamic":
             values = dict(self.kwargs)
-            validation = CityGraphDataset(resolve_under_root(values.pop("val_path")))
+            validation = CityGraphDataset(values.pop("val_path"))
             train = get_dynamic_training_set(**values)
             train_loader = DataLoader(train, batch_size=batch_size)
         elif self.type == "mumford":
             graph = to_batch(
-                load_instance(self.kwargs["city"]), scale_dynamically=self.kwargs["scale_dynamically"]
+                self.kwargs["city"], scale_dynamically=self.kwargs["scale_dynamically"]
             ).to_data_list()[0]
             train, validation = [graph] * batch_size, [graph] * validation_batch_size
             train_loader = DataLoader(train, batch_size=batch_size)
@@ -131,6 +130,4 @@ class ConstructionData:
 
     def test(self):
         from ..city.synthetic import CityGraphDataset
-        from ..run.context import resolve_under_root
-
-        return CityGraphDataset(resolve_under_root(self.test_path)), None
+        return CityGraphDataset(self.test_path), None

@@ -5,7 +5,7 @@ from tqdm import tqdm
 from ..env.base import normalize_nodes
 from ..env.state import RouteGenBatchState
 from ..city.shortest_paths import reconstruct_all_paths
-from ..run.logger import log as log_metrics
+from ..common.logging import log as log_metrics
 from ..objectives.metrics import evaluate_network
 from ..objectives.preferences import scalarize
 from ..objectives.penalties import STATE_PENALTIES, adjustment_degree, adjustment_penalty

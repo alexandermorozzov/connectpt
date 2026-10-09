@@ -1,3 +1,4 @@
+from connectpt.routes_generator.run.config import cost_params
 from types import SimpleNamespace
 from connectpt.routes_generator.env.features import observe
 from connectpt.routes_generator.env.masks import ActionMask
@@ -122,7 +123,7 @@ def test_common_sampler_matches_holliday_and_respects_fixed_weights():
     from connectpt.routes_generator.run.config import load_experiment
 
     cost = build_cost(
-        load_experiment("train_construction").cost,
+        cost_params(load_experiment("train_construction").cost), symmetric_routes=True, low_memory_mode=False,
         variable_weights=True, pp_fraction=0.33, op_fraction=0.33, mcw_fraction=0.0, objectives=["ATT", "RTT"]
     )
     torch.manual_seed(41)
@@ -141,7 +142,7 @@ def test_common_sampler_matches_holliday_and_respects_fixed_weights():
 
 
 def test_three_way_comparison_separates_conditioned_utility_and_archive(tmp_path):
-    from connectpt.routes_generator.training.compare import compare_runs
+    from connectpt.routes_generator.run.comparison import compare_runs
 
     for name in ("ppo", "ablation", "d3po"):
         run = tmp_path / "runs" / name
@@ -207,7 +208,7 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
         cfg = compose(config_name="runs/train_construction")
     model = load_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, torch.device("cpu")))
     model.freeze_feature_norms()
-    cost = build_cost(cfg.cost, symmetric_routes=True)
+    cost = build_cost(cost_params(cfg.cost), low_memory_mode=False, symmetric_routes=True)
     data = DynamicCityGraphDataset(15, 15, data_type="voronoi")
     graphs = [data.transform(data.generate_graph()) for _ in range(2)]
     ws = torch.tensor([[0.2, 0.8], [0.8, 0.2]])
@@ -261,7 +262,7 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
 def test_construction_uses_legacy_data_setup_and_existing_updates(trainer, tmp_path):
     import pickle
     from connectpt.routes_generator.city.synthetic import RAW_GRAPH_FILENAME
-    from connectpt.routes_generator.training.runs import TrainingRun
+    from connectpt.routes_generator.run.training import TrainingRun
 
     torch.set_num_threads(2)
     torch.manual_seed(7)
@@ -359,7 +360,7 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer, tmp_p
 
 def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     from connectpt.routes_generator.training.critic import ValueHead, CriticParams
-    from connectpt.routes_generator.run.checkpoints import CheckpointStore
+    from connectpt.routes_generator.policy.checkpoints import load_model_weights
 
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
         cfg = compose(config_name="runs/train_construction")
@@ -381,7 +382,7 @@ def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     assert scalar.input_dim == vector.input_dim == 21
     dataset = DynamicCityGraphDataset(9, 9, data_type="voronoi")
     graphs = [dataset.transform(dataset.generate_graph()) for _ in range(2)]
-    cost = build_cost(cfg.cost, symmetric_routes=True)
+    cost = build_cost(cost_params(cfg.cost), low_memory_mode=False, symmetric_routes=True)
     state = RouteGenBatchState(graphs, cost.constants, 1, 2, 5, preferences=cost.get_weights())
     globals_ = global_state_features(state, preference_goals=model.preference_goals)
     assert globals_.shape[-1] == 11
@@ -396,8 +397,8 @@ def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     assert torch.equal(reordered._features_from_state(state), vector._features_from_state(state).flip(-1))
     legacy_model = load_policy(policy_profile(legacy.model, legacy.cost, legacy.experiment, torch.device("cpu")))
     assert legacy_model.edge_feat_dim == 14
-    CheckpointStore.assert_state_dict_compatible(
-        legacy_model, "artifacts/model_weights/inductive_random_graphs_weighted_connectivity.pt"
+    load_model_weights(
+        legacy_model, "artifacts/model_weights/inductive_random_graphs_weighted_connectivity.pt", strict=True
     )
 
 
@@ -484,7 +485,7 @@ def test_fixed_preference_evaluation_does_not_consume_training_rng():
         )
     model = load_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, torch.device("cpu")))
     model.freeze_feature_norms()
-    cost = build_cost(cfg.cost, symmetric_routes=True)
+    cost = build_cost(cost_params(cfg.cost), low_memory_mode=False, symmetric_routes=True)
     dataset = DynamicCityGraphDataset(9, 9, data_type="voronoi")
     graphs = [dataset.transform(dataset.generate_graph()) for _ in range(2)]
     output = Path("artifacts/audits/construction_holliday_64_20261005") / f"rng_{uuid4().hex}"

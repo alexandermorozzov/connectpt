@@ -7,9 +7,8 @@ import pandas as pd
 import torch
 
 from connectpt.routes_generator.city.graph import to_batch
-from connectpt.routes_generator.run.context import resolve_under_root
 from connectpt.routes_generator.network.routes import to_routes
-from connectpt.routes_generator.city.instances import load_instance
+from connectpt.routes_generator.city.instances import load_city_tensors
 from connectpt.routes_generator.objectives.metrics import connectivity_matrix
 from connectpt.routes_generator.env.state import RouteGenBatchState
 
@@ -50,14 +49,14 @@ def _matrix(routes: torch.Tensor, tensors: dict, cost_obj) -> np.ndarray:
     return (connectivity_matrix(state, cost_obj)[0] / 60.0).cpu().numpy()
 
 
-def map_polygons(gdf: gpd.GeoDataFrame, instance_dir: str | Path) -> gpd.GeoDataFrame:
-    """Return polygons with matched instance node IDs in the ``node`` column."""
+def map_polygons(gdf: gpd.GeoDataFrame, instance_dir: Path) -> gpd.GeoDataFrame:
+    """Return matched node IDs in ``node``; instance_dir is an absolute Path."""
     if not isinstance(gdf, gpd.GeoDataFrame):
         raise TypeError("gdf must be a GeoDataFrame")
     if not isinstance(instance_dir, (str, Path)):
         raise TypeError("instance_dir must be a string or Path")
 
-    xy = load_instance(resolve_under_root(instance_dir)).tensors["node_locs"].numpy()
+    xy = load_city_tensors(Path(instance_dir))["node_locs"].numpy()
     out = gdf.copy()
     out["node"] = _bind(gdf, xy).astype("Int64")
     return out
@@ -65,7 +64,7 @@ def map_polygons(gdf: gpd.GeoDataFrame, instance_dir: str | Path) -> gpd.GeoData
 
 def connectivity_gdf(
     mapped: gpd.GeoDataFrame,
-    instance_dir: str | Path,
+    instance_dir: Path,
     routes: torch.Tensor | list,
     agg: str | Callable = "sum",
     *, cost,
@@ -88,7 +87,7 @@ def connectivity_gdf(
 
     routes = to_routes(routes).long()
     routes = routes if routes.ndim == 3 else routes[None]
-    tensors = load_instance(resolve_under_root(instance_dir)).tensors
+    tensors = load_city_tensors(Path(instance_dir))
     nodes = mapped["node"].dropna().astype(int)
     matrix = _matrix(routes, tensors, cost)
 

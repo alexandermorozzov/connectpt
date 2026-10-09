@@ -18,7 +18,8 @@ from typing import Any
 from omegaconf import OmegaConf
 
 from .const import ROOT_DIR
-from .logger import close, make_loggers
+from ..common.logging import close
+from .logger import make_loggers
 from .schemas import logger_names
 
 

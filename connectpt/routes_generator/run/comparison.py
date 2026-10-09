@@ -6,7 +6,7 @@ import pandas as pd
 from itertools import combinations, permutations
 from omegaconf import OmegaConf
 
-from ..run.artifacts import ArtifactStore
+from .artifacts import ArtifactStore
 from ..objectives.pareto import hypervolume_2d, coverage, front_metrics
 
 

@@ -17,6 +17,9 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf, open_dict
 
 from .const import CFG_DIR
+from ..objectives.cost import CostParams
+from ..policy.build import ModelParams, PolicyProfile
+from ..common.parameters import CostConstants
 
 
 def load_experiment(name: str, *, overrides=None):
@@ -24,6 +27,12 @@ def load_experiment(name: str, *, overrides=None):
     config_name = name if name.startswith("runs/") else f"runs/{name}"
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
         return compose(config_name=config_name, overrides=list(overrides or []))
+
+
+def cost_params(cost_cfg) -> CostParams:
+    """Decode the cost group into library parameters at the run boundary."""
+
+    return CostParams(**OmegaConf.to_container(cost_cfg.kwargs, resolve=True))
 
 
 def compose_policy_model(name: str):
@@ -35,8 +44,6 @@ def compose_policy_model(name: str):
 
 def policy_profile(model_cfg, cost_cfg, experiment, device, *, checkpoint_path=None):
     """Resolve config groups at the Run.setup boundary."""
-    from ..policy.build import ModelParams, PolicyProfile
-    from ..objectives.cost import CostConstants
 
     values = OmegaConf.to_container(cost_cfg.kwargs, resolve=True)
     return PolicyProfile(

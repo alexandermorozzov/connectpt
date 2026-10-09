@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass, fields
 
 import torch
 from torch import Tensor
-from omegaconf import OmegaConf
 
 from ..network.routes import get_route_leg_times
 from ..common.const import EPSILON
@@ -12,7 +11,8 @@ from .preferences import COST_WEIGHT_KEY_ORDER, COST_COMPONENT_NAMES, Preference
 from .criteria import GOAL_NAMES, criterion
 from .components import PhysicalCost
 from .const import PENALTIES
-from .components import CostConstants, CostHelperOutput
+from ..common.parameters import CostConstants
+from .components import CostHelperOutput
 
 __all__ = ["build_cost", "MyCostModule", "CostParams", "CostConstants", "CostHelperOutput"]
 
@@ -38,15 +38,10 @@ class CostParams:
     monitor: list
 
 
-def build_cost(cost_cfg, **overrides):
-    if isinstance(cost_cfg, CostParams):
-        values = asdict(cost_cfg)
-    else:
-        values = OmegaConf.to_container(cost_cfg, resolve=True)
-        values = values["kwargs"]
-        values = asdict(CostParams(**values))
-    low_memory = overrides.pop("low_memory_mode", False)
-    symmetric = overrides.pop("symmetric_routes", True)
+def build_cost(parameters: CostParams, *, symmetric_routes: bool, low_memory_mode: bool, **overrides):
+    if not isinstance(parameters, CostParams):
+        raise TypeError("build_cost requires CostParams")
+    values = asdict(parameters)
     weights = dict(values["penalties"])
     for key, name in (("constraint_violation_weight", "constraints"), ("adjustment_degree_weight", "adjustment")):
         if key in overrides:
@@ -54,7 +49,7 @@ def build_cost(cost_cfg, **overrides):
     values.update(overrides)
     values["penalties"] = weights
     CostParams(**values)
-    return MyCostModule(low_memory_mode=low_memory, symmetric_routes=symmetric, **values)
+    return MyCostModule(low_memory_mode=low_memory_mode, symmetric_routes=symmetric_routes, **values)
 
 
 class MyCostModule(PhysicalCost, PreferenceSampler):

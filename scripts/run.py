@@ -23,7 +23,7 @@ from omegaconf import open_dict
 
 from connectpt.routes_generator.run.const import CFG_DIR, LOGS_DIR
 from connectpt.routes_generator.run.context import resolve_under_root
-from connectpt.routes_generator.run.factory import ExperimentRunFactory
+from connectpt.routes_generator.run.factory import make_run
 
 
 def main() -> None:
@@ -69,7 +69,7 @@ def main() -> None:
     log.info("run outputs -> %s", cfg.paths.output_dir)
 
     try:
-        artifact = ExperimentRunFactory.from_cfg(cfg).run(dry_run=args.dry_run)
+        artifact = make_run(cfg).run(dry_run=args.dry_run)
     except Exception:
         log.exception("run failed")
         raise

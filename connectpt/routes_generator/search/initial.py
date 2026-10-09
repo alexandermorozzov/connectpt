@@ -249,7 +249,7 @@ def nikolic_init(state: RouteGenBatchState):
 
 
 def build_init_routes(
-    spec, tensors, *, generator: str, cost, initial, corruption, policy=None, seed: int, clean: bool, device=None
+    spec, tensors, *, generator: str, cost, initial, corruption, policy=None, seed: int, clean: bool, device
 ) -> torch.Tensor:
     """Build an initial network with ``INITIALIZERS[generator]``. The ``lc`` network
     also gets the realistic corruption tier unless ``clean``.
@@ -260,11 +260,6 @@ def build_init_routes(
     import random
 
     from ..network.corruption import inject_realistic_tier
-
-    if device is None:
-        from ..run.context import resolve_device
-
-        device = resolve_device()
 
     routes = INITIALIZERS[generator](spec, tensors, device=device, cost=cost, initial=initial, policy=policy)
     routes = to_routes(routes, n_routes=spec["n_routes"], width=spec["max_route_len"])[0]

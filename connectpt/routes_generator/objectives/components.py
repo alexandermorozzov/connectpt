@@ -7,6 +7,7 @@ from torch import Tensor
 from ..city.shortest_paths import aggregate_edge_features
 from ..network.routes import get_route_edge_matrix, get_nodes_on_routes_mask, to_routes
 from .preferences import scalarize
+from ..common.parameters import CostConstants
 
 from ..common.const import EPSILON
 
@@ -73,11 +74,6 @@ class CostHelperOutput:
         return (self.n_stops_oob > 0) | (self.n_disconnected_demand_edges > 0) | (self.n_duplicate_stops > 0)  # | \
 
 
-@dataclass(frozen=True)
-class CostConstants:
-    symmetric_routes: bool
-    mean_stop_time_s: float
-    avg_transfer_wait_time_s: float
 
 
 class PhysicalCost(torch.nn.Module):

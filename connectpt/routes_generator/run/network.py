@@ -3,6 +3,7 @@ import torch
 
 from ..objectives.cost import build_cost
 from ..objectives.metrics import evaluate_network, evaluate_routes
+from .config import cost_params
 from .schemas import AdjustmentParams
 
 
@@ -14,7 +15,7 @@ class NetworkRun:
     def setup(self):
         cfg = self.cfg
         self.cost = build_cost(
-            cfg.cost, symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
+            cost_params(cfg.cost), symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
         )
         self.adjustment = AdjustmentParams.from_cost(cfg.cost.kwargs)
 

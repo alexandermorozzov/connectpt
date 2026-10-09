@@ -3,7 +3,7 @@
 Encapsulates the data plumbing the training notebook did inline: loading the
 raw graphs + LC seed routes, the tier-stratified train/val split, the
 curriculum schedule functions, and the make_batch wrapper. City batching lives
-in ``city.graph``; route loading and fitting use ``run.artifacts`` and
+in ``city.graph``; route loading and fitting use ``network.io`` and
 ``network.routes``.
 """
 from __future__ import annotations
@@ -17,17 +17,17 @@ import torch
 
 from ..city.graph import STOP_KEY, to_batch, SpaceScaleTransform, DemandScaleTransform
 from ..city.synthetic import load_graphs
-from ..run.artifacts import load_routes
+from ..network.io import load_routes
 from ..network.routes import to_routes
-from ..run.schemas import EditDatasetParams
+from .params import EditDatasetParams
 
 
 @dataclass(frozen=True)
 class EditDataset(EditDatasetParams):
     def prepare(self, cost, batch_size, evaluation, device, env_params, curriculum, resample_preferences):
-        from ..run.const import DATASETS_DIR
-
-        folder = DATASETS_DIR / self.dataset_dirname
+        folder = Path(self.dataset_dirname)
+        if not folder.is_absolute():
+            raise ValueError("edit dataset directory must be an absolute Path")
         module = TrainingDataModule(
             folder / "raw_graphs_1000.pkl", folder, device, self.min_route_len, self.max_route_len, self.target_n_routes
         )
@@ -331,8 +331,8 @@ def build(cfg: CopyTierConfig):
     from ..policy.build import load_policy
     from ..policy.generate import generate
     from ..policy.rollout import bind_env
-    from ..run.context import seed_everything
-    from connectpt.routes_generator.run.artifacts import save_routes
+    from ..common.random import seed_everything
+    from connectpt.routes_generator.network.io import save_routes
     from connectpt.routes_generator.network.routes import to_routes
     from connectpt.routes_generator.network.corruption import (
         count_changed_routes,

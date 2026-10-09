@@ -19,6 +19,7 @@ from .const import (
     IN_DEMAND_FEAT_IDX,
     SPEED_MPS,
 )
+from .instances import Instance
 
 
 def to_batch(
@@ -36,7 +37,6 @@ def to_batch(
     Преобразования применяются к копиям. Edit сохраняет прежние два набора
     координат в признаках узлов: pos и результат InsertPosFeatures.
     """
-    from .instances import Instance
 
     if isinstance(city, Instance):
         city = city.tensors

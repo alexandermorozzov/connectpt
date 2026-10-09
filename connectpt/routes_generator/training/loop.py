@@ -9,8 +9,8 @@ import torch
 from ..objectives.penalties import ACTION_PENALTIES, PENALTIES, STATE_PENALTIES
 from ..policy.rollout import rollout
 from ..policy.generate import generate
-from ..run.logger import log, flush
-from ..run.checkpoints import CheckpointStore
+from ..common.logging import log, flush
+from ..policy.checkpoints import save_model_weights
 from .records import (
     ValueRecord,
     DiagnosticRecord,
@@ -281,7 +281,7 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget):
             )
         log(logger_list, record, iteration)
         if iteration % budget.val_period == 0:
-            CheckpointStore.save_model_weights(policy, checkpoint_dir / f"iter{iteration}.pt")
+            save_model_weights(policy, checkpoint_dir / f"iter{iteration}.pt")
         iterations = iteration + 1
         if not budget.validate_before_update and (
             (iteration > 0 and iterations % budget.val_period == 0) or iterations == budget.n_iterations

@@ -1,28 +1,9 @@
-"""Metric loggers and the one way to write a metric record.
-
-A metric exists only as a field of a dataclass record. ``log(logger_list,
-record, step)`` writes every set field (``None`` = not measured) to every logger.
-The tag is derived from the record's PHASE and field name. Dictionary fields
-append their key with a slash. Records contain scalar measurements only.
-"""
+"""Concrete TensorBoard and CSV sinks implementing common.logging.Logger."""
 from __future__ import annotations
 
 import csv
-from abc import ABC, abstractmethod
-from dataclasses import fields
 from pathlib import Path
-
-
-class Logger(ABC):
-    @abstractmethod
-    def scalar(self, tag: str, value: float, step: int) -> None:
-        ...
-
-    def flush(self) -> None:
-        pass
-
-    def close(self) -> None:
-        self.flush()
+from ..common.logging import Logger
 
 
 class TensorBoardLogger(Logger):
@@ -69,34 +50,3 @@ LOGGERS = {"tensorboard": TensorBoardLogger, "csv": CsvLogger}
 
 def make_loggers(names, run_dir) -> list[Logger]:
     return [LOGGERS[name](run_dir) for name in names]
-
-
-def record_tags(record, prefix: str | None = None):
-    """``(tag, value)`` for every set field of ``record``."""
-    prefix = record.PHASE if prefix is None else prefix
-    for f in fields(record):
-        value = getattr(record, f.name)
-        if value is None:
-            continue
-        tag = f"{prefix}/{f.name}"
-        if isinstance(value, dict):
-            for key, item in value.items():
-                yield f"{tag}/{key}", float(item)
-        else:
-            yield tag, float(value)
-
-
-def log(logger_list, record, step: int, prefix: str | None = None) -> None:
-    for tag, value in record_tags(record, prefix):
-        for logger in logger_list:
-            logger.scalar(tag, value, step)
-
-
-def flush(logger_list) -> None:
-    for logger in logger_list:
-        logger.flush()
-
-
-def close(logger_list) -> None:
-    for logger in logger_list:
-        logger.close()

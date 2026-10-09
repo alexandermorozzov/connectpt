@@ -10,6 +10,7 @@ with their own initial network (MACSA scenarios, EKB) do not need this.
 Config groups: ``cfg/runs/init_routes.yaml``.
 """
 from __future__ import annotations
+from connectpt.routes_generator.run.config import cost_params
 
 import argparse
 
@@ -23,7 +24,8 @@ from connectpt.routes_generator.run.context import resolve_device, seed_everythi
 from connectpt.routes_generator.run.policy import PolicyRun
 from connectpt.routes_generator.run.schemas import InitialParams, params
 from connectpt.routes_generator.search.initial import build_init_routes
-from connectpt.routes_generator.city.instances import INSTANCES_DIR, load_instance
+from connectpt.routes_generator.run.instances import load_instance
+from connectpt.routes_generator.run.const import INSTANCES_DIR
 from connectpt.routes_generator.network.routes import write_routes_txt
 
 INSTANCES = ["mandl", "mumford0", "mumford1", "mumford2", "mumford3"]
@@ -43,7 +45,7 @@ def main() -> None:
     device = resolve_device(cpu=args.cpu)
     cfg = load_experiment("init_routes")
     cost = build_cost(
-        cfg.cost, symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
+        cost_params(cfg.cost), symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
     )
     initial = params(InitialParams, cfg.initial)
     corruption = RealisticParams.from_values(OmegaConf.to_container(cfg.corruption, resolve=True))

@@ -16,13 +16,13 @@ from datetime import datetime
 
 import pandas as pd
 
-from connectpt.routes_generator.run.factory import ExperimentRunFactory
+from connectpt.routes_generator.run.factory import make_run
 from connectpt.routes_generator.run.config import build_experiment
 from connectpt.routes_generator.run.const import LOGS_DIR, RESULTS_DIR
 from connectpt.routes_generator.run.context import resolve_under_root
 from connectpt.routes_generator.run.network import NetworkRun
 from connectpt.routes_generator.objectives.metrics import select_metrics
-from connectpt.routes_generator.run.artifacts import save_routes
+from connectpt.routes_generator.network.io import save_route_artifact
 
 CONFIG = "search"
 METHODS = ["ea", "nea", "nea_edit", "nea_combined"]
@@ -102,7 +102,7 @@ def main() -> None:
                             adj_target=adj_target,
                             **common,
                         )
-                        artifact = ExperimentRunFactory.from_cfg(cfg).run(dry_run=args.dry_run)
+                        artifact = make_run(cfg).run(dry_run=args.dry_run)
                         if args.dry_run:
                             log.info("dry-run OK: %s", artifact.plan)
                             continue
@@ -113,7 +113,7 @@ def main() -> None:
                 if args.dry_run:
                     continue
 
-                save_routes(
+                save_route_artifact(
                     out_dir / f"{args.config}_{name}_{method}_seed{seed}_routes.pt",
                     routes,
                     coords=artifact.instance.coords,

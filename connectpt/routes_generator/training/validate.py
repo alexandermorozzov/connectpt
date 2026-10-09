@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 import torch
 from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader
 
-from ..run.artifacts import ArtifactStore
-from ..run.logger import flush, log
+from ..common.logging import flush, log
 from ..policy.generate import evaluate_policy
 from ..policy.rollout import bind_env
 from ..env.state import RouteGenBatchState
@@ -46,10 +47,13 @@ class EvaluationProfile:
 
 
 class Validation:
-    def __init__(self, data, cost, env, profile, output, device):
+    def __init__(self, data, cost, env, profile, output, device, *, save_json: Callable[[dict[str, Any] | list, str], Path] | None = None):
         self.data, self.cost, self.env = data, cost, env
         self.profile, self.output, self.device = profile, output, device
         self.last_monitor_step = None
+        self.save_json = save_json
+        if profile.evaluation.pareto_enabled and save_json is None:
+            raise ValueError("Pareto validation requires an artifact writer")
 
     def batches(self, progress):
         raise NotImplementedError
@@ -59,8 +63,6 @@ class Validation:
         self.progress = progress
         collected, results = [], []
         for graphs, seeds, route_count in self.batches(progress):
-            from dataclasses import replace
-
             self.env.params = replace(self.env.params, n_routes=route_count)
             self.env.reset(graphs.to(self.device), self.cost.get_weights(), seeds, normalize=False)
             metrics, routes = evaluate_policy(
@@ -112,10 +114,10 @@ class Validation:
 
 
 class ConstructionValidation(Validation):
-    def __init__(self, data, cost, env, profile, output, device):
-        super().__init__(data, cost, env, profile, output, device)
+    def __init__(self, data, cost, env, profile, output, device, *, save_json: Callable[[dict[str, Any] | list, str], Path] | None = None):
+        super().__init__(data, cost, env, profile, output, device, save_json=save_json)
         if profile.evaluation.pareto_enabled:
-            ArtifactStore(output).save_json(
+            self.save_json(
                 dict(
                     indices=data.validation_indices,
                     seed=profile.evaluation.seed,
@@ -142,6 +144,7 @@ class ConstructionValidation(Validation):
                 self.device,
                 logger_list,
                 step,
+                save_json=self.save_json,
             )
             self.last_monitor_step = step
 
@@ -168,6 +171,7 @@ class EditValidation(Validation):
                 logger_list,
                 step,
                 seed_networks=seeds,
+                save_json=self.save_json,
             )
             self.last_monitor_step = step
 
@@ -186,8 +190,10 @@ def evaluate_preferences(
     stochastic_samples=None,
     save_artifacts=True,
     seed_networks=None,
+    save_json: Callable[[dict[str, Any] | list, str], Path] | None = None,
 ):
-    artifacts = ArtifactStore(output)
+    if save_artifacts and save_json is None:
+        raise ValueError("saving evaluation requires an artifact writer")
     rows, networks = [], []
     count = int(preference_count if preference_count is not None else profile.evaluation.preference_count)
     samples = (
@@ -276,7 +282,7 @@ def evaluate_preferences(
                             )
     suffix = "" if checkpoint == "last" and mode == "greedy" else f"_{checkpoint}_{mode}"
     if save_artifacts:
-        artifacts.save_json(
+        save_json(
             {
                 "rows": rows,
                 "checkpoint": checkpoint,
@@ -297,7 +303,7 @@ def evaluate_preferences(
             },
             f"test_evaluation{suffix}.json",
         )
-        artifacts.save_json(networks, f"test_routes{suffix}.json")
+        save_json(networks, f"test_routes{suffix}.json")
     return rows
 
 
@@ -323,9 +329,8 @@ def log_pareto_metrics(rows, profile, logger_list, step, prefix):
     return report
 
 
-def evaluate_pareto(model, data, profile, cost, output, device, logger_list, step, *, seed_networks=None):
+def evaluate_pareto(model, data, profile, cost, output, device, logger_list, step, *, seed_networks=None, save_json: Callable[[dict[str, Any] | list, str], Path]):
     """Fixed held-out cities/preferences/action seeds, isolated from training RNG."""
-    artifacts = ArtifactStore(output)
     for mode in ("greedy", "stochastic"):
         started = time.monotonic()
         rows = evaluate_preferences(
@@ -346,5 +351,5 @@ def evaluate_pareto(model, data, profile, cost, output, device, logger_list, ste
         log(logger_list, ParetoRecord(evaluation_seconds=report["evaluation_seconds"]), step, prefix=f"pareto/{mode}")
         example = [r for r in rows if r["graph"] == 0 and r["sample"] == 0]
         report["example_front"] = example
-        artifacts.save_json(report, f"pareto/iter{step:05d}_{mode}.json")
+        save_json(report, f"pareto/iter{step:05d}_{mode}.json")
     flush(logger_list)

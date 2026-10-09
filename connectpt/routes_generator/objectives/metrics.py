@@ -18,6 +18,8 @@ from .preferences import scalarize
 from ..network.corruption import redundancy_fraction
 from ..network.routes import to_routes
 from .const import METRIC_NAMES
+from ..city.graph import to_batch
+from ..env.state import RouteGenBatchState
 
 
 def _adjustment_values(adjustment=None):
@@ -229,8 +231,6 @@ def cost_breakdown(state, cost_obj):
 
 def evaluate_routes(routes, tensors, spec, *, cost, device, seed_routes=None):
     """Evaluate a fixed network using already resolved objective parameters."""
-    from ..city.graph import to_batch
-    from ..env.state import RouteGenBatchState
 
     state = RouteGenBatchState(
         to_batch(tensors, device),

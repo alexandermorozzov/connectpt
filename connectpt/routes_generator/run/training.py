@@ -3,11 +3,40 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+
 import torch
 from omegaconf import OmegaConf
 
-from ..run.runs import ExperimentRun, RunArtifact
-from .edit_dataset import CopyTierConfig
+from ..common.logging import log
+from ..env.actions import ActionSpec
+from ..env.base import EnvParams
+from ..network.corruption import CopyTierParams
+from ..objectives.cost import build_cost
+from ..policy.build import load_policy
+from ..policy.checkpoints import load_model_weights, save_model_weights
+from ..policy.rollout import ENVS
+from ..training.algorithms.base import AlgorithmParams
+from ..training.algorithms.d3po import D3PO
+from ..training.algorithms.ppo import PPO
+from ..training.critic import CriticParams, ValueHead
+from ..training.data import ConstructionDataset
+from ..training.edit_dataset import CopyTierConfig, EditDataset, build
+from ..training.loop import Budget, train
+from ..training.params import CurriculumParams, DatasetBuildParams, EditDatasetParams, LoopParams, OptimizerParams
+from ..training.records import DataCounts
+from ..training.validate import (
+    ConstructionValidation, EditValidation, EvaluationParams, EvaluationProfile,
+    evaluate_preferences, log_pareto_metrics,
+)
+from .artifacts import ArtifactStore
+from .comparison import compare_runs
+from .config import compose_policy_config, cost_params, policy_profile
+from .const import DATASETS_DIR
+from .context import RunContext, resolve_device, resolve_under_root, resolve_weights_path
+from .instances import load_instance
+from .policy import PolicyRun
+from .runs import ExperimentRun, RunArtifact
+from .schemas import ComparisonParams, OutputPaths, RunParams, TrainingPaths, TrainingRunParams, params
 
 
 @dataclass
@@ -21,9 +50,6 @@ class ComparisonRun(ExperimentRun):
     """Compare finished construction runs (``compare_runs``) on their test grid."""
 
     def setup(self) -> None:
-        from ..run.context import resolve_under_root
-        from ..run.schemas import ComparisonParams, OutputPaths, RunParams, params
-
         self.run_params = params(RunParams, self.cfg.run)
         self.comparison = params(ComparisonParams, self.cfg.comparison)
         output_dir = params(OutputPaths, self.cfg.paths).output_dir
@@ -35,8 +61,6 @@ class ComparisonRun(ExperimentRun):
         return RunArtifact(self.run_params.name, self.run_dir, {"dry_run": True})
 
     def execute(self) -> RunArtifact:
-        from .compare import compare_runs
-
         c = self.comparison
         report = compare_runs(
             self.run_dir, tuple(c.names), checkpoint=c.checkpoint, mode=c.mode, budget_mode=c.budget_mode
@@ -44,49 +68,8 @@ class ComparisonRun(ExperimentRun):
         return RunArtifact(self.run_params.name, self.run_dir, {"summary": report["summary"]})
 
 
-@dataclass(frozen=True)
-class OptimizerParams:
-    name: str
-    learning_rate: float
-    decay: float
-
-
-@dataclass(frozen=True)
-class LoopParams:
-    n_iterations: int
-    horizon: int
-    val_period: int
-    validate_before_update: bool
-    max_seconds: float | None
-    batch_size: int
-    batch_size_cuda: int
-    cpu_threads: int | None
-    warmup_batches: int
-    max_rollout_samples: int | None
-    calibrate_before_validation: bool
-    action_seed: int | None
-    force_nonhalt_until: int | None
-    resample_preferences_on_terminal: bool
-
-
 class TrainingRun(ExperimentRun):
     def setup(self):
-        from ..run.schemas import TrainingRunParams, TrainingPaths, CurriculumParams, params
-        from ..run.context import RunContext, resolve_weights_path
-        from ..run.config import policy_profile
-        from ..policy.build import load_policy
-        from ..objectives.cost import build_cost
-        from ..env.base import EnvParams
-        from ..env.actions import ActionSpec
-        from ..policy.rollout import ENVS
-        from .algorithms.base import AlgorithmParams
-        from .algorithms.ppo import PPO
-        from .algorithms.d3po import D3PO
-        from .critic import CriticParams
-        from .data import ConstructionDataset
-        from .edit_dataset import EditDataset
-        from .validate import EvaluationParams, EvaluationProfile
-
         cfg = self.cfg
         self.run_params, self.paths = params(TrainingRunParams, cfg.run), params(TrainingPaths, cfg.paths)
         self.context = RunContext.create(
@@ -101,16 +84,15 @@ class TrainingRun(ExperimentRun):
         self.env_name = cfg.env.name
         ActionSpec(self.env_name).validate(self.policy.action_spec)
         if self.paths.init_checkpoint_path:
-            from ..run.checkpoints import CheckpointStore
 
-            CheckpointStore.load_model_weights(
+            load_model_weights(
                 self.policy,
                 resolve_weights_path(self.paths.init_checkpoint_path, self.paths.weights_dir),
                 strict=True,
                 map_location=device,
             )
         self.cost = build_cost(
-            cfg.cost, symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
+            cost_params(cfg.cost), symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
         ).to(device)
         self.env_params = params(EnvParams, cfg.env.params)
         self.env = ENVS[self.env_name](
@@ -130,9 +112,18 @@ class TrainingRun(ExperimentRun):
         self.evaluation_profile = EvaluationProfile(
             self.evaluation, self.env_params, self.batch_size, cfg.experiment.symmetric_routes
         )
-        self.dataset = {"construction": ConstructionDataset, "edit": EditDataset}[self.env_name](
-            **OmegaConf.to_container(cfg.dataset, resolve=True)
-        )
+        dataset_values = OmegaConf.to_container(cfg.dataset, resolve=True)
+
+        if self.env_name == "edit":
+            dataset_values["dataset_dirname"] = resolve_under_root(DATASETS_DIR / dataset_values["dataset_dirname"])
+        else:
+            dataset_values["test_path"] = resolve_under_root(dataset_values["test_path"])
+            for key in ("path", "val_path"):
+                if key in dataset_values["kwargs"]:
+                    dataset_values["kwargs"][key] = resolve_under_root(dataset_values["kwargs"][key])
+            if dataset_values["type"] == "mumford":
+                dataset_values["kwargs"]["city"] = load_instance(dataset_values["kwargs"]["city"])
+        self.dataset = {"construction": ConstructionDataset, "edit": EditDataset}[self.env_name](**dataset_values)
         self.curriculum = params(CurriculumParams, cfg.curriculum)
         self.checkpoint = resolve_weights_path(self.paths.checkpoint_path, self.paths.weights_dir)
         self.best_checkpoint = self.checkpoint.with_name(
@@ -153,15 +144,6 @@ class TrainingRun(ExperimentRun):
         )
 
     def execute(self):
-        from ..run.checkpoints import CheckpointStore
-        from ..run.artifacts import ArtifactStore
-        from ..run.logger import log
-        from ..policy.rollout import ENVS
-        from .critic import ValueHead
-        from .loop import Budget, train
-        from .records import DataCounts
-        from .validate import ConstructionValidation, EditValidation, evaluate_preferences, log_pareto_metrics
-
         device, lp = self.context.device, self.loop_params
         opt = self.optimizer_params
         optimizer = getattr(torch.optim, opt.name)(
@@ -189,7 +171,8 @@ class TrainingRun(ExperimentRun):
             node_normalizer=self.policy.node_norm,
         )
         data.validation = {"construction": ConstructionValidation, "edit": EditValidation}[self.env_name](
-            data, val_cost, val_env, self.evaluation_profile, self.run_dir, device
+            data, val_cost, val_env, self.evaluation_profile, self.run_dir, device,
+            save_json=ArtifactStore(self.run_dir).save_json,
         )
         critic = ValueHead(
             self.algorithm.value_dim,
@@ -215,8 +198,9 @@ class TrainingRun(ExperimentRun):
             self.run_params.name,
         )
         result = train(self.env, self.policy, self.algorithm, critic, optimizer, self.logger_list, data, budget)
-        CheckpointStore.save_model_weights(self.policy, self.checkpoint, self.cfg)
-        CheckpointStore.save_model_weights(result.best_policy, self.best_checkpoint, self.cfg)
+        checkpoint_config = OmegaConf.to_container(self.cfg, resolve=True)
+        save_model_weights(self.policy, self.checkpoint, checkpoint_config)
+        save_model_weights(result.best_policy, self.best_checkpoint, checkpoint_config)
         torch.save(result.critic_snapshot, self.run_dir / "critic_snapshot.pt")
         ArtifactStore(self.run_dir).save_json(
             {"iterations": result.iterations, "best_cost": result.best_cost}, "training_result.json"
@@ -251,6 +235,7 @@ class TrainingRun(ExperimentRun):
                         checkpoint=label,
                         mode=mode,
                         seed_networks=test_seeds,
+                        save_json=ArtifactStore(self.run_dir).save_json,
                     )
                     if self.evaluation.pareto_enabled:
                         report = log_pareto_metrics(
@@ -269,9 +254,6 @@ class TrainingRun(ExperimentRun):
 def copytier_config(dg, data, policy_profile, policy_cost, policy_seed) -> "CopyTierConfig":
     """The dataset-generation config from the ``dataset_build`` and ``dataset``
     parameters."""
-    from ..run.const import DATASETS_DIR
-    from .edit_dataset import CopyTierConfig
-    from ..network.corruption import CopyTierParams
 
     ddir = DATASETS_DIR / data.dataset_dirname
     tiers = list(dg.tiers)
@@ -305,14 +287,8 @@ class DatasetRun(ExperimentRun):
     """Generate the dataset described by a composed ``runs/prepare_dataset`` cfg."""
 
     def setup(self) -> None:
-        from ..run.context import resolve_under_root
-        from ..run.schemas import DatasetBuildParams, EditDatasetParams, OutputPaths, TrainingRunParams, params
-
         cfg = self.cfg
         self.run_params = params(TrainingRunParams, cfg.run)
-        from ..run.policy import PolicyRun
-        from ..run.config import compose_policy_config
-        from ..run.context import resolve_device
 
         policy_run = PolicyRun(compose_policy_config(), resolve_device(cpu=self.run_params.cpu))
         policy_run.setup()
@@ -336,6 +312,4 @@ class DatasetRun(ExperimentRun):
         return self._artifact(None, True)
 
     def execute(self):
-        from .edit_dataset import build
-
         return self._artifact(build(self.dataset), False)

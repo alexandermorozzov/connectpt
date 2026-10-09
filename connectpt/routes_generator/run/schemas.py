@@ -1,18 +1,10 @@
-"""Typed parameters of the config groups (B6).
-
-``Run.setup`` turns a composed group into its dataclass with :func:`params`;
-below ``Run.setup`` only these objects travel, never a ``DictConfig``. The
-dataclasses have no default values: a missing, extra or renamed YAML key raises
-``TypeError`` (a dry run catches it). Groups that differ between run types have
-one class per shape. The remaining groups get their classes in their stage:
-``cost`` Э4, ``features`` Э5, ``model``/``model_profile`` Э6, ``algorithm``/``env`` Э7,
-``method`` Э8.
-"""
+"""Typed configuration groups owned by run. params resolves them at setup."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from omegaconf import OmegaConf
+from .logger import LOGGERS
 
 
 def params(cls, node):
@@ -61,16 +53,6 @@ class OutputPaths:
 
 
 @dataclass(frozen=True)
-class InstanceParams:
-    name: str
-    path: str
-    n_routes: int
-    min_route_len: int
-    max_route_len: int
-    crs: str | None
-
-
-@dataclass(frozen=True)
 class SweepParams:
     """One search point; ``None`` keeps the adjustment value of the cost."""
     alpha: float
@@ -96,45 +78,12 @@ class AdjustmentParams:
 
 
 @dataclass(frozen=True)
-class EditDatasetParams:
-    dataset_dirname: str
-    target_n_routes: int
-    min_route_len: int
-    max_route_len: int
-    train_fraction: float
-    split_seed: int
-
-
-@dataclass(frozen=True)
-class DatasetBuildParams:
-    n_graphs: int
-    raw_n_nodes: int
-    raw_graph_type: str
-    raw_graph_seed: int
-    lc_n_samples: int
-    lc_combos: list
-    tiers: list
-    force_regen: bool
-    batch_size_cpu: int
-    batch_size_cuda: int
-    corruption_seed: int
-    tier_cfg: dict
-
-
-@dataclass(frozen=True)
 class ComparisonParams:
     """Runs under ``<paths.output_dir>/runs/<name>``, compared on one test grid."""
     names: list
     checkpoint: str
     mode: str
     budget_mode: str
-
-
-@dataclass(frozen=True)
-class CurriculumParams:
-    tiers: list
-    n_val_per_tier: int
-    schedule: list
 
 
 @dataclass(frozen=True)
@@ -146,7 +95,6 @@ class InitialParams:
 
 def logger_names(node) -> list[str]:
     """The ``logger_list`` key: names from ``run.logger.LOGGERS``."""
-    from .logger import LOGGERS
 
     names = list(node)
     unknown = [n for n in names if n not in LOGGERS]

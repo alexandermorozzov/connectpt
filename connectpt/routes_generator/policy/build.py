@@ -5,8 +5,8 @@ from pathlib import Path
 import torch
 
 from ..env.features import FeatureParams, dims
-from ..objectives.cost import CostConstants
-from ..run.checkpoints import CheckpointStore
+from ..common.parameters import CostConstants
+from ..policy.checkpoints import load_model_weights
 from .models import GraphAttnNet, PathCombiningRouteGenerator, TrimPathCombiningRouteGenerator
 
 
@@ -122,5 +122,5 @@ def load_policy(profile: PolicyProfile):
     policy.objectives = profile.objectives
     policy.to(profile.device)
     if profile.checkpoint_path is not None:
-        CheckpointStore.load_model_weights(policy, profile.checkpoint_path, strict=True, map_location=profile.device)
+        load_model_weights(policy, profile.checkpoint_path, strict=True, map_location=profile.device)
     return policy
