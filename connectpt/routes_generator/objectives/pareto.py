@@ -131,12 +131,3 @@ def summarize_evaluation(rows, reference, eu_preference_count):
         stochastic_rule="Independent fronts per city/draw, then mean; no pooling/best-of-N",
         network_rule="Route permutation and symmetric reversal ignored; duplicate routes retained",
     )
-
-
-def closest_to_ideal(rows, cols):
-    values = np.asarray([[row[col] for col in cols] for row in rows], dtype=float)
-    if not len(values) or not np.isfinite(values).all():
-        raise ValueError("closest_to_ideal needs nonempty finite rows")
-    low, high = values.min(axis=0), values.max(axis=0)
-    span = np.where(high > low, high - low, 1.0)
-    return rows[int(np.linalg.norm((values - low) / span, axis=1).argmin())]

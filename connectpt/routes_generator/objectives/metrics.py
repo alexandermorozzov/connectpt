@@ -17,6 +17,7 @@ from .penalties import adjustment_degree
 from .preferences import scalarize
 from ..network.corruption import redundancy_fraction
 from ..network.routes import to_routes
+from .const import METRIC_NAMES
 
 
 def _adjustment_values(adjustment=None):
@@ -94,20 +95,6 @@ def select_metrics(row: dict, keep) -> dict:
 
 class Metrics(dict):
     """Named network measurements, in the units of the result tables."""
-
-
-METRIC_NAMES = (
-    "cost",
-    "ATT",
-    "RTT",
-    "$d_0$",
-    "$d_1$",
-    "$d_2$",
-    "$d_{un}$",
-    "# disconnected node pairs",
-    "# stops out of bounds",
-    "median_connectivity_weighted",
-)
 
 
 def evaluate_network(state_or_result, cost=None, *, routes=None, seed=None, adjustment=None):

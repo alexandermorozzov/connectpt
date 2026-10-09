@@ -106,13 +106,6 @@ class EditDatasetParams:
 
 
 @dataclass(frozen=True)
-class ConstructionDatasetParams:
-    type: str
-    kwargs: dict
-    test_path: str
-
-
-@dataclass(frozen=True)
 class DatasetBuildParams:
     n_graphs: int
     raw_n_nodes: int

@@ -3,7 +3,8 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from ..env.actions import RouteAction, ROUTE_ACTION_HALT
+from ..env.actions import RouteAction
+from ..env.const import RouteActionKind
 from ..env.base import EnvParams
 from ..env.construction import ConstructionEnv
 from ..env.edit import EditEnv
@@ -109,7 +110,7 @@ def rollout(env, policy, greedy=False, max_steps=None, *, actions=None, record_s
         if encoding is not None:
             obs = replace(obs, encoding=encoding)
         if env.forced_halt() and actions is None:
-            kind = torch.full((obs.batch_size,), ROUTE_ACTION_HALT, dtype=torch.long, device=obs.device)
+            kind = torch.full((obs.batch_size,), RouteActionKind.HALT, dtype=torch.long, device=obs.device)
             indices = torch.full((obs.batch_size, 2), -1, dtype=torch.long, device=obs.device)
             zeros = torch.zeros(obs.batch_size, device=obs.device)
             out = PolicyOut(RouteAction(kind, indices), zeros, zeros.clone(), zeros[:, None])
@@ -120,8 +121,8 @@ def rollout(env, policy, greedy=False, max_steps=None, *, actions=None, record_s
         if env.single_route:
             kind = out.action.kind.clone()
             indices = out.action.indices.clone()
-            kind[~active] = ROUTE_ACTION_HALT
-            indices[~active | (kind == ROUTE_ACTION_HALT)] = -1
+            kind[~active] = RouteActionKind.HALT
+            indices[~active | (kind == RouteActionKind.HALT)] = -1
             out = replace(out, action=RouteAction(kind, indices), logp=out.logp * active, entropy=out.entropy * active)
         obs, mask, reward, done, info = env.step(out.action)
         # Full distributions are needed by replay losses, not by the buffer.

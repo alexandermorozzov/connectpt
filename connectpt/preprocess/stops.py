@@ -1,4 +1,5 @@
-from typing import Dict, List, Optional
+from typing import Dict
+import logging
 
 import numpy as np
 import pandas as pd
@@ -6,16 +7,16 @@ import geopandas as gpd
 import osmnx as ox
 import networkx as nx
 
-from loguru import logger
 from shapely.geometry import Polygon, MultiPolygon
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
-from shapely import from_wkt
 
 
 from .types import Modality, MODALITY_STOP_TAGS
 from .utils import _is_names_similar
+
+logger = logging.getLogger(__name__)
 
 
 def _preprocess_stop_name(name: str) -> set:
@@ -237,7 +238,7 @@ def aggregate_stops(stops_gdf: gpd.GeoDataFrame, distance_threshold: int = None)
         # Calculate automatic threshold
         median_dist = _calculate_median_distance(stops_gdf)
         distance_threshold = int(median_dist)
-        logger.info(f"Automatically calculated distance_threshold: {distance_threshold:.2f}m")
+        logger.info("Automatically calculated distance_threshold: %.2fm", distance_threshold)
 
     n_stops = len(stops_gdf)
     # Adjacency matrix initialization

@@ -18,7 +18,8 @@ import pandas as pd
 
 from connectpt.routes_generator.run.factory import ExperimentRunFactory
 from connectpt.routes_generator.run.config import build_experiment
-from connectpt.routes_generator.run.context import LOGS_DIR, RESULTS_DIR, resolve_under_root
+from connectpt.routes_generator.run.const import LOGS_DIR, RESULTS_DIR
+from connectpt.routes_generator.run.context import resolve_under_root
 from connectpt.routes_generator.run.network import NetworkRun
 from connectpt.routes_generator.objectives.metrics import select_metrics
 from connectpt.routes_generator.run.artifacts import save_routes

@@ -23,29 +23,19 @@ from ..env.features import halt_features, finite_time_features, extend_features,
 from ..env.masks import (mask_action_family, set_invalid_scores_to_fmin,
                         path_mask, extension_mask, construction_halt_scores, edit_halt_scores,
                         trim_coverage_mask, TORCH_FMIN, TORCH_FMAX)
-from ..env.actions import ROUTE_ACTION_EXTEND, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_TRIM_START
+from ..env.const import RouteActionKind
 from ..env.state import RouteGenBatchState
 from ..env.actions import ActionSpec, RouteAction
 from .output import PolicyOut
 
-Q_FUNC_MODE = "q function"
-PLCY_MODE = "policy"
-GFLOW_MODE = "gflownet"
 
-DEFAULT_PREFERENCE_GOALS = ('ATT', 'WMC', 'RTT')
-
-# FEAT_NORM_MOMENTUM = 0.001
-FEAT_NORM_MOMENTUM = 0.0
+from .const import DEFAULT_PREFERENCE_GOALS, FEAT_NORM_MOMENTUM, MLP_DEFAULT_DROPOUT, ATTN_DEFAULT_DROPOUT
 
 # minimum and maximum log probs to use when "forcing" an action selection
  # use this in place of -float('inf') to avoid nans in some badly-behaved
  # backprops
 
 
-GREEDY = False
-
-MLP_DEFAULT_DROPOUT = 0.0
-ATTN_DEFAULT_DROPOUT = 0.0
 DEFAULT_NONLIN = nn.ReLU
 
 
@@ -1283,7 +1273,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         indices, logp, entropy, log_probs = self._decode(
             obs, greedy, None if action is None else action.indices,
             obs.encoding, mask=mask)
-        kind = torch.where(indices[:, 0] < 0, ROUTE_ACTION_HALT, ROUTE_ACTION_EXTEND)
+        kind = torch.where(indices[:, 0] < 0, RouteActionKind.HALT, RouteActionKind.EXTEND)
         return PolicyOut(RouteAction(kind, indices), logp, entropy, log_probs.exp())
 
 
@@ -1879,7 +1869,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                 action_kinds = self._coerce_action_kinds(actions, action_kinds,
                                                          state.device)
                 given_halt_actions = \
-                    (action_kinds == ROUTE_ACTION_HALT).to(torch.long)
+                    (action_kinds == RouteActionKind.HALT).to(torch.long)
 
             halt, corh_logit, corh_ent = select(cont_or_halt, not greedy,
                                                 self.temperature,
@@ -1907,7 +1897,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                 given_route_actions[route_is_done] = 0
             else:
                 given_route_actions[route_is_done] = halt_idx
-                given_route_actions[action_kinds == ROUTE_ACTION_HALT] = halt_idx
+                given_route_actions[action_kinds == RouteActionKind.HALT] = halt_idx
 
         flat_idxs, route_logit, route_ent = select(
             flat_route_scores, not greedy, self.temperature,
@@ -1928,7 +1918,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         action_kinds, folded_idxs = self._decode_route_action_selection(
             state, flat_idxs
         )
-        action_kinds[route_is_done] = ROUTE_ACTION_HALT
+        action_kinds[route_is_done] = RouteActionKind.HALT
         folded_idxs[route_is_done] = -1
 
         if self.serial_halting:
@@ -1944,9 +1934,9 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         if action_kinds is not None:
             return action_kinds.to(device=device, dtype=torch.long)
 
-        inferred = torch.full((actions.shape[0],), ROUTE_ACTION_EXTEND,
+        inferred = torch.full((actions.shape[0],), RouteActionKind.EXTEND,
                               dtype=torch.long, device=device)
-        inferred[actions[:, 0] < 0] = ROUTE_ACTION_HALT
+        inferred[actions[:, 0] < 0] = RouteActionKind.HALT
         return inferred
 
     def _encode_route_action_selection(self, state, actions, action_kinds):
@@ -1958,8 +1948,8 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         route_capacity = state.current_routes.shape[1]
         safe_actions = actions.clamp(min=0)
         selection = safe_actions[:, 0] * n_nodes + safe_actions[:, 1]
-        ts = action_kinds == ROUTE_ACTION_TRIM_START
-        te = action_kinds == ROUTE_ACTION_TRIM_END
+        ts = action_kinds == RouteActionKind.TRIM_START
+        te = action_kinds == RouteActionKind.TRIM_END
         selection[ts] = n_node_pairs + safe_actions[ts, 0]
         selection[te] = n_node_pairs + route_capacity + safe_actions[te, 0]
         return selection
@@ -1968,14 +1958,14 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         n_nodes = state.max_n_nodes
         n_node_pairs = n_nodes * n_nodes
         route_capacity = state.current_routes.shape[1]
-        action_kinds = torch.full_like(flat_idxs, ROUTE_ACTION_EXTEND)
+        action_kinds = torch.full_like(flat_idxs, RouteActionKind.EXTEND)
 
         trim_start = (flat_idxs >= n_node_pairs) & \
             (flat_idxs < n_node_pairs + route_capacity)
         trim_end = (flat_idxs >= n_node_pairs + route_capacity) & \
             (flat_idxs < n_node_pairs + 2 * route_capacity)
-        action_kinds[trim_start] = ROUTE_ACTION_TRIM_START
-        action_kinds[trim_end] = ROUTE_ACTION_TRIM_END
+        action_kinds[trim_start] = RouteActionKind.TRIM_START
+        action_kinds[trim_end] = RouteActionKind.TRIM_END
 
         # extend -> (from_node, to_node); clamp keeps the divmod valid for the
         # (overwritten) trim rows.

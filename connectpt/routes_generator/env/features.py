@@ -1,188 +1,31 @@
 """Pure observations and checkpoint-locked feature calculations."""
 from dataclasses import dataclass
 import math
+from .const import FEATURE_NAMES
 import torch
 from torch import Tensor
 from ..city.graph import STOP_KEY, DEMAND_KEY
 from ..common.tensors import get_update_at_mask
 from ..network.routes import get_route_leg_times, to_routes
-from ..objectives.components import EPSILON, _finite_time_diameter
-
-
-PREFERENCE_KEYS = {"ATT": "demand_time_weight", "RTT": "route_time_weight", "WMC": "median_connectivity_weight"}
+from ..common.const import EPSILON
+from ..objectives.components import _finite_time_diameter
+from ..objectives.const import PREFERENCE_KEYS
+from .const import (
+    GLOBAL_COLUMNS,
+    GLOBAL_REDUNDANCY_COLUMNS,
+    PAIR_COLUMNS,
+    PAIR_REDUNDANCY_COLUMNS,
+    NODE_COLUMNS,
+    EXTEND_COLUMNS,
+    EXTEND_REDUNDANCY_COLUMNS,
+    TRIM_COLUMNS,
+    TRIM_REDUNDANCY_COLUMNS,
+    GRAPH_COLUMNS,
+)
 
 
 def preference_tensor(state, goals):
     return state.get_cost_weights_tensor(tuple(PREFERENCE_KEYS[goal] for goal in goals))
-
-
-@dataclass(frozen=True)
-class Feature:
-    name: str
-    dim: int = 1
-
-    def compute(self, columns):
-        return columns[self.name]
-
-
-REGISTRY = {
-    name: Feature(name)
-    for name in (
-        "adj.current",
-        "adj.target",
-        "adj.weight",
-        "demand",
-        "demand.disconnected_fraction",
-        "demand.disconnected_log",
-        "demand.served_time",
-        "graph.demand_edges",
-        "graph.mean_demand",
-        "graph.node_x_mean",
-        "graph.node_x_scaled_mean",
-        "graph.node_y_mean",
-        "graph.node_y_scaled_mean",
-        "graph.std_demand",
-        "graph.total_demand",
-        "graph.weighted_time_mean",
-        "graph.weighted_time_std",
-        "legs.context_log",
-        "legs.current_log",
-        "legs.max_context",
-        "legs.mean_excess",
-        "legs.redundancy",
-        "legs.reused",
-        "legs.total_log",
-        "network.has_path",
-        "network.one_transfer",
-        "network.route_time",
-        "network.transit_time",
-        "network.two_transfers",
-        "node.same",
-        "node.x",
-        "node.x_scaled",
-        "node.y",
-        "node.y_scaled",
-        "path.context_overlap",
-        "path.drive_time",
-        "path.excess_count",
-        "path.excess_time",
-        "path.n_stops",
-        "path.new_coverage",
-        "path.redundancy_delta",
-        "pref.ATT",
-        "pref.RTT",
-        "pref.WMC",
-        "route.context_overlap",
-        "route.direct",
-        "route.direct_time",
-        "route.drive_time",
-        "route.length_fraction",
-        "route.n_stops",
-        "route.self_repeat",
-        "routes.finished_fraction",
-        "routes.finished_log",
-        "routes.left_fraction",
-        "routes.left_log",
-        "street.drive_time",
-        "street.exists",
-        "street.time",
-        "trim.direction",
-        "trim.kept_edge_overlap",
-        "trim.kept_edge_unique",
-        "trim.kept_excess_fraction",
-        "trim.kept_node_overlap",
-        "trim.kept_node_unique",
-        "trim.redundancy_delta",
-        "trim.remaining_fraction",
-        "trim.remaining_time_fraction",
-        "trim.removed_edge_overlap",
-        "trim.removed_edge_unique",
-        "trim.removed_excess_fraction",
-        "trim.removed_excess_time",
-        "trim.removed_fraction",
-        "trim.removed_node_overlap",
-        "trim.removed_node_unique",
-        "trim.removed_self_repeat",
-        "trim.removed_time_fraction",
-    )
-}
-
-
-GLOBAL_COLUMNS = (
-    "network.route_time",
-    "routes.finished_log",
-    "routes.left_log",
-    "routes.finished_fraction",
-    "routes.left_fraction",
-    "demand.disconnected_log",
-    "demand.disconnected_fraction",
-    "route.n_stops",
-    "demand.served_time",
-)
-GLOBAL_REDUNDANCY_COLUMNS = (
-    "legs.redundancy",
-    "legs.mean_excess",
-    "legs.max_context",
-    "route.self_repeat",
-    "route.context_overlap",
-)
-PAIR_COLUMNS = (
-    "demand",
-    "route.direct",
-    "route.direct_time",
-    "street.exists",
-    "street.time",
-    "network.has_path",
-    "network.transit_time",
-    "network.one_transfer",
-    "network.two_transfers",
-    "node.same",
-)
-PAIR_REDUNDANCY_COLUMNS = ("legs.context_log", "legs.current_log", "legs.total_log", "legs.reused")
-NODE_COLUMNS = ("node.x", "node.y", "node.x_scaled", "node.y_scaled")
-EXTEND_COLUMNS = ("path.drive_time", "path.n_stops", "route.drive_time", "route.n_stops")
-EXTEND_REDUNDANCY_COLUMNS = (
-    "path.context_overlap",
-    "path.excess_count",
-    "path.excess_time",
-    "path.new_coverage",
-    "path.redundancy_delta",
-)
-TRIM_COLUMNS = (
-    "trim.removed_fraction",
-    "trim.remaining_fraction",
-    "route.length_fraction",
-    "trim.removed_time_fraction",
-    "trim.remaining_time_fraction",
-    "trim.direction",
-    "trim.removed_node_overlap",
-    "trim.removed_node_unique",
-    "trim.removed_edge_overlap",
-    "trim.removed_edge_unique",
-    "trim.kept_node_overlap",
-    "trim.kept_node_unique",
-    "trim.kept_edge_overlap",
-    "trim.kept_edge_unique",
-)
-TRIM_REDUNDANCY_COLUMNS = (
-    "trim.removed_excess_fraction",
-    "trim.removed_excess_time",
-    "trim.removed_self_repeat",
-    "trim.kept_excess_fraction",
-    "trim.redundancy_delta",
-)
-GRAPH_COLUMNS = (
-    "graph.total_demand",
-    "graph.demand_edges",
-    "graph.mean_demand",
-    "graph.std_demand",
-    "graph.weighted_time_mean",
-    "graph.weighted_time_std",
-    "graph.node_x_mean",
-    "graph.node_y_mean",
-    "graph.node_x_scaled_mean",
-    "graph.node_y_scaled_mean",
-)
 
 
 @dataclass(frozen=True)
@@ -202,7 +45,7 @@ class FeatureParams:
 
     def __post_init__(self):
         for group in (self.node, self.pair, self.global_features, self.extend, self.halt, self.trim, self.critic):
-            unknown = set(group) - REGISTRY.keys()
+            unknown = set(group) - FEATURE_NAMES
             if unknown:
                 raise ValueError(f"unknown features: {sorted(unknown)}")
 
@@ -231,7 +74,7 @@ class FeatureParams:
 
 def dims(feature_set):
     groups = {
-        name: sum(REGISTRY[col].dim for col in getattr(feature_set, name))
+        name: len(getattr(feature_set, name))
         for name in ("node", "pair", "global_features", "extend", "halt", "trim", "critic")
     }
     groups["global"] = groups.pop("global_features")
@@ -244,7 +87,7 @@ def dims(feature_set):
 def select_features(values, source_names, requested_names):
     """The YAML order, including permutations, determines the tensor columns."""
     columns = dict(zip(source_names, values.unbind(-1), strict=True))
-    return torch.stack([REGISTRY[name].compute(columns) for name in requested_names], dim=-1)
+    return torch.stack([columns[name] for name in requested_names], dim=-1)
 
 
 @dataclass(frozen=True)
@@ -439,12 +282,17 @@ def global_state_features(state, include_redundancy=None, *, preference_goals, a
         redundancy_features = redundancy_global_features(state)
         global_features = torch.cat((global_features, redundancy_features), dim=-1)
 
-    if "adj.target" in adjustment_features:
-        feats = [state.adjustment_target.reshape(-1).clamp(min=0.0)]
-        if "adj.weight" in adjustment_features:
-            feats.append(torch.log1p(state.adjustment_weight.reshape(-1).clamp(min=0.0)) / math.log1p(8.0))
-        if "adj.current" in adjustment_features:
-            feats.append(current_adjustment(state))
+    if adjustment_features:
+        feats = []
+        for name in adjustment_features:
+            if name == "adj.target":
+                feats.append(state.adjustment_target.reshape(-1).clamp(min=0.0))
+            elif name == "adj.weight":
+                feats.append(torch.log1p(state.adjustment_weight.reshape(-1).clamp(min=0.0)) / math.log1p(8.0))
+            elif name == "adj.current":
+                feats.append(current_adjustment(state))
+            else:
+                raise ValueError(f"unknown adjustment feature: {name}")
         global_features = torch.cat((global_features, torch.stack(feats, dim=-1)), dim=-1)
     return global_features
 

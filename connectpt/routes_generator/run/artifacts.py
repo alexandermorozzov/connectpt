@@ -85,12 +85,6 @@ class ArtifactStore:
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
-    # --- tabular (pandas) ---------------------------------------------------
-    def save_table(self, df, name: str, *, index: bool = False) -> Path:
-        path = self._path(name, ".csv")
-        df.to_csv(path, index=index)
-        return path
-
     def append_row(self, row: dict, name: str, *, ndigits: int | None = None) -> Path:
         import pandas as pd
         path = self._path(name, ".csv")
@@ -100,15 +94,8 @@ class ArtifactStore:
         frame.to_csv(path, mode="a", header=not path.exists(), index=False)
         return path
 
-    def load_table(self, name: str):
-        import pandas as pd
-        return pd.read_csv(self._path(name, ".csv"))
-
     # --- json metadata ------------------------------------------------------
     def save_json(self, obj: dict[str, Any], name: str) -> Path:
         path = self._path(name, ".json")
         path.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
         return path
-
-    def load_json(self, name: str) -> dict[str, Any]:
-        return json.loads(self._path(name, ".json").read_text(encoding="utf-8"))

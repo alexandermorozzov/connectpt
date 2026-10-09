@@ -17,8 +17,8 @@ from ..network.routes import get_route_edge_matrix, get_route_leg_times, to_rout
 import numpy as np
 
 
-EPSILON = 1e-6
-from .actions import ROUTE_ACTION_EXTEND, ROUTE_ACTION_TRIM_START, ROUTE_ACTION_TRIM_END, ROUTE_ACTION_HALT
+from ..common.const import EPSILON
+from .const import RouteActionKind
 
 
 def enforce_correct_batch(matrix, batch_size):
@@ -317,8 +317,8 @@ class RouteGenBatchState:
         if path_indices.shape != (self.batch_size, 2):
             raise ValueError("Expected path_indices to have shape (batch_size, 2), got " f"{path_indices.shape}")
 
-        is_halt = action_kinds == ROUTE_ACTION_HALT
-        uses_legacy_actions = (action_kinds == ROUTE_ACTION_EXTEND) | is_halt
+        is_halt = action_kinds == RouteActionKind.HALT
+        uses_legacy_actions = (action_kinds == RouteActionKind.EXTEND) | is_halt
         if uses_legacy_actions.all():
             legacy_actions = path_indices.clone()
             legacy_actions[is_halt] = -1
@@ -326,7 +326,7 @@ class RouteGenBatchState:
             return
 
         valid_action_kinds = (
-            uses_legacy_actions | (action_kinds == ROUTE_ACTION_TRIM_START) | (action_kinds == ROUTE_ACTION_TRIM_END)
+            uses_legacy_actions | (action_kinds == RouteActionKind.TRIM_START) | (action_kinds == RouteActionKind.TRIM_END)
         )
         if not valid_action_kinds.all():
             raise ValueError("Unknown route action kind")
@@ -334,9 +334,9 @@ class RouteGenBatchState:
         updated_routes = self.current_routes.clone()
         planning_already_done = self.is_done()
         can_act = ~planning_already_done
-        extend_mask = (action_kinds == ROUTE_ACTION_EXTEND) & can_act
-        trim_start_mask = (action_kinds == ROUTE_ACTION_TRIM_START) & can_act
-        trim_end_mask = (action_kinds == ROUTE_ACTION_TRIM_END) & can_act
+        extend_mask = (action_kinds == RouteActionKind.EXTEND) & can_act
+        trim_start_mask = (action_kinds == RouteActionKind.TRIM_START) & can_act
+        trim_end_mask = (action_kinds == RouteActionKind.TRIM_END) & can_act
         halt_mask = is_halt & can_act
 
         if extend_mask.any():

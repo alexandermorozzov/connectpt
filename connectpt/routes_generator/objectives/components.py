@@ -8,9 +8,7 @@ from ..city.shortest_paths import aggregate_edge_features
 from ..network.routes import get_route_edge_matrix, get_nodes_on_routes_mask, to_routes
 from .preferences import scalarize
 
-MEAN_STOP_TIME_S = 0
-AVG_TRANSFER_WAIT_TIME_S = 300
-EPSILON = 1e-6
+from ..common.const import EPSILON
 
 
 def _finite_time_diameter(times, eps=EPSILON):
@@ -85,8 +83,8 @@ class CostConstants:
 class PhysicalCost(torch.nn.Module):
     def __init__(
         self,
-        mean_stop_time_s=MEAN_STOP_TIME_S,
-        avg_transfer_wait_time_s=AVG_TRANSFER_WAIT_TIME_S,
+        mean_stop_time_s,
+        avg_transfer_wait_time_s,
         symmetric_routes=True,
         low_memory_mode=False,
     ):

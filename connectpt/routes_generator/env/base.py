@@ -4,7 +4,8 @@ from dataclasses import dataclass
 
 import torch
 
-from .actions import ActionSpec, RouteAction, ROUTE_ACTION_HALT
+from .actions import ActionSpec, RouteAction
+from .const import RouteActionKind
 from .features import FeatureParams, observe, select_features, NODE_COLUMNS
 from ..city.graph import STOP_KEY
 from ..objectives.penalties import ACTION_PENALTIES
@@ -92,10 +93,10 @@ class Env(ABC):
         active = ~self.is_done()
         forced = self.forced_halt()
         if forced:
-            action = RouteAction(torch.full_like(action.kind, ROUTE_ACTION_HALT), torch.full_like(action.indices, -1))
+            action = RouteAction(torch.full_like(action.kind, RouteActionKind.HALT), torch.full_like(action.indices, -1))
         previous = self.result
         self._apply(action)
-        self.ended |= action.kind == ROUTE_ACTION_HALT
+        self.ended |= action.kind == RouteActionKind.HALT
         self.steps += 1
         self.result = self.cost(self.state)
         done = self.is_done()

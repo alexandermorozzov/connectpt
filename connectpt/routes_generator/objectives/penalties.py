@@ -1,11 +1,9 @@
 """Constraint, adjustment and edit penalties, independent of policy and search."""
 import torch
+from .const import STATE_PENALTIES, ACTION_PENALTIES, PENALTIES
 
 # Order of the penalty vector: cost computes the state penalties, the environment
 # step appends the action penalties.
-STATE_PENALTIES = ("constraints", "adjustment")
-ACTION_PENALTIES = ("edit_step", "forced_halt")
-PENALTIES = STATE_PENALTIES + ACTION_PENALTIES
 
 
 def constraint_penalty(state, result, ignore_stops_oob):

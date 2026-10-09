@@ -25,7 +25,7 @@ from ..run.schemas import EditDatasetParams
 @dataclass(frozen=True)
 class EditDataset(EditDatasetParams):
     def prepare(self, cost, batch_size, evaluation, device, env_params, curriculum, resample_preferences):
-        from ..run.context import DATASETS_DIR
+        from ..run.const import DATASETS_DIR
 
         folder = DATASETS_DIR / self.dataset_dirname
         module = TrainingDataModule(

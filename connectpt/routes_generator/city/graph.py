@@ -8,21 +8,17 @@ from torch_geometric.data import Batch, Data, HeteroData
 from torch_geometric.transforms import BaseTransform, RandomFlip
 
 from .shortest_paths import floyd_warshall
-
-STOP_KEY = "stop"
-STREET_KEY = (STOP_KEY, "street", STOP_KEY)
-DEMAND_KEY = (STOP_KEY, "demand", STOP_KEY)
-# we don't use this in here, but we do elsewhere
-ROUTE_KEY = (STOP_KEY, "route", STOP_KEY)
-
-
-DMD_FEAT_IDX = 0
-SHORTESTPATH_FEAT_IDX = 1
-
-OUT_DEMAND_FEAT_IDX = 4
-IN_DEMAND_FEAT_IDX = 5
-
-SPEED_MPS = 15.0
+from .const import (
+    STOP_KEY,
+    STREET_KEY,
+    DEMAND_KEY,
+    ROUTE_KEY,
+    DMD_FEAT_IDX,
+    SHORTESTPATH_FEAT_IDX,
+    OUT_DEMAND_FEAT_IDX,
+    IN_DEMAND_FEAT_IDX,
+    SPEED_MPS,
+)
 
 
 def to_batch(

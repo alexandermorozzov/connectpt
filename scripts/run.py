@@ -21,7 +21,8 @@ from pathlib import Path
 from hydra import compose, initialize_config_dir
 from omegaconf import open_dict
 
-from connectpt.routes_generator.run.context import CFG_DIR, LOGS_DIR, resolve_under_root
+from connectpt.routes_generator.run.const import CFG_DIR, LOGS_DIR
+from connectpt.routes_generator.run.context import resolve_under_root
 from connectpt.routes_generator.run.factory import ExperimentRunFactory
 
 

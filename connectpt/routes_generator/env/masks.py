@@ -3,9 +3,6 @@ from connectpt.routes_generator.env.features import aggr_edges_over_sequences
 """Validity masks shared by construction, edit and search."""
 import torch
 
-TORCH_FMAX = 10**10
-TORCH_FMIN = -TORCH_FMAX
-
 
 def check_extensions_add_connections(is_linked, extensions):
     # determine if any path on its own makes new connections
@@ -68,6 +65,7 @@ def set_invalid_scores_to_fmin(scores, valid_terminals_mat):
 
 
 from dataclasses import dataclass
+from .const import TORCH_FMAX, TORCH_FMIN
 
 
 @dataclass(frozen=True)

@@ -10,7 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 from hydra import compose, initialize_config_dir
 
-from connectpt.routes_generator.run.context import CFG_DIR
+from connectpt.routes_generator.run.const import CFG_DIR
 from connectpt.routes_generator.city.synthetic import DynamicCityGraphDataset
 from connectpt.routes_generator.policy.build import load_policy
 from connectpt.routes_generator.run.config import policy_profile
@@ -30,9 +30,10 @@ from connectpt.routes_generator.objectives.pareto import hypervolume_2d, coverag
 
 
 def evaluate_action(policy, state, indices, kinds=None, mask=None):
-    from connectpt.routes_generator.env.actions import RouteAction, ROUTE_ACTION_HALT, ROUTE_ACTION_EXTEND
+    from connectpt.routes_generator.env.actions import RouteAction
+    from connectpt.routes_generator.env.const import RouteActionKind
     if kinds is None:
-        kinds = torch.where(indices[:, 0] < 0, ROUTE_ACTION_HALT, ROUTE_ACTION_EXTEND)
+        kinds = torch.where(indices[:, 0] < 0, RouteActionKind.HALT, RouteActionKind.EXTEND)
     return policy.evaluate(observe(state, policy.feature_set), ActionMask() if mask is None else mask,
         RouteAction(kinds, indices))
 
@@ -117,9 +118,11 @@ def test_returns_cut_terminal_and_bootstrap_only_truncated_episode(vector, use_g
 
 
 def test_common_sampler_matches_holliday_and_respects_fixed_weights():
-    from connectpt.routes_generator.objectives.cost import MyCostModule
+    from connectpt.routes_generator.objectives.cost import build_cost
+    from connectpt.routes_generator.run.config import load_experiment
 
-    cost = MyCostModule(
+    cost = build_cost(
+        load_experiment("train_construction").cost,
         variable_weights=True, pp_fraction=0.33, op_fraction=0.33, mcw_fraction=0.0, objectives=["ATT", "RTT"]
     )
     torch.manual_seed(41)

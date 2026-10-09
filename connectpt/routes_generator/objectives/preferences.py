@@ -1,13 +1,8 @@
 import torch
 from torch import Tensor
+from .const import GOAL_NAMES, COST_WEIGHT_KEY_ORDER, COST_COMPONENT_NAMES
 
-EPSILON = 1e-6
-GOAL_NAMES = ("ATT", "RTT", "WMC")
-COST_WEIGHT_KEY_ORDER = (
-    "demand_time_weight",
-    "route_time_weight",
-    "median_connectivity_weight",
-)
+from ..common.const import EPSILON
 
 # NOTE on ordering: the state exposes cost weights as a NAMED dict
 # (state.cost_weights) — exactly how the cost math consumes them (lookup by
@@ -19,7 +14,6 @@ COST_WEIGHT_KEY_ORDER = (
 
 # Short, human-readable names for the three cost components, index-aligned
 # with COST_WEIGHT_KEY_ORDER. Used to enable / disable individual components.
-COST_COMPONENT_NAMES = ("demand", "route", "connectivity")
 
 
 class PreferenceSampler:

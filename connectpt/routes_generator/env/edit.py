@@ -1,7 +1,8 @@
 """Single-route editing with network slots and explicit episode limits."""
 import torch
 
-from .actions import ActionSpec, RouteAction, ROUTE_ACTION_TRIM_START, ROUTE_ACTION_TRIM_END
+from .actions import ActionSpec, RouteAction
+from .const import RouteActionKind
 from .base import Env
 from .masks import ActionMask
 from .state import RouteGenBatchState
@@ -79,7 +80,7 @@ class EditEnv(Env):
 
     def _apply(self, action: RouteAction):
         active = ~self.is_done()
-        trims = ((action.kind == ROUTE_ACTION_TRIM_START) | (action.kind == ROUTE_ACTION_TRIM_END)) & active
+        trims = ((action.kind == RouteActionKind.TRIM_START) | (action.kind == RouteActionKind.TRIM_END)) & active
         self.trim_counts += trims.long()
         self.state.apply_route_actions(action.kind, action.indices)
 

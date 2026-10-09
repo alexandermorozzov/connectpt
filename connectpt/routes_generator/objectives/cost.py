@@ -7,17 +7,14 @@ from torch import Tensor
 from omegaconf import OmegaConf
 
 from ..network.routes import get_route_leg_times
+from ..common.const import EPSILON
 from .preferences import COST_WEIGHT_KEY_ORDER, COST_COMPONENT_NAMES, PreferenceSampler
 from .criteria import GOAL_NAMES, criterion
 from .components import PhysicalCost
-from .penalties import ACTION_PENALTIES, PENALTIES
+from .const import PENALTIES
 from .components import CostConstants, CostHelperOutput
 
-__all__ = ["build_cost", "CostModule", "MyCostModule", "CostParams", "CostConstants", "CostHelperOutput"]
-
-MEAN_STOP_TIME_S = 0
-AVG_TRANSFER_WAIT_TIME_S = 300
-EPSILON = 1e-6
+__all__ = ["build_cost", "MyCostModule", "CostParams", "CostConstants", "CostHelperOutput"]
 
 
 @dataclass(frozen=True)
@@ -46,8 +43,6 @@ def build_cost(cost_cfg, **overrides):
         values = asdict(cost_cfg)
     else:
         values = OmegaConf.to_container(cost_cfg, resolve=True)
-        if values.pop("type") != "mine":
-            raise ValueError("unknown cost type")
         values = values["kwargs"]
         values = asdict(CostParams(**values))
     low_memory = overrides.pop("low_memory_mode", False)
@@ -62,7 +57,7 @@ def build_cost(cost_cfg, **overrides):
     return MyCostModule(low_memory_mode=low_memory, symmetric_routes=symmetric, **values)
 
 
-class CostModule(PhysicalCost):
+class MyCostModule(PhysicalCost, PreferenceSampler):
     def with_params(self, **overrides):
         values = {f.name: getattr(self, f.name) for f in fields(CostParams) if f.name != "penalties"}
         values["penalties"] = self.penalty_weights
@@ -73,39 +68,35 @@ class CostModule(PhysicalCost):
             **overrides,
         )
 
-
-class MyCostModule(CostModule, PreferenceSampler):
     def __init__(
         self,
-        mean_stop_time_s=MEAN_STOP_TIME_S,
-        avg_transfer_wait_time_s=AVG_TRANSFER_WAIT_TIME_S,
-        symmetric_routes=True,
-        low_memory_mode=False,
-        demand_time_weight=0.33,
-        route_time_weight=0.33,
-        median_connectivity_weight=0.33,
-        constraint_violation_weight=5,
-        variable_weights=False,
-        ignore_stops_oob=False,
-        pp_fraction=0.33,
-        op_fraction=0.33,
-        mcw_fraction=0.33,
-        objectives=("ATT", "RTT", "WMC"),
-        penalties=None,
-        monitor=(),
-        adjustment_degree_weight=0.0,
-        adjustment_degree_target=0.2,
-        adjustment_degree_objective="raw",
-        adjustment_degree_gap=0.1,
-        adjustment_degree_mode="paper",
+        *,
+        mean_stop_time_s,
+        avg_transfer_wait_time_s,
+        symmetric_routes,
+        low_memory_mode,
+        demand_time_weight,
+        route_time_weight,
+        median_connectivity_weight,
+        variable_weights,
+        ignore_stops_oob,
+        pp_fraction,
+        op_fraction,
+        mcw_fraction,
+        objectives,
+        penalties,
+        monitor,
+        adjustment_degree_target,
+        adjustment_degree_objective,
+        adjustment_degree_gap,
+        adjustment_degree_mode,
     ):
         super().__init__(mean_stop_time_s, avg_transfer_wait_time_s, symmetric_routes, low_memory_mode)
-        if penalties is not None:
-            expected = set(PENALTIES)
-            if set(penalties) != expected:
-                raise ValueError(f"penalties must contain {sorted(expected)}")
-            constraint_violation_weight = penalties["constraints"]
-            adjustment_degree_weight = penalties["adjustment"]
+        expected = set(PENALTIES)
+        if set(penalties) != expected:
+            raise ValueError(f"penalties must contain {sorted(expected)}")
+        constraint_violation_weight = penalties["constraints"]
+        adjustment_degree_weight = penalties["adjustment"]
         # Unified adjustment-degree penalty (single source of truth, shared by
         # BCO / metaheuristics / training). Gated: with weight 0 OR no seed set
         # the term is skipped entirely and cost is bit-for-bit unchanged.
@@ -126,7 +117,8 @@ class MyCostModule(CostModule, PreferenceSampler):
             self.pp_fraction = pp_fraction
             self.op_fraction = op_fraction
             self.mcw_fraction = mcw_fraction
-            assert pp_fraction + op_fraction + mcw_fraction <= 1, "fractions of extreme samples must sum to <= 1"
+            if not pp_fraction + op_fraction + mcw_fraction <= 1:
+                raise ValueError("fractions of extreme samples must sum to <= 1")
         self.ignore_stops_oob = ignore_stops_oob
         # Which of the three cost components (demand / route / connectivity)
         # are active. Disabled components are dropped from the weighted cost
@@ -139,15 +131,7 @@ class MyCostModule(CostModule, PreferenceSampler):
             raise ValueError("objectives must be nonempty and unique")
         for name in (*self.objectives, *self.monitor):
             criterion(name)
-        self.penalty_weights = dict(
-            penalties
-            if penalties is not None
-            else {
-                "constraints": constraint_violation_weight,
-                "adjustment": adjustment_degree_weight,
-                **dict.fromkeys(ACTION_PENALTIES, 0.0),
-            }
-        )
+        self.penalty_weights = dict(penalties)
         self._enabled_components = tuple(name in self.objectives for name in ("ATT", "RTT", "WMC"))
         self._all_components_enabled = all(self._enabled_components)
 

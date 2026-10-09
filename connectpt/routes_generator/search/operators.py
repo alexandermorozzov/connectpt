@@ -5,7 +5,7 @@ import torch
 from ..common.tensors import get_update_at_mask
 from ..env.base import normalize_nodes
 from ..env.masks import ActionMask, check_extensions_add_connections
-from ..env.actions import ROUTE_ACTION_HALT
+from ..env.const import RouteActionKind
 from ..env.features import aggr_edges_over_sequences
 from ..policy.rollout import bind_env, rollout
 from ..network.routes import to_routes
@@ -196,7 +196,7 @@ def edit_route(
             mask=ActionMask(extend=allow_extend, trim_start=allow_trim_start, trim_end=allow_trim_end, halt=allow_halt),
         )
         trajectory = rollout(env, model, greedy, max_steps=1, record_states=False)
-        halted = trajectory.outputs[0].action.kind == ROUTE_ACTION_HALT
+        halted = trajectory.outputs[0].action.kind == RouteActionKind.HALT
     finally:
         env_state.extra_data.max_route_len = original_max_route_len
     if n_cond > 0:

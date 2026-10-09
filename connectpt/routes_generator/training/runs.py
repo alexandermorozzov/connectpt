@@ -269,7 +269,7 @@ class TrainingRun(ExperimentRun):
 def copytier_config(dg, data, policy_profile, policy_cost, policy_seed) -> "CopyTierConfig":
     """The dataset-generation config from the ``dataset_build`` and ``dataset``
     parameters."""
-    from ..run.context import DATASETS_DIR
+    from ..run.const import DATASETS_DIR
     from .edit_dataset import CopyTierConfig
     from ..network.corruption import CopyTierParams
 

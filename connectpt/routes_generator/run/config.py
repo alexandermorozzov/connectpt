@@ -6,30 +6,24 @@ single runs and batch configs alike. The caller names an experiment and runs it:
 no hydra plumbing, no config building in cells.
 
 ``build_experiment`` is the procedural layer on top: it composes the parent
-config, then injects sweep/data/run parameters (alpha, adj_target, instance, route
-bounds, ...) into the composed cfg in code. Every parameter defaults to ``None``
+config, then injects sweep/data/run parameters (alpha, adj_target, instance,
+seed, ...) into the composed cfg in code. Every parameter defaults to ``None``
 -> keep the YAML value; a passed value overrides it. This replaces string
 ``overrides=["sweep.alpha=[0,1]"]`` with typed keyword arguments.
 """
 from __future__ import annotations
 
-from typing import Sequence
-
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf, open_dict
 
-from .context import CFG_DIR, safe_run_name
-
-
-def _compose_experiment(name: str, overrides):
-    config_name = name if name.startswith("runs/") else f"runs/{name}"
-    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        return compose(config_name=config_name, overrides=list(overrides or []))
+from .const import CFG_DIR
 
 
 def load_experiment(name: str, *, overrides=None):
     """Compose a declarative run config (``cfg/runs/<name>.yaml``)."""
-    return _compose_experiment(name, overrides)
+    config_name = name if name.startswith("runs/") else f"runs/{name}"
+    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
+        return compose(config_name=config_name, overrides=list(overrides or []))
 
 
 def compose_policy_model(name: str):
@@ -89,19 +83,14 @@ def build_experiment(
     *,
     instance: str | None = None,
     method: str | None = None,
-    n_bees: int | None = None,
-    label: str | None = None,
     alpha=None,
     adj_target=None,
     adj_weight=None,
     n_iterations: int | None = None,
-    route_len: tuple[int, int] | Sequence[int] | None = None,
-    n_routes: int | None = None,
     seed: int | None = None,
     cpu: bool | None = None,
     weights_dir: str | None = None,
     runs_dir: str | None = None,
-    overrides=None,
 ):
     """Compose a declarative experiment and inject parameters procedurally.
 
@@ -110,10 +99,9 @@ def build_experiment(
     the sweep/data/run block reflects it, without touching any file on disk.
 
     A **method** selects the ``method=<x>`` Hydra group, which carries the
-    operators AND the models they need; ``label`` names it in the results table.
+    operators AND the models they need.
 
-    ``alpha``/``adj_target`` set the one search point (the script loops over
-    the grid); ``route_len`` is ``(min_route_len, max_route_len)``.
+    ``alpha``/``adj_target`` set the one search point (the script loops over the grid).
 
     ``weights_dir`` is the root relative checkpoint paths resolve against and
     ``runs_dir`` the root of the per-run scratch dir -- both default to the
@@ -121,12 +109,12 @@ def build_experiment(
     """
     # Group selections must be compose-time overrides (Hydra picks the defaults
     # group before merge); everything else is injected into the composed cfg.
-    group_overrides = list(overrides or [])
+    group_overrides = []
     if method is not None:
         group_overrides.append(f"method={method}")
     if instance is not None:
         group_overrides.append(f"instance={instance}")
-    cfg = _compose_experiment(name, group_overrides)
+    cfg = load_experiment(name, overrides=group_overrides)
     with open_dict(cfg):
         # -- output roots (weights read from, scratch written to) --
         if "paths" not in cfg:
@@ -136,34 +124,9 @@ def build_experiment(
         if runs_dir is not None:
             cfg.paths.runs_dir = str(runs_dir)
             _set_run_dir(cfg)
-        # -- method (group choice already applied at compose; size + name here) --
-        if n_bees is not None:
-            counts = cfg.method.bees
-            total = sum(spec.count for spec in counts.values())
-            if n_bees <= 0 or total <= 0:
-                raise ValueError("n_bees and configured bee counts must be positive")
-            allocated = 0
-            entries = list(counts.values())
-            for spec in entries[:-1]:
-                spec.count = int(n_bees * spec.count / total)
-                allocated += spec.count
-            entries[-1].count = int(n_bees) - allocated
-        if label is not None:
-            cfg.run.label = label
         # -- data / instance --
         if instance is not None:
             _retarget_instance(cfg, instance)
-        if label is not None:
-            seg = safe_run_name(label)
-            if seg and not str(cfg.run.name).endswith(seg):
-                cfg.run.name = f"{cfg.run.name}/{seg}"
-                _set_run_dir(cfg)
-        if n_routes is not None:
-            cfg.instance.n_routes = int(n_routes)
-        if route_len is not None:
-            cfg.instance.min_route_len = int(route_len[0])
-            cfg.instance.max_route_len = int(route_len[1])
-
         # -- search point (create the block if the leaf has none) --
         if "sweep" not in cfg:
             cfg.sweep = OmegaConf.create({})

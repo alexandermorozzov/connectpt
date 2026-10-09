@@ -19,7 +19,7 @@ cfg/
 ├── curriculum/      # расписание тиров edit-обучения
 ├── algorithm/       # PPO / D3PO и параметры критика
 ├── features/        # порядок и размерности признаков
-├── experiment/      # общие настройки: seed, symmetric_routes
+├── experiment/      # симметричность маршрутов и режим памяти
 ├── sweep/           # точка поиска: α, число итераций
 └── env/             # construction / edit: награда и ограничения действий
 ```
@@ -50,12 +50,29 @@ python scripts/run.py --config-name runs/prepare_dataset
 сети задаёт `adjustment/cap.yaml`. Выключить штраф: `cost.kwargs.penalties.adjustment=0`
 (в поиске — `--adj-weight 0`). Режим «цель»: `cost.kwargs.adjustment_degree_objective=target`.
 
-`run.type`: `search`, `training`, `dataset_prepare`, `comparison`. Файлы весов
-загружаются строго; старые имена и формы тензоров сохраняются. `features` задаёт
-порядок входов. Ниже `Run.setup` передаются dataclass-параметры.
+`run.type`: `search`, `training`, `dataset_prepare`, `comparison`.
+Seed запуска задаётся через `run.seed`, выбор CPU — через `run.cpu=true`.
+`features` задаёт имена и порядок входных признаков модели.
 
 Логирование содержит только скаляры: `rollout`, `train`, `eval`, `pareto`, `search`,
-`time`. Старые теги и `log_pareto_front` удалены. Таблица переименований —
-`docs/config-keys.md`; графики строятся в ноутбуках.
+`time`. TensorBoard читает общую папку `artifacts/`.
 
 YAML содержит только значения. Комментарии в конфигах не пишутся.
+
+Профили моделей:
+
+| Профиль | Архитектура | Файл весов относительно `--weights-dir` |
+|---|---|---|
+| `construction_v1` | `construction` | `inductive_random_graphs_weighted_connectivity.pt` |
+| `edit_v1` | `edit_trim_seeded` | `improvement/improvement_lc_rttconn_adj_w10_t02_finetune100.pt` |
+
+Профиль выбирается для роли метода через Hydra override:
+
+```powershell
+python scripts/run.py --config-name runs/search method=nea_edit "model_profile@models.edit=edit_v1" run.cpu=true --dry-run
+```
+
+В профиле `config` выбирает архитектуру из `model/`, а `checkpoint_path` задаёт
+файл весов. Корень весов передаётся через `--weights-dir`; по умолчанию это
+`artifacts/model_weights/`. Для обучения construction доступны архитектуры
+`construction` и `construction_holliday`, выбранные в пресетах `runs/`.

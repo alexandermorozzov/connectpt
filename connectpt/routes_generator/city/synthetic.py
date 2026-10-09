@@ -28,6 +28,26 @@ from .graph import (
     SHORTESTPATH_FEAT_IDX,
 )
 from .shortest_paths import floyd_warshall
+from .const import (
+    RAW_GRAPH_FILENAME,
+    MST,
+    OUT_KNN,
+    IN_KNN,
+    VORONOI,
+    GRID4,
+    GRID8,
+    CIRC,
+    SMALLWORLD,
+    MIXED,
+    MAX_DEMAND,
+    MIN_DEMAND,
+    MAX_POP_STD_M,
+    MIN_POP_STD_M,
+    MAX_SINK_RADIUS_M,
+    MIN_SINK_RADIUS_M,
+    CENTERNODES_PER_NODE,
+    SIDE_LENGTH_M,
+)
 
 
 class _GraphUnpickler(pickle.Unpickler):
@@ -51,29 +71,6 @@ def load_graphs(path):
     """Читать список графов, включая старые pickle-датасеты."""
     with Path(path).open("rb") as stream:
         return _GraphUnpickler(stream).load()
-
-
-RAW_GRAPH_FILENAME = "raw_graphs_1000.pkl"
-
-MST = "mst"
-OUT_KNN = "outgoing_knn"
-IN_KNN = "incoming_knn"
-VORONOI = "voronoi"
-GRID4 = "4_grid"
-GRID8 = "8_grid"
-CIRC = "circulant"
-SMALLWORLD = "small_world"
-MIXED = "mixed"
-
-MAX_DEMAND = 800.0
-MIN_DEMAND = 60.0
-MAX_POP_STD_M = 15_000
-MIN_POP_STD_M = 2000
-MAX_SINK_RADIUS_M = 7_500
-MIN_SINK_RADIUS_M = 1_500
-CENTERNODES_PER_NODE = 1 / 10
-
-SIDE_LENGTH_M = 30_000
 
 
 def get_default_train_and_eval_split(path, split=0.9, space_scale=0.01, demand_scale=0.01):

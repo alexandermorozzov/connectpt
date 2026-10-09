@@ -1,9 +1,4 @@
-"""Run context: repo paths, run names, device, seeding and ``RunContext``.
-
-Paths are computed from this file's location, so they hold no matter which
-directory the process runs from. Inputs live under ``datasets/``, outputs under
-``artifacts/``; every output root is overridable per run from the CLI.
-"""
+"""Run names, path resolution, device, seeding and ``RunContext``."""
 from __future__ import annotations
 
 import random
@@ -12,30 +7,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
-# connectpt/routes_generator/run/context.py -> repo root is 3 levels up.
-ROOT_DIR = Path(__file__).resolve().parents[3]
-CFG_DIR = ROOT_DIR / "connectpt" / "routes_generator" / "cfg"
-
-# --- inputs ---
-DATASETS_DIR = ROOT_DIR / "datasets"
-BENCHMARK_DIR = DATASETS_DIR / "benchmark"
-MACSA_DATA_DIR = DATASETS_DIR / "MACSA_data"
-
-# --- outputs / checkpoints ---
-ARTIFACTS_DIR = ROOT_DIR / "artifacts"
-# Default output roots. Each is overridable per run: `--out-dir` / `--runs-dir`
-# / `--log-dir` on the CLI, `paths.*` in the config.
-RESULTS_DIR = ARTIFACTS_DIR / "results"      # tables, route dumps, figures
-RUNS_DIR = ARTIFACTS_DIR / "runs"            # per-run scratch: partial CSV, TensorBoard
-LOGS_DIR = ARTIFACTS_DIR / "logs"            # run logs
-MODEL_WEIGHTS_DIR = ARTIFACTS_DIR / "model_weights"
-EDIT_MODEL_WEIGHTS_DIR = MODEL_WEIGHTS_DIR / "improvement"
-MODEL_OUTPUTS_DIR = ARTIFACTS_DIR / "lc_improvement_outputs"
-
-# Preserved edit/improvement checkpoint (the one the experiments load).
-EDIT_MODEL_WEIGHTS_PATH = (
-    EDIT_MODEL_WEIGHTS_DIR / "improvement_lc_redundancy_rttwmc_v1_PRESERVED.pt"
+from .const import (
+    ROOT_DIR,
+    MODEL_WEIGHTS_DIR,
+    EDIT_MODEL_WEIGHTS_DIR,
+    MODEL_OUTPUTS_DIR,
 )
 
 

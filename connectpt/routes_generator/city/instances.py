@@ -20,9 +20,11 @@ from typing import Any
 import numpy as np
 import torch
 
-from ..run.context import DATASETS_DIR, resolve_under_root
+from ..run.const import DATASETS_DIR
+from ..run.context import resolve_under_root
 from omegaconf import OmegaConf
 from ..network.routes import read_routes_txt
+from .const import EKB_COORD_CRS, TRAVEL_TIME_SCALE
 
 INSTANCE_CONFIG_DIR = Path(__file__).resolve().parents[1] / "cfg" / "instance"
 
@@ -41,8 +43,6 @@ def instance_spec(name: str):
 
 
 INSTANCES_DIR = DATASETS_DIR / "instances"
-EKB_COORD_CRS = "EPSG:32641"
-TRAVEL_TIME_SCALE = 60.0  # files are in minutes, the cost modules work in seconds
 
 
 @dataclass

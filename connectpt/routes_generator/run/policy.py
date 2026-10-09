@@ -1,7 +1,8 @@
 """Configuration boundary for standalone pretrained policy use."""
 from ..objectives.cost import build_cost
 from .config import compose_policy_model, policy_profile
-from .context import MODEL_WEIGHTS_DIR, resolve_weights_path, seed_everything
+from .const import MODEL_WEIGHTS_DIR
+from .context import resolve_weights_path, seed_everything
 from .runs import ExperimentRun
 from ..policy.build import ModelProfileParams, load_policy
 

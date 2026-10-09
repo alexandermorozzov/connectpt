@@ -2,7 +2,7 @@ import subprocess
 
 from hydra import compose, initialize_config_dir
 
-from connectpt.routes_generator.run.context import CFG_DIR
+from connectpt.routes_generator.run.const import CFG_DIR
 
 
 def test_overnight_preserves_measured_batch_and_independent_training_limits():

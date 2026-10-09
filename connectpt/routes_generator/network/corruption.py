@@ -24,8 +24,7 @@ from collections import Counter
 import torch
 
 from .routes import route_lists
-
-COPY_MUTATION_KINDS = ("full_copy", "prefix_copy", "suffix_copy", "middle_copy")
+from .const import COPY_MUTATION_KINDS
 
 
 @dataclass(frozen=True)
