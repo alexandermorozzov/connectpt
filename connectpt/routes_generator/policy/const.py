@@ -1,5 +1,8 @@
 """Constants owned by this package."""
 import math
+from torch import nn
+
+DEFAULT_NONLIN = nn.ReLU
 
 DEFAULT_PREFERENCE_GOALS = ("ATT", "WMC", "RTT")
 FEAT_NORM_MOMENTUM = 0.0
