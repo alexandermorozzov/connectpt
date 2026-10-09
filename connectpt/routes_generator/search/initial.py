@@ -259,22 +259,19 @@ def build_init_routes(
     for ``lc``, the construction ``policy``."""
     import random
 
-    from ..network.corruption import inject_realistic_tier
+    from ..network.corruption import corrupt, realistic_tier, CorruptionCity, CorruptionLimits
 
     routes = INITIALIZERS[generator](spec, tensors, device=device, cost=cost, initial=initial, policy=policy)
     routes = to_routes(routes, n_routes=spec["n_routes"], width=spec["max_route_len"])[0]
     if generator == "lc" and not clean:
         rng = random.Random(seed)
-        routes, _ = inject_realistic_tier(
+        routes = corrupt(
             routes,
             rng,
-            spec["min_route_len"],
-            spec["max_route_len"],
-            street_adj=tensors["street_adj"],
-            demand=tensors["demand"],
-            n_nodes=tensors["node_locs"].shape[0],
-            params=corruption,
-        )
+            CorruptionCity(tensors["street_adj"], tensors["demand"], tensors["node_locs"].shape[0]),
+            CorruptionLimits(spec["min_route_len"], spec["max_route_len"]),
+            realistic_tier(corruption),
+        ).routes
     routes = to_routes(routes)
     return routes[None] if routes.ndim == 2 else routes
 

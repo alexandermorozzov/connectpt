@@ -336,7 +336,10 @@ def build(cfg: CopyTierConfig):
     from connectpt.routes_generator.network.routes import to_routes
     from connectpt.routes_generator.network.corruption import (
         count_changed_routes,
-        inject_route_copies,
+        corrupt,
+        copy_tier,
+        CorruptionCity,
+        CorruptionLimits,
         redundancy_stats,
         uncovered_demand_pct,
     )
@@ -403,16 +406,14 @@ def build(cfg: CopyTierConfig):
             routes = _to_fixed(lc_routes[gi])
             before = redundancy_stats(routes)
             clean_routes = routes.clone()
-            routes, event_counts, _ = inject_route_copies(
+            corruption = corrupt(
                 routes,
-                tier_cfg,
                 rng,
-                cfg.min_route_len,
-                cfg.max_route_len,
-                demand=tn["demand"],
-                n_nodes=cfg.raw_n_nodes,
-                street_adj=tn["street_adj"],
+                CorruptionCity(tn["street_adj"], tn["demand"], cfg.raw_n_nodes),
+                CorruptionLimits(cfg.min_route_len, cfg.max_route_len),
+                copy_tier(tier_cfg),
             )
+            routes, event_counts = corruption.routes, corruption.applied_events
             after = redundancy_stats(routes)
             n_corrupted = count_changed_routes(clean_routes, routes)
             gdir = cfg.new_dataset_dir / f"graph_{gi:04d}"

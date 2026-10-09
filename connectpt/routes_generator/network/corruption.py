@@ -1,25 +1,15 @@
-"""Copy-redundancy injection shared by paper_combined.ipynb PART 1 and PART 2.
+"""Ordered copy, detour and coverage-drop mutations for one route network.
 
-One implementation of the route-copy corruption machinery that used to exist
-twice in the notebook: the training-dataset tier generator (PART 1) and the
-experiment init-network builder (PART 2) both inject duplicate routes /
-sub-routes into a clean network so the edit model has removable redundancy to
-trim. Tier values come from ``cfg/corruption`` and are resolved at Run.setup.
-
-A ``CopyTierParams`` value contains:
-
-* ``events``           -- how many injection events to attempt,
-* ``max_multiplicity`` -- max copies of one donor per event (donor + N-1 targets),
-* ``kinds``            -- allowed mutation kinds (subset of COPY_MUTATION_KINDS),
-* ``covered``          -- if True, only accept copies that keep demand coverage
-  intact (``uncovered_demand_pct <= d_un_cap``), so the redundancy is purely
-  removable and trimming is the only way to cut cost,
-* ``d_un_cap``         -- the coverage cap (%) for ``covered`` tiers.
+corrupt owns the working copy and runs MutationStage.apply(routes,rng,city,limits).
+copy_tier and realistic_tier compile resolved parameters into stage sequences.
+Candidate mathematics and random attempt order are shared by both scenarios.
+Legacy inject_* entry points delegate to corrupt without their own event loops.
 """
 from dataclasses import dataclass
 import heapq
 import math
 from collections import Counter
+from collections.abc import Callable
 
 import torch
 
@@ -68,11 +58,143 @@ class RealisticParams:
         )
 
 
-# Cap on unserved demand (%) for the coverage-preserving duplicate tier: a copy
-# is only injected if the network still leaves <= this much demand disconnected.
+@dataclass(frozen=True)
+class CorruptionCity:
+    street_adj: torch.Tensor | None
+    demand: torch.Tensor | None
+    n_nodes: int | None
 
-# Tier presets used both for the training curriculum (PART 1, incl. lc_clean)
-# and the experiment init corruption (PART 2 uses "covered_dup").
+
+@dataclass(frozen=True)
+class CorruptionLimits:
+    min_route_len: int
+    max_route_len: int
+
+
+@dataclass(frozen=True)
+class MutationResult:
+    routes: torch.Tensor
+    kind: str | None
+    touched: int
+    stop_stage: bool
+
+
+@dataclass(frozen=True)
+class MutationStage:
+    """A bound apply method or stateless function, repeated events times."""
+    apply: Callable[[torch.Tensor, object, CorruptionCity, CorruptionLimits], MutationResult]
+    events: int
+
+
+@dataclass(frozen=True)
+class CorruptionResult:
+    routes: torch.Tensor
+    applied_events: Counter
+    mutated_routes: Counter
+
+
+@dataclass(frozen=True)
+class CopyMutation:
+    kinds: tuple[str, ...]
+    max_multiplicity: int
+    d_un_cap: float | None
+    prefix: str
+
+    def apply(self, routes, rng, city, limits):
+        kinds = list(self.kinds)
+        rng.shuffle(kinds)
+        for kind in kinds:
+            proposal, touched = try_copy_mutation(
+                routes, kind, self.max_multiplicity, rng,
+                limits.min_route_len, limits.max_route_len,
+                demand=city.demand, n_nodes=city.n_nodes,
+                d_un_cap=self.d_un_cap, street_adj=city.street_adj,
+            )
+            if touched:
+                return MutationResult(proposal, self.prefix + kind, touched, False)
+        return MutationResult(routes, None, 0, False)
+
+
+@dataclass(frozen=True)
+class DetourMutation:
+    min_stretch: float
+    max_stretch: float
+    max_redundancy_gain: float
+
+    def apply(self, routes, rng, city, limits):
+        candidate = try_detour_mutation(
+            routes, rng, city.street_adj, limits.min_route_len, limits.max_route_len,
+            min_stretch=self.min_stretch, max_stretch=self.max_stretch,
+            demand=city.demand, n_nodes=city.n_nodes,
+            max_redundancy_gain=self.max_redundancy_gain,
+        )
+        if candidate is None:
+            return MutationResult(routes, None, 0, False)
+        route_idx, nodes, _, _ = candidate
+        proposal = routes.clone()
+        replace_route(proposal, route_idx, nodes)
+        return MutationResult(proposal, "detour", 1, False)
+
+
+@dataclass(frozen=True)
+class DropCoverageMutation:
+    d_un_target_pct: float
+
+    def apply(self, routes, rng, city, limits):
+        if uncovered_demand_pct(routes, city.demand, city.n_nodes) >= self.d_un_target_pct:
+            return MutationResult(routes, None, 0, True)
+        candidate = try_drop_cover_mutation(
+            routes, rng, city.demand, city.street_adj, limits.min_route_len, limits.max_route_len,
+        )
+        if candidate is None:
+            return MutationResult(routes, None, 0, True)
+        route_idx, nodes, _ = candidate
+        proposal = routes.clone()
+        replace_route(proposal, route_idx, nodes)
+        return MutationResult(proposal, "drop_cover", 1, False)
+
+
+def copy_tier(params: CopyTierParams, *, prefix="") -> tuple[MutationStage, ...]:
+    unknown = set(params.kinds) - set(COPY_MUTATION_KINDS)
+    if unknown:
+        raise ValueError(f"unknown copy mutation kinds: {sorted(unknown)}")
+    mutation = CopyMutation(tuple(params.kinds), int(params.max_multiplicity),
+                            float(params.d_un_cap) if params.covered else None, prefix)
+    return (MutationStage(mutation.apply, int(params.events)),)
+
+
+def realistic_tier(params: RealisticParams) -> tuple[MutationStage, ...]:
+    detour = DetourMutation(float(params.detour.min_stretch), float(params.detour.max_stretch),
+                            float(params.detour.max_redundancy_gain))
+    drop_cover = DropCoverageMutation(float(params.drop_cover.d_un_target_pct))
+    return (*copy_tier(params.dup, prefix="dup_"),
+            MutationStage(detour.apply, int(params.detour.events)),
+            MutationStage(drop_cover.apply, int(params.drop_cover.events)))
+
+
+def corrupt(routes, rng, city: CorruptionCity, limits: CorruptionLimits, tier) -> CorruptionResult:
+    """Apply ordered stages to one [R,L] network; no implicit RNG or batching.
+
+    The input is copied. Output keeps its dtype, device and padding width.
+    City tensors are read only; limits must fit the supplied route storage.
+    RNG is caller-owned and consumed in stage/event/attempt order. Only the
+    current stage stops on stop_stage; following stages still run. Counters
+    record accepted events and touched routes, including repeated touches.
+    """
+    if routes.ndim != 2:
+        raise ValueError("corruption requires one [R,L] network")
+    working = routes.clone()
+    applied_events, mutated_routes = Counter(), Counter()
+    for stage in tier:
+        for _ in range(stage.events):
+            result = stage.apply(working, rng, city, limits)
+            working = result.routes
+            if result.kind is not None:
+                applied_events[result.kind] += 1
+                mutated_routes[result.kind] += result.touched
+            if result.stop_stage:
+                break
+    return CorruptionResult(working, applied_events, mutated_routes)
 
 
 def is_simple_sequence(nodes, min_len, max_len):
@@ -318,41 +440,10 @@ def try_copy_mutation(
 
 
 def inject_route_copies(routes, tier, rng, min_len, max_len, demand=None, n_nodes=None, street_adj=None):
-    """Apply one tier's worth of copy-injection events to a route tensor.
-
-    Returns ``(routes, applied_events, mutated_routes)`` where the two
-    Counters tally events / touched routes per mutation kind (used by the
-    training-dataset meta table; callers that only need the routes can ignore
-    them). Pass ``street_adj`` to repair/reject glue junctions that are not
-    real street edges (default None keeps the legacy phantom-leg behavior).
-    """
-    routes = routes.clone()
-    applied_events = Counter()
-    mutated_routes = Counter()
-    covered = bool(tier.covered)
-    d_un_cap = float(tier.d_un_cap) if covered else None
-    for _ in range(int(tier.events)):
-        kinds = list(tier.kinds)
-        rng.shuffle(kinds)
-        for kind in kinds:
-            proposal, touched = try_copy_mutation(
-                routes,
-                kind,
-                int(tier.max_multiplicity),
-                rng,
-                min_len,
-                max_len,
-                demand=demand,
-                n_nodes=n_nodes,
-                d_un_cap=d_un_cap,
-                street_adj=street_adj,
-            )
-            if touched:
-                routes = proposal
-                applied_events[kind] += 1
-                mutated_routes[kind] += touched
-                break
-    return routes, applied_events, mutated_routes
+    """Compatibility adapter; new callers use corrupt with a compiled copy_tier."""
+    result = corrupt(routes, rng, CorruptionCity(street_adj, demand, n_nodes),
+                     CorruptionLimits(min_len, max_len), copy_tier(tier))
+    return result.routes, result.applied_events, result.mutated_routes
 
 
 # --- realistic experiment-init tier ------------------------------------------
@@ -462,65 +553,7 @@ def try_drop_cover_mutation(routes, rng, demand, street_adj, min_len, max_len, a
 
 
 def inject_realistic_tier(routes, rng, min_len, max_len, *, street_adj, demand, n_nodes, params):
-    """Apply the realistic corruption tier to a clean network.
-
-    Returns ``(routes, applied)`` where ``applied`` counts the injected
-    events per kind (``dup_<kind>`` / ``detour`` / ``drop_cover``).
-    """
-    routes = routes.clone()
-    applied = Counter()
-
-    dup = params.dup
-    d_un_cap = float(dup.d_un_cap) if dup.covered else None
-    for _ in range(int(dup.events)):
-        kinds = list(dup.kinds)
-        rng.shuffle(kinds)
-        for kind in kinds:
-            proposal, touched = try_copy_mutation(
-                routes,
-                kind,
-                int(dup.max_multiplicity),
-                rng,
-                min_len,
-                max_len,
-                demand=demand,
-                n_nodes=n_nodes,
-                d_un_cap=d_un_cap,
-                street_adj=street_adj,
-            )
-            if touched:
-                routes = proposal
-                applied[f"dup_{kind}"] += 1
-                break
-
-    det = params.detour
-    for _ in range(int(det.events)):
-        res = try_detour_mutation(
-            routes,
-            rng,
-            street_adj,
-            min_len,
-            max_len,
-            min_stretch=float(det.min_stretch),
-            max_stretch=float(det.max_stretch),
-            demand=demand,
-            n_nodes=n_nodes,
-            max_redundancy_gain=float(det.max_redundancy_gain),
-        )
-        if res is not None:
-            ri, candidate, _, _ = res
-            replace_route(routes, ri, candidate)
-            applied["detour"] += 1
-
-    dc = params.drop_cover
-    for _ in range(int(dc.events)):
-        if uncovered_demand_pct(routes, demand, n_nodes) >= float(dc.d_un_target_pct):
-            break
-        res = try_drop_cover_mutation(routes, rng, demand, street_adj, min_len, max_len)
-        if res is None:
-            break
-        ri, candidate, _ = res
-        replace_route(routes, ri, candidate)
-        applied["drop_cover"] += 1
-
-    return routes, applied
+    """Compatibility adapter; new callers use corrupt with a realistic_tier."""
+    result = corrupt(routes, rng, CorruptionCity(street_adj, demand, n_nodes),
+                     CorruptionLimits(min_len, max_len), realistic_tier(params))
+    return result.routes, result.applied_events
