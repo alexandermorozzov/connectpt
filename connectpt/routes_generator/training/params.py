@@ -1,33 +1,20 @@
 """Typed dataset and training parameters, independent of configuration libraries."""
 from dataclasses import dataclass
 from pathlib import Path
+from .const import DatasetKind, DataSourceKind
+from .dataset import DatasetLimits
+from .split import SplitParams
 
 
 @dataclass(frozen=True)
-class EditDatasetParams:
-    dataset_dirname: Path
-    target_n_routes: int
-    min_route_len: int
-    max_route_len: int
-    train_fraction: float
-    split_seed: int
-    n_val_per_tier: int
-
-
-@dataclass(frozen=True)
-class DatasetBuildParams:
-    n_graphs: int
-    raw_n_nodes: int
-    raw_graph_type: str
-    raw_graph_seed: int
-    lc_n_samples: int
-    lc_combos: list
-    tiers: list
-    force_regen: bool
-    batch_size_cpu: int
-    batch_size_cuda: int
-    corruption_seed: int
-    tier_cfg: dict
+class DatasetInputParams:
+    kind: DatasetKind
+    source: DataSourceKind
+    path: Path | None
+    limits: DatasetLimits
+    legacy_split: SplitParams
+    validation_path: Path | None
+    test_path: Path | None
 
 
 @dataclass(frozen=True)

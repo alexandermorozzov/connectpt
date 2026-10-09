@@ -122,34 +122,37 @@ python scripts/make_init_routes.py
 Edit-политика выполняет trim / extend / halt в `nea_edit` и `nea_combined`.
 
 ```bash
-python scripts/run.py --config-name runs/prepare_dataset     # один раз
-python scripts/run.py --config-name runs/train               # обучение
+python scripts/generate_dataset.py --config-name runs/generate_edit --out datasets/lc_copytiers_manifest_v1
+python scripts/run.py --config-name runs/train dataset.path=datasets/lc_copytiers_manifest_v1
 ```
 
 ### 4.1. Датасет
 
-`runs/prepare_dataset` строит случайные графы, получает сеть construction-моделью и
+`runs/generate_edit` строит случайные графы, получает сеть construction-моделью и
 портит её по тирам: `copy_full`, `copy_boundary`, `copy_mixed`, `covered_dup`,
 `lc_clean`. Политика учится убирать порчу.
 
-Результат — `datasets/<dataset.dataset_dirname>`, по умолчанию
-`lc_copytiers_n1000_n50_r12_len8_15_v1`. Готовый датасет используется повторно.
-`dataset_build.force_regen=true` строит его заново.
+Результат записывается в обязательную папку `--out`: `dataset.pt` и `manifest.json`.
+Повтор с теми же параметрами и входными весами пропускается. Неполные данные или
+другие параметры вызывают ошибку; `--force` явно пересобирает эту папку.
+`--dry-run` проверяет конфиг и входы без записи данных.
 
 | Ключ | По умолчанию | Что задаёт |
 |---|---|---|
 | `dataset_build.n_graphs` | 1000 | число графов |
-| `dataset_build.raw_n_nodes` | 50 | узлов в графе |
+| `dataset_build.source.min_nodes` | 50 | узлов в графе; max_nodes и fixed_nodes берутся из этого значения |
 | `dataset_build.lc_combos` | demand / route / conn | веса цели для начальных сетей |
-| `dataset.target_n_routes` | 12 | маршрутов в сети |
-| `dataset.min_route_len` / `max_route_len` | 8 / 15 | границы длины |
-| `dataset.train_fraction` | 0.9 | доля обучения |
+| `dataset_build.limits.n_routes` | 12 | маршрутов в сети |
+| `dataset_build.limits.min_route_len` / `max_route_len` | 8 / 15 | границы длины |
+| `dataset_build.split.train_fraction` | 0.9 | доля обучения |
 
-При смене этих ключей смените и `dataset.dataset_dirname`. Иначе новый датасет
-перезапишет старый.
+Обучение читает путь `dataset.path`, размеры и готовое разбиение — из manifest.
+Старый `lc_copytiers_n1000_n50_r12_len8_15_v1` также читается; для него конфиг задаёт
+`dataset.legacy_limits` и `dataset.legacy_split`.
 
 ```bash
-python scripts/run.py --config-name runs/prepare_dataset dataset_build.raw_n_nodes=100 dataset.dataset_dirname=lc_copytiers_n1000_n100_r12_len8_15_v1
+python scripts/generate_dataset.py --config-name runs/generate_edit --out datasets/lc_copytiers_n100_manifest_v1 dataset_build.source.min_nodes=100
+python scripts/generate_dataset.py --config-name runs/generate_edit --out datasets/lc_copytiers_converted --convert-from datasets/lc_copytiers_n1000_n50_r12_len8_15_v1
 ```
 
 ### 4.2. Запуск
@@ -157,6 +160,9 @@ python scripts/run.py --config-name runs/prepare_dataset dataset_build.raw_n_nod
 Конфиг — `cfg/runs/train.yaml`. Curriculum добавляет тиры порчи по ходу
 обучения: сначала `copy_full`, к концу все пять. Валидация — каждые 10 итераций,
 жадные действия.
+Curriculum меняет только train; фиксированный состав validation записан в manifest.
+`curriculum.enabled=false` отключает расписание. Итоговая edit-оценка записывается
+как `eval/final_validation/…`; отдельный test не создаётся.
 
 | Флаг | Что делает |
 |---|---|
@@ -204,8 +210,9 @@ python scripts/run.py --config-name runs/train_construction algorithm=d3po algor
 Один раз сгенерируйте общие файлы:
 
 ```bash
-python -m connectpt.routes_generator.city.synthetic datasets/construction/20_nodes/mixed mixed --min 20 --max 20 -n 32768
-python -m connectpt.routes_generator.city.synthetic datasets/construction/20_nodes/test mixed --min 20 --max 20 -n 128
+python scripts/generate_dataset.py --config-name runs/generate_construction --out datasets/construction/20_nodes/mixed_manifest
+python scripts/generate_dataset.py --config-name runs/generate_construction --out datasets/construction/20_nodes/test_manifest dataset_build.n_graphs=128 run.seed=1
+python scripts/run.py --config-name runs/train_construction dataset.path=datasets/construction/20_nodes/mixed_manifest dataset.test_path=datasets/construction/20_nodes/test_manifest
 ```
 
 - Обучающий файл делится 90 / 10 на train и validation.

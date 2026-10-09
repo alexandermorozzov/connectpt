@@ -5,7 +5,7 @@
 
 ```text
 cfg/
-├── runs/            # точки входа: search, train, train_construction, train_construction_overnight, prepare_dataset, init_routes (scripts/make_init_routes.py)
+├── runs/            # search, train, train_construction, train_construction_overnight, generate_construction, generate_edit, init_routes
 ├── instance/        # путь к бенчмарку и ограничения маршрутов
 ├── method/          # методы поиска: ea, nea, nea_edit, nea_combined
 ├── initial/         # настройки эвристических начальных сетей
@@ -46,7 +46,7 @@ python scripts/run_search.py --dry-run --methods ea
 python scripts/run_search.py --methods nea_edit --instances mandl
 python scripts/run.py --config-name runs/train --dry-run
 python scripts/run.py --config-name runs/train_construction algorithm=d3po --dry-run
-python scripts/run.py --config-name runs/prepare_dataset
+python scripts/generate_dataset.py --config-name runs/generate_edit --out datasets/lc_copytiers_manifest_v1 --dry-run
 ```
 
 Поиск и edit-обучение используют одну цель `cost=rtt_wmc`. Штраф за изменение
@@ -58,7 +58,7 @@ Adjustment рассчитывается по LCS полных последова
 Порядок целей задаёт `cost.kwargs.objectives`, дополнительные штрафы —
 `cost.kwargs.penalties` после регистрации вычислителя в `objectives/criteria.py`.
 
-`run.type`: `search`, `training`, `dataset_prepare`.
+`run.type`: `search`, `training`.
 Seed запуска задаётся через `run.seed`, выбор CPU — через `run.cpu=true`.
 `features` задаёт имена и порядок входных признаков модели.
 
@@ -74,8 +74,9 @@ construction, выключен в edit. Частоту задаёт `evaluation.
 stochastic; её сетку и выборки задают `preference_count` и `stochastic_samples`.
 В construction она использует отдельный test и пишет `eval/test/…`; в edit — полную
 validation и пишет `eval/final_validation/…`.
-`dataset.n_val_per_tier` задаёт фиксированное число графов каждого тира для текущей
-edit-валидации. `curriculum.enabled` включает расписание `curriculum.schedule`
+`dataset.legacy_split.n_val_per_tier` задаёт число графов каждого тира для текущей
+edit-валидации старого датасета. Для нового формата состав выборок хранится в manifest.
+`curriculum.enabled` включает расписание `curriculum.schedule`
 только для train. Состав validation от этапа curriculum не зависит.
 `dataset.train_pipeline` и `dataset.evaluation_pipeline` задают масштабирование,
 поворот и отражение графов, а также подготовку признаков construction / edit.
@@ -83,6 +84,24 @@ edit-валидации. `curriculum.enabled` включает расписан�
 — в `config.yaml`, значения метрик — в `history.csv` и TensorBoard.
 
 YAML содержит только значения. Комментарии в конфигах не пишутся.
+
+Датасеты:
+
+- `dataset.kind` явно выбирает construction / edit; edit требует seed-сети.
+- `dataset.source`: `file`, `dynamic` или `benchmark`. Файловые данные задаются
+  через `dataset.path`. Новый формат — `dataset.pt` и `manifest.json`; ограничения
+  маршрутов и разбиение читаются из manifest. `legacy_limits` задаёт ограничения
+  при отсутствии manifest, `legacy_split` — разбиение старых raw / collated / edit-данных.
+- Для `dynamic` нужен `dataset.source_params` с параметрами `SyntheticParams`,
+  для `benchmark` — `dataset.benchmark_city`. У обоих обязательна отдельная
+  `dataset.validation_path`; `dataset.test_path` задаёт отдельный test.
+- Генерация запускается `scripts/generate_dataset.py` с `runs/generate_construction`
+  или `runs/generate_edit`. Папка обязательна: `--out`. `--dry-run` проверяет входы,
+  `--force` пересобирает указанную папку после успешной подготовки нового результата.
+  Идентичный полный датасет пропускается; неполные данные и другие параметры
+  вызывают ошибку. Seed графов задаёт `run.seed`; размеры и split — `dataset_build`.
+- `--convert-from <папка>` читает старый датасет и записывает новый формат в отдельную
+  папку без генерации. Путь готового результата передаётся обучению через `dataset.path`.
 
 Профили моделей:
 

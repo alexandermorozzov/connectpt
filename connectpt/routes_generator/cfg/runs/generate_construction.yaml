@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - /dataset_build: construction
+  - _self_
+
+run:
+  seed: 0
+  cpu: false

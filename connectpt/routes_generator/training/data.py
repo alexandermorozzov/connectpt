@@ -1,108 +1,101 @@
-"""Construction batches and episode resets, independent of the algorithm."""
+"""Construction graph sources and episodes, independent of the algorithm."""
 import random
-import torch
 from dataclasses import dataclass
-from pathlib import Path
 
+import torch
+from torch_geometric.loader import DataLoader
+
+from ..city.synthetic import load_graph_collection
+from .const import DatasetKind, DataSourceKind, DATASET_MANIFEST
+from .dataset import load_dataset
+from .params import DatasetInputParams
 from .pipeline import GraphPipeline, GraphView, OnlineGraphs
-from .split import SplitParams, graph_source_id, prepare_split
+from .split import graph_source_id, evaluation_indices
 
 
-class RawGraphs:
-    """Expose collated legacy graphs without their attached transforms."""
-    def __init__(self, dataset):
-        self.dataset = dataset
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, index):
-        return self.dataset.get(index)
+def evaluation_graphs(path, kind, limits):
+    if (path / DATASET_MANIFEST).exists():
+        return load_dataset(path, kind=kind, legacy_limits=limits).graphs
+    return load_graph_collection(path)
 
 
 @dataclass(frozen=True)
 class ConstructionDataset:
-    type: str
-    kwargs: dict
-    test_path: Path
+    params: DatasetInputParams
     train_pipeline: GraphPipeline
     evaluation_pipeline: GraphPipeline
+    online_source: object | None
+    benchmark: object | None
 
     def prepare(self, cost, batch_size, evaluation, device, env_params, curriculum, resample_preferences):
+        if curriculum.enabled:
+            raise ValueError('construction data has no curriculum tiers; use curriculum.enabled=false')
         data = self.load(batch_size, evaluation, device, env_params, resample_preferences=resample_preferences)
-        data.training_count = len(data.train_loader.dataset) if self.type != "dynamic" else None
-        data.validation_count = len(data.validation_loader.dataset)
         val_cost = cost.with_params(**cost.sample_variable_weights(data.validation_batch_size, device))
         return data, val_cost
 
     def load(self, batch_size, evaluation, device, env_params, *, resample_preferences):
-        from torch_geometric.loader import DataLoader
-        from ..city.synthetic import CityGraphDataset, DynamicCityGraphDataset
-        from ..city.graph import to_batch
-
-        validation_batch_size = batch_size * 4
-        test_graphs = RawGraphs(CityGraphDataset(self.test_path))
-        test_sources = [graph_source_id(g) for g in test_graphs]
-        if self.type == "pickle":
-            graphs = RawGraphs(CityGraphDataset(self.kwargs['path']))
-            sources = [graph_source_id(g) for g in graphs]
-            split = prepare_split(sources, (),
-                                  SplitParams('ordered', self.kwargs['split'], 0, 0))
+        source = self.params.source
+        test_graphs, test_ids = None, ()
+        if self.params.test_path is not None:
+            raw_test = evaluation_graphs(self.params.test_path, self.params.kind, self.params.limits)
+            test_ids = tuple(graph_source_id(g) for g in raw_test)
+            test_graphs = GraphView(raw_test, range(len(raw_test)), self.evaluation_pipeline)
+        if source == DataSourceKind.FILE:
+            dataset = load_dataset(self.params.path, kind=self.params.kind, legacy_limits=self.params.limits,
+                                   legacy_split=self.params.legacy_split)
+            graphs, split = dataset.graphs, dataset.split
+            sources = dataset.params.source_ids
             train = GraphView(graphs, split.train, self.train_pipeline)
             validation = GraphView(graphs, split.validation, self.evaluation_pipeline)
+            train_ids = tuple(sources[int(i)] for i in split.train)
+            validation_ids = tuple(sources[int(i)] for i in split.validation)
+            if len(split.test):
+                if test_graphs is not None:
+                    raise ValueError('choose either manifest test or a separate test_path')
+                test_graphs = GraphView(graphs, split.test, self.evaluation_pipeline)
+                test_ids = tuple(sources[int(i)] for i in split.test)
+            if set(train_ids) & set(test_ids) or set(validation_ids) & set(test_ids):
+                raise ValueError('source city leaks into independent test')
             train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, drop_last=True)
-        elif self.type == "dynamic":
-            values = dict(self.kwargs)
-            raw_validation = RawGraphs(CityGraphDataset(values.pop("val_path")))
-            sources = [graph_source_id(g) for g in raw_validation]
-            validation = GraphView(raw_validation, range(len(raw_validation)), self.evaluation_pipeline)
-            train = OnlineGraphs(DynamicCityGraphDataset(**values), self.train_pipeline,
-                                 forbidden_sources=[*sources, *test_sources])
-            train_loader = DataLoader(train, batch_size=batch_size)
-        elif self.type == "mumford":
-            graph = to_batch(
-                self.kwargs["city"], scale_dynamically=self.kwargs["scale_dynamically"]
-            ).to_data_list()[0]
-            if 'val_path' not in self.kwargs:
-                raise ValueError('benchmark training requires a separate fixed validation source')
-            raw_validation = RawGraphs(CityGraphDataset(self.kwargs['val_path']))
-            source = graph_source_id(graph)
-            sources = [source, *[graph_source_id(g) for g in raw_validation]]
-            if source in sources[1:]:
-                raise ValueError('benchmark city leaks between train and validation')
-            train = GraphView([graph], [0] * batch_size, self.train_pipeline)
-            validation = GraphView(raw_validation, range(len(raw_validation)), self.evaluation_pipeline)
-            train_loader = DataLoader(train, batch_size=batch_size)
         else:
-            raise ValueError(f"unknown construction dataset type: {self.type}")
-        if set(sources) & set(test_sources):
-            raise ValueError('source city leaks between train/validation and independent test')
-        indices = list(range(len(validation)))
+            raw_validation = evaluation_graphs(self.params.validation_path, self.params.kind, self.params.limits)
+            validation_ids = tuple(graph_source_id(g) for g in raw_validation)
+            validation = GraphView(raw_validation, range(len(raw_validation)), self.evaluation_pipeline)
+            if set(validation_ids) & set(test_ids):
+                raise ValueError('source city leaks between validation and independent test')
+            if source == DataSourceKind.DYNAMIC:
+                train_ids = ()
+                train = OnlineGraphs(self.online_source, self.train_pipeline, forbidden_sources=[*validation_ids,*test_ids])
+            elif source == DataSourceKind.BENCHMARK:
+                train_ids = (graph_source_id(self.benchmark),)
+                if set(train_ids) & set((*validation_ids,*test_ids)):
+                    raise ValueError('benchmark city leaks into validation or independent test')
+                train = GraphView([self.benchmark], [0] * batch_size, self.train_pipeline)
+            else:
+                raise ValueError(f'unknown graph source: {source}')
+            train_loader = DataLoader(train, batch_size=batch_size)
+        full_validation = validation
+        indices = evaluation_indices(range(len(validation)), evaluation.graph_count, evaluation.seed).tolist()
         if evaluation.graph_count is not None:
-            if evaluation.graph_count < 1:
-                raise ValueError("evaluation.graph_count must be positive or null")
-            generator = torch.Generator().manual_seed(evaluation.seed)
-            indices = (
-                torch.randperm(len(validation), generator=generator)[: evaluation.graph_count].sort().values.tolist()
-            )
             validation = [validation[index] for index in indices]
+        if not len(validation) or (source != DataSourceKind.DYNAMIC and len(train) < batch_size):
+            raise ValueError('training needs a full batch and nonempty validation')
+        validation_batch_size = batch_size * 4
+        if evaluation.graph_count is not None:
             validation_batch_size = min(validation_batch_size, len(validation))
-        if not len(validation) or (self.type != "dynamic" and len(train) < batch_size):
-            raise ValueError("training needs a full batch and nonempty validation")
         counts = env_params.n_routes
         counts = (counts,) if isinstance(counts, int) else tuple(counts)
-        data = ConstructionData(
-            train_loader,
-            DataLoader(validation, batch_size=validation_batch_size),
-            device,
-            n_routes=counts,
-            resample_preferences_on_terminal=resample_preferences,
-        )
+        data = ConstructionData(train_loader, DataLoader(validation,batch_size=validation_batch_size),device,
+                                n_routes=counts,resample_preferences_on_terminal=resample_preferences)
         data.validation_indices = indices
         data.validation_batch_size = validation_batch_size
-        data.test_graphs = GraphView(test_graphs, range(len(test_graphs)), self.evaluation_pipeline)
-        data.source_ids = tuple(sources)
-        data.test_source_ids = tuple(test_sources)
+        data.training_count = len(train) if source != DataSourceKind.DYNAMIC else None
+        data.validation_count = len(validation)
+        data.test_graphs = test_graphs
+        data.full_validation = full_validation
+        data.final_split = 'test' if test_graphs is not None else 'final_validation'
+        data.training_source_ids, data.validation_source_ids, data.test_source_ids = train_ids, validation_ids, test_ids
         return data
 
 
@@ -167,5 +160,6 @@ class ConstructionData:
     def bootstrap_mask(self, env):
         return torch.ones(env.state.batch_size, dtype=torch.bool, device=self.device)
 
-    def test(self):
-        return self.test_graphs, None
+    def final_evaluation(self):
+        graphs = self.test_graphs if self.final_split == 'test' else self.full_validation
+        return graphs, None, list(range(len(graphs)))

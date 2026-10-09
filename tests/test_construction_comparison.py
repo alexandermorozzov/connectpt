@@ -8,6 +8,7 @@ import pytest
 import json
 import math
 from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
 
 from connectpt.routes_generator.run.const import CFG_DIR
 from connectpt.routes_generator.city.synthetic import DynamicCityGraphDataset
@@ -222,16 +223,16 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer, paret
                 "train_loop.n_iterations=2",
                 "train_loop.horizon=8",
                 "train_loop.val_period=1",
-                "env.params.n_routes=1",
-                "env.params.max_route_len=5",
+                "dataset.legacy_limits.n_routes=1",
+                "dataset.legacy_limits.max_route_len=5",
                 "evaluation.preference_count=3",
                 "evaluation.stochastic_samples=1",
                 "evaluation.test_graph_count=1",
                 "evaluation.pareto_preference_count=3",
                 "evaluation.pareto_period=1",
                 f"evaluation.pareto_enabled={str(pareto).lower()}",
-                f"dataset.kwargs.path={data_dir.as_posix()}",
-                "dataset.kwargs.split=0.75",
+                f"dataset.path={data_dir.as_posix()}",
+                "dataset.legacy_split.train_fraction=0.75",
                 f"dataset.test_path={test_dir.as_posix()}",
                 f'paths.output_dir={(folder / "run").as_posix()}',
                 f'paths.weights_dir={(folder / "weights").as_posix()}',
@@ -430,8 +431,8 @@ def test_fixed_preference_evaluation_does_not_consume_training_rng():
             config_name="runs/train_construction",
             overrides=[
                 "train_loop.batch_size=2",
-                "env.params.n_routes=1",
-                "env.params.max_route_len=5",
+                "dataset.legacy_limits.n_routes=1",
+                "dataset.legacy_limits.max_route_len=5",
                 "evaluation.preference_count=3",
                 "evaluation.stochastic_samples=2",
             ],
@@ -444,7 +445,8 @@ def test_fixed_preference_evaluation_does_not_consume_training_rng():
     before = torch.random.get_rng_state().clone()
     profile = EvaluationProfile(
         params(EvaluationParams, cfg.evaluation),
-        params(EnvParams, cfg.env.params),
+            EnvParams(**OmegaConf.to_container(cfg.env.params, resolve=True),
+                      **OmegaConf.to_container(cfg.dataset.legacy_limits, resolve=True)),
         cfg.train_loop.batch_size,
         cfg.experiment.symmetric_routes,
     )

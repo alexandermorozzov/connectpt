@@ -31,6 +31,7 @@ def to_batch(
     scale_dynamically=True,
     extra_node_feats=True,
     center_nodes=True,
+    insert_pos_features=True,
 ):
     """Собрать батч из Instance, матриц города или списка графов.
 
@@ -46,6 +47,7 @@ def to_batch(
             scale_dynamically=scale_dynamically,
             extra_node_feats=extra_node_feats,
             center_nodes=center_nodes,
+            insert_pos_features=insert_pos_features,
         )
     if isinstance(city, Batch):
         graphs = city.to_data_list()
@@ -212,6 +214,7 @@ class CityGraphData(HeteroData):
         center_nodes=True,
         fixed_routes=None,
         pos_only=False,
+        insert_pos_features=True,
     ):
         """
         Creates a CityGraphData object from input tensors with transformations similar to from_mumford_data.
@@ -267,9 +270,10 @@ class CityGraphData(HeteroData):
         else:
             if extra_node_feats:
                 node_features = get_node_features(street_idx, demand)
-                node_features = torch.cat((node_locs, node_features), dim=1)
+                if insert_pos_features:
+                    node_features = torch.cat((node_locs, node_features), dim=1)
             else:
-                node_features = node_locs
+                node_features = node_locs if insert_pos_features else node_locs.new_empty((n_nodes, 0))
             data[STOP_KEY].x = node_features
 
         # Set node positions

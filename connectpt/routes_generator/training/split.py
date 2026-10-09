@@ -24,6 +24,14 @@ class SplitParams:
     seed: int
     n_val_per_tier: int
 
+    def __post_init__(self):
+        if not 0 < self.train_fraction < 1:
+            raise ValueError('train_fraction must be between zero and one')
+        if self.strategy not in ('ordered', 'random', 'stratified'):
+            raise ValueError(f'unknown split strategy: {self.strategy}')
+        if self.n_val_per_tier < 0:
+            raise ValueError('n_val_per_tier must not be negative')
+
 
 @dataclass(frozen=True)
 class DatasetSplit:
@@ -62,12 +70,6 @@ class DatasetSplit:
 
 
 def prepare_split(source_ids, tiers, params: SplitParams) -> DatasetSplit:
-    if not 0 < params.train_fraction < 1:
-        raise ValueError('train_fraction must be between zero and one')
-    if params.strategy not in ('ordered', 'random', 'stratified'):
-        raise ValueError(f'unknown split strategy: {params.strategy}')
-    if params.n_val_per_tier < 0:
-        raise ValueError('n_val_per_tier must not be negative')
     groups = {}
     for index, source in enumerate(source_ids):
         groups.setdefault(source, []).append(index)
@@ -112,3 +114,14 @@ def prepare_split(source_ids, tiers, params: SplitParams) -> DatasetSplit:
     result = DatasetSplit(train, validation, torch.empty(0, dtype=torch.long), monitor)
     result.validate(source_ids, len(source_ids))
     return result
+
+
+def evaluation_indices(indices, count, seed):
+    """A fixed seeded subset; selection consumes no training RNG."""
+    indices = torch.as_tensor(indices, dtype=torch.long)
+    if count is None:
+        return indices.clone()
+    if count < 1:
+        raise ValueError('evaluation graph count must be positive or null')
+    positions = torch.randperm(len(indices), generator=torch.Generator().manual_seed(seed))[:count].sort().values
+    return indices[positions]

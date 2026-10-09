@@ -32,7 +32,7 @@ class RunArtifact:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-def _commit() -> str | None:
+def current_commit() -> str | None:
     try:
         return subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT_DIR, capture_output=True,
                               text=True, check=True).stdout.strip()
@@ -44,7 +44,7 @@ def write_run_json(run_dir, *, seed, status: str, metadata=None) -> None:
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run.json").write_text(json.dumps(
-        {**(metadata or {}), "commit": _commit(), "seed": seed, "argv": sys.argv, "status": status},
+        {**(metadata or {}), "commit": current_commit(), "seed": seed, "argv": sys.argv, "status": status},
         indent=2), encoding="utf-8")
 
 

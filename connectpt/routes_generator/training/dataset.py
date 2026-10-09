@@ -5,12 +5,11 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import random
-
-import numpy as np
 from pathlib import Path
 import shutil
 import tempfile
 
+import numpy as np
 import torch
 from torch_geometric.loader import DataLoader
 
@@ -18,7 +17,7 @@ from ..city.graph import to_batch
 from ..common.random import seed_everything
 from ..policy.predict import predict
 from ..network.corruption import CorruptionCity, CorruptionLimits, corrupt, count_changed_routes, redundancy_stats, uncovered_demand_pct
-from ..city.const import STOP_KEY
+from ..city.const import STOP_KEY, RAW_GRAPH_FILENAME
 from ..city.synthetic import load_graph_collection
 from ..network.io import load_routes
 from ..network.routes import to_routes
@@ -201,23 +200,57 @@ def save_dataset(dataset: Dataset, path, *, configuration, inputs, commit, force
         if path.exists():
             if path.resolve() != path or path.is_symlink() or path.is_junction():
                 raise ValueError('dataset output changed while preparing files')
-            shutil.rmtree(path)
-        staging.rename(path)
+            backup = Path(tempfile.mkdtemp(prefix=path.name + '.previous-', dir=path.parent)).resolve()
+            if backup.parent != path.parent or staging.resolve().parent != path.parent:
+                raise ValueError('dataset staging directories must remain beside the explicit output')
+            backup.rmdir()
+            path.rename(backup)
+            try:
+                staging.rename(path)
+            except BaseException:
+                backup.rename(path)
+                raise
+            shutil.rmtree(backup)
+        else:
+            staging.rename(path)
     finally:
         if staging.exists():
             shutil.rmtree(staging)
     return True
 
 
-def convert_dataset(source, destination, *, kind, limits, split, commit):
+def conversion_inputs(source, kind):
+    source = Path(source)
+    if source.is_file():
+        return {source.name:file_identity(source)}
+    if (source / DATASET_MANIFEST).is_file():
+        manifest = read_manifest(source)
+        manifest.pop('created_at')
+        manifest.pop('commit')
+        return {DATASET_CONTENT:file_identity(source / DATASET_CONTENT),
+                DATASET_MANIFEST:sha256(json.dumps(manifest,sort_keys=True,separators=(',',':')).encode()).hexdigest()}
+    collated = source / 'processed' / 'collated.pt'
+    paths = [collated if collated.is_file() else source / RAW_GRAPH_FILENAME]
+    if kind == DatasetKind.EDIT:
+        paths.append(source / 'meta.csv')
+        for folder in sorted(source.glob('graph_*')):
+            routes = sorted(folder.glob('lc_*_routes_routes.pt'))
+            if not routes:
+                routes = sorted(folder.glob('lc_*_routes_routes.pkl'))
+            if not routes:
+                raise ValueError(f'seed route artifact missing: {folder}')
+            paths.append(routes[0])
+    return {str(p.relative_to(source)):file_identity(p) for p in paths}
+
+
+def convert_dataset(source, destination, *, kind, limits, split, commit, force=False):
     source, destination = Path(source).resolve(), Path(destination).resolve()
-    if source == destination or source in destination.parents:
+    if source == destination or source in destination.parents or destination in source.parents:
         raise ValueError('conversion must write a separate output folder')
     dataset = load_dataset(source, kind=kind, legacy_limits=limits, legacy_split=split)
-    files = sorted(p for p in source.rglob('*') if p.is_file()) if source.is_dir() else [source]
-    inputs = {str(p.relative_to(source)) if source.is_dir() else p.name:file_identity(p) for p in files}
+    inputs = conversion_inputs(source,kind)
     save_dataset(dataset, destination, configuration=dict(conversion=True, kind=kind, limits=asdict(limits),
-                                                        split=asdict(split)), inputs=inputs, commit=commit)
+                                                        split=asdict(split)), inputs=inputs, commit=commit, force=force)
     return dataset
 
 
@@ -257,6 +290,12 @@ class GenerationParams:
     limits: DatasetLimits
     split: SplitParams
 
+    def __post_init__(self):
+        if not isinstance(self.kind, DatasetKind) or not isinstance(self.seed, int):
+            raise ValueError('generation needs an explicit kind and integer seed')
+        if self.n_graphs < 2 or (self.fixed_nodes is not None and self.fixed_nodes < 2):
+            raise ValueError('generation needs at least two graphs and valid city sizes')
+
 
 @dataclass(frozen=True)
 class EditGeneration:
@@ -275,8 +314,6 @@ class EditGeneration:
 
 
 def generate_dataset(source, params: GenerationParams, *, edit: EditGeneration | None = None):
-    if params.n_graphs < 2:
-        raise ValueError('generation needs enough source cities for train and validation')
     if (params.kind == DatasetKind.EDIT) != (edit is not None):
         raise ValueError('edit generation requires ready policy, cost and corruption objects')
     seed_everything(params.seed)

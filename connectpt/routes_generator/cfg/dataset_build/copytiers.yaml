@@ -2,17 +2,35 @@ defaults:
   - /corruption@tier_cfg: copytiers
   - _self_
 
+kind: edit
 n_graphs: 1000
-raw_n_nodes: 50
-raw_graph_type: mixed
-raw_graph_seed: 0
+fixed_nodes: ${dataset_build.source.min_nodes}
+source:
+  min_nodes: 50
+  max_nodes: ${dataset_build.source.min_nodes}
+  edge_keep_prob: 0.7
+  data_type: mixed
+  directed: false
+  fully_connected_demand: true
+  side_length_m: 30000
+  mumford_style: true
+  pos_only: false
+limits:
+  n_routes: 12
+  min_route_len: 8
+  max_route_len: 15
+split:
+  strategy: stratified
+  train_fraction: 0.9
+  seed: 0
+  n_val_per_tier: 4
 lc_n_samples: 1
 lc_combos:
   - [1.0, 0.0, 0.0, demand]
   - [0.0, 1.0, 0.0, route]
   - [0.0, 0.0, 1.0, conn]
 tiers: [copy_full, copy_boundary, copy_mixed, covered_dup, lc_clean]
-force_regen: false
+policy_seed: 0
 batch_size_cpu: 8
 batch_size_cuda: 64
 corruption_seed: 1000

@@ -1,6 +1,5 @@
-"""Run one config from ``cfg/runs/``: training, dataset.
+"""Run one config from ``cfg/runs/``: training.
 
-    python scripts/run.py --config-name runs/prepare_dataset          # once: the edit dataset
     python scripts/run.py --config-name runs/train                    # edit training
     python scripts/run.py --config-name runs/train_construction algorithm=d3po
     python scripts/run.py --config-name runs/train --dry-run

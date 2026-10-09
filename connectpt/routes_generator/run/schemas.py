@@ -47,13 +47,6 @@ class TrainingPaths:
 
 
 @dataclass(frozen=True)
-class OutputPaths:
-    """Dataset preparation output folder."""
-    output_dir: str | None
-    weights_dir: str
-
-
-@dataclass(frozen=True)
 class SweepParams:
     """One search point; ``None`` keeps the adjustment value of the cost."""
     alpha: float

@@ -4,18 +4,12 @@ defaults:
   - /adjustment: cap
   - /experiment: standard
   - /model_profile: construction_v1
-  - /dataset: lc_copytiers
   - /dataset_build: copytiers
   - _self_
 
 run:
-  type: dataset_prepare
-  name: prepare_dataset
   seed: 0
   cpu: false
 
 paths:
   weights_dir: artifacts/model_weights
-  output_dir: artifacts/runs/prepare_dataset
-
-logger_list: []

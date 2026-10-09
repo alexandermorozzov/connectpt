@@ -10,7 +10,6 @@ from omegaconf import OmegaConf
 from ..common.logging import log
 from ..env.actions import ActionSpec
 from ..env.base import EnvParams
-from ..network.corruption import CopyTierParams
 from ..objectives.cost import build_cost
 from ..policy.build import build_policy
 from ..policy.checkpoints import save_model_weights
@@ -20,10 +19,10 @@ from ..training.algorithms.d3po import D3PO
 from ..training.algorithms.ppo import PPO
 from ..training.critic import CriticParams, ValueHead
 from ..training.data import ConstructionDataset
-from ..training.edit_dataset import CopyTierConfig, EditDataset, build
+from ..training.edit_dataset import EditDataset
 from ..training.loop import Budget, train
-from ..training.params import CurriculumParams, DatasetBuildParams, EditDatasetParams, LoopParams, OptimizerParams
-from ..training.pipeline import GraphPipeline, PipelineParams
+from ..training.params import CurriculumParams, LoopParams, OptimizerParams
+from ..training.const import DatasetKind
 from ..training.records import DataCounts
 from ..training.validate import (
     ConstructionValidation, EditValidation, EvaluationParams, EvaluationProfile,
@@ -31,11 +30,10 @@ from ..training.validate import (
 )
 from .artifacts import ArtifactStore
 from .config import cost_params, policy_profile
-from .const import DATASETS_DIR
-from .context import RunContext, resolve_device, resolve_under_root, resolve_weights_path
-from .instances import load_instance
+from .context import RunContext, resolve_weights_path
+from .dataset import prepare_data_input
 from .runs import ExperimentRun, RunArtifact
-from .schemas import OutputPaths, TrainingPaths, TrainingRunParams, params
+from .schemas import TrainingPaths, TrainingRunParams, params
 
 
 @dataclass
@@ -66,7 +64,14 @@ class TrainingRun(ExperimentRun):
         self.cost = build_cost(
             cost_params(cfg.cost), symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
         ).to(device)
-        self.env_params = params(EnvParams, cfg.env.params)
+        self.data_input = prepare_data_input(cfg.dataset, DatasetKind(self.env_name))
+        limits = self.data_input.params.limits
+        env_values = OmegaConf.to_container(cfg.env.params, resolve=True)
+        for key, value in asdict(limits).items():
+            if key in env_values and env_values[key] != value:
+                raise ValueError(f'env.{key} conflicts with dataset limits')
+            env_values[key] = value
+        self.env_params = EnvParams(**env_values)
         self.env = ENVS[self.env_name](
             self.cost,
             self.policy.feature_set,
@@ -84,23 +89,11 @@ class TrainingRun(ExperimentRun):
         self.evaluation_profile = EvaluationProfile(
             self.evaluation, self.env_params, self.batch_size, cfg.experiment.symmetric_routes
         )
-        dataset_values = OmegaConf.to_container(cfg.dataset, resolve=True)
-        train_pipeline = GraphPipeline(PipelineParams(**dataset_values.pop('train_pipeline')))
-        evaluation_pipeline = GraphPipeline(PipelineParams(**dataset_values.pop('evaluation_pipeline')))
-
-        if self.env_name == "edit":
-            dataset_values["dataset_dirname"] = resolve_under_root(DATASETS_DIR / dataset_values["dataset_dirname"])
-        else:
-            dataset_values["test_path"] = resolve_under_root(dataset_values["test_path"])
-            for key in ("path", "val_path"):
-                if key in dataset_values["kwargs"]:
-                    dataset_values["kwargs"][key] = resolve_under_root(dataset_values["kwargs"][key])
-            if dataset_values["type"] == "mumford":
-                dataset_values["kwargs"]["city"] = load_instance(dataset_values["kwargs"]["city"])
-        self.dataset = (EditDataset(EditDatasetParams(**dataset_values), train_pipeline, evaluation_pipeline)
+        prepared = self.data_input
+        self.dataset = (EditDataset(prepared.params, prepared.train_pipeline, prepared.evaluation_pipeline)
                         if self.env_name == 'edit' else
-                        ConstructionDataset(**dataset_values, train_pipeline=train_pipeline,
-                                            evaluation_pipeline=evaluation_pipeline))
+                        ConstructionDataset(prepared.params, prepared.train_pipeline, prepared.evaluation_pipeline,
+                                            prepared.online_source, prepared.benchmark))
         self.curriculum = params(CurriculumParams, cfg.curriculum)
         self.checkpoint = resolve_weights_path(self.paths.checkpoint_path, self.paths.weights_dir)
         self.best_checkpoint = self.checkpoint.with_name(
@@ -163,12 +156,14 @@ class TrainingRun(ExperimentRun):
                 validation_before_update=self.loop_params.validate_before_update,
             ),
         )
-        protocol['test' if self.env_name == 'construction' else 'final_validation'] = dict(
+        protocol[data.final_split] = dict(
             enabled=evaluation.final_test, preference_count=evaluation.preference_count,
             preference_grid="linspace(0, 1, preference_count)",
             samples_per_preference=dict(greedy=1, stochastic=evaluation.stochastic_samples),
             checkpoints=["last", "best"],
         )
+        protocol['source_splits'] = dict(train=data.training_source_ids, validation=data.validation_source_ids,
+                                        test=data.test_source_ids)
         return protocol
 
     def execute(self):
@@ -235,8 +230,8 @@ class TrainingRun(ExperimentRun):
             {"iterations": result.iterations, "best_cost": result.best_cost}, "training_result.json"
         )
         if self.evaluation.final_test:
-            split_name = 'test' if self.env_name == 'construction' else 'final_validation'
-            test_data, test_seeds = data.test() if split_name == 'test' else data.final_validation()
+            split_name = data.final_split
+            test_data, test_seeds, source_indices = data.final_evaluation()
             indices = list(range(len(test_data)))
             if self.evaluation.test_graph_count is not None:
                 generator = torch.Generator().manual_seed(self.evaluation.seed)
@@ -250,8 +245,8 @@ class TrainingRun(ExperimentRun):
                     test_seeds = test_seeds[indices]
             test_protocol = self.metadata["evaluation_protocol"][split_name]
             test_protocol.update(
-                split="independent test" if self.env_name == "construction" else "held-out validation",
-                indices=indices if self.env_name == "construction" else data.all_val_indices[indices].tolist(),
+                split="independent test" if split_name == 'test' else "held-out validation",
+                indices=[source_indices[i] for i in indices],
                 graph_count=len(test_data),
                 outcomes_per_checkpoint={
                     mode: len(test_data) * self.evaluation.preference_count * samples
@@ -283,73 +278,3 @@ class TrainingRun(ExperimentRun):
         if result.iterations < lp.n_iterations:
             self.stop_reason = "time_budget"
         return TrainingArtifact(self.run_params.name, self.run_dir, {}, self.checkpoint)
-
-
-def copytier_config(dg, data, policy_profile, policy_cost, policy_seed) -> "CopyTierConfig":
-    """The dataset-generation config from the ``dataset_build`` and ``dataset``
-    parameters."""
-
-    ddir = DATASETS_DIR / data.dataset_dirname
-    tiers = list(dg.tiers)
-    combos = [list(c) for c in dg.lc_combos]
-    return CopyTierConfig(
-        new_dataset_dir=ddir,
-        subset_pkl=ddir / "raw_graphs_1000.pkl",
-        meta_csv=ddir / "meta.csv",
-        raw_graph_seed=int(dg.raw_graph_seed),
-        raw_n_nodes=int(dg.raw_n_nodes),
-        raw_graph_type=str(dg.raw_graph_type),
-        n_graphs=int(dg.n_graphs),
-        tiers=tiers,
-        lc_combos=combos,
-        target_n_routes=int(data.target_n_routes),
-        min_route_len=int(data.min_route_len),
-        max_route_len=int(data.max_route_len),
-        lc_n_samples=int(dg.lc_n_samples),
-        tier_cfg={name: CopyTierParams(**values) for name, values in dg.tier_cfg.items()},
-        force_regen=dg.force_regen,
-        policy_profile=policy_profile,
-        policy_cost=policy_cost,
-        policy_seed=policy_seed,
-        batch_size_cpu=dg.batch_size_cpu,
-        batch_size_cuda=dg.batch_size_cuda,
-        corruption_seed=dg.corruption_seed,
-    )
-
-
-class DatasetRun(ExperimentRun):
-    """Generate the dataset described by a composed ``runs/prepare_dataset`` cfg."""
-
-    def setup(self) -> None:
-        cfg = self.cfg
-        self.run_params = params(TrainingRunParams, cfg.run)
-
-        device = resolve_device(cpu=self.run_params.cpu)
-        paths = params(OutputPaths, cfg.paths)
-        profile = policy_profile(
-            cfg.model_profile.model, cfg.cost, cfg.experiment, device,
-            checkpoint_path=resolve_weights_path(cfg.model_profile.checkpoint_path, paths.weights_dir),
-        )
-        cost = build_cost(cost_params(cfg.cost), symmetric_routes=cfg.experiment.symmetric_routes,
-                          low_memory_mode=cfg.experiment.low_memory_mode)
-        self.dataset = copytier_config(
-            params(DatasetBuildParams, cfg.dataset_build),
-            params(EditDatasetParams, OmegaConf.masked_copy(cfg.dataset, list(EditDatasetParams.__dataclass_fields__))),
-            profile,
-            cost,
-            cfg.experiment.seed,
-        )
-        self.run_dir = resolve_under_root(paths.output_dir)
-
-    def _artifact(self, seconds, dry_run):
-        return RunArtifact(
-            run_name=self.run_params.name,
-            output_dir=Path(self.dataset.new_dataset_dir),
-            metadata={"dry_run": dry_run, "seconds_per_graph": seconds, "dataset": self.dataset},
-        )
-
-    def dry_run_artifact(self):
-        return self._artifact(None, True)
-
-    def execute(self):
-        return self._artifact(build(self.dataset), False)

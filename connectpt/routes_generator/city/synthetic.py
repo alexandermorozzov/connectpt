@@ -1,16 +1,14 @@
-import argparse
 import pickle
-import shutil
 import random
+from dataclasses import dataclass
 from pathlib import Path
 from itertools import permutations
 import torch
-from tqdm import tqdm
 from scipy.spatial import Voronoi
 import networkx as nx
 import torch_geometric.utils as pygu
 from torch_geometric.data import Data, InMemoryDataset
-from torch_geometric.transforms import KNNGraph, RemoveIsolatedNodes, RandomRotate, Compose
+from torch_geometric.transforms import KNNGraph, RemoveIsolatedNodes, Compose
 
 from .graph import (
     CityGraphData,
@@ -18,9 +16,6 @@ from .graph import (
     STREET_KEY,
     DEMAND_KEY,
     InsertPosFeatures,
-    SpaceScaleTransform,
-    DemandScaleTransform,
-    RandomFlipCity,
     SPEED_MPS,
     get_euclidean_distances,
     get_node_features,
@@ -91,46 +86,25 @@ def load_graph_collection(path):
     return load_graphs(path / RAW_GRAPH_FILENAME)
 
 
-def get_default_train_and_eval_split(path, split=0.9, space_scale=0.01, demand_scale=0.01):
-    transforms = [
-        SpaceScaleTransform(1 - space_scale, 1 + space_scale),
-        DemandScaleTransform(1 - demand_scale, 1 + demand_scale),
-        RandomFlipCity(),
-        RandomRotate(180),
-    ]
-    train_ds = CityGraphDataset(path, transforms=transforms)
-    train_size = int(len(train_ds) * split)
-    # PyG subsets share the immutable collated tensors. Keep validation's
-    # transform separate instead of loading a second full dataset into RAM.
-    eval_ds = train_ds[train_size:]
-    eval_ds.transform = Compose([InsertPosFeatures()])
-    train_ds = train_ds[:train_size]
-    return train_ds, eval_ds
+@dataclass(frozen=True)
+class SyntheticParams:
+    min_nodes: int
+    max_nodes: int
+    edge_keep_prob: float
+    data_type: str
+    directed: bool
+    fully_connected_demand: bool
+    side_length_m: float
+    mumford_style: bool
+    pos_only: bool
 
-
-def get_dynamic_training_set(
-    min_nodes,
-    max_nodes,
-    space_scale,
-    demand_scale,
-    edge_keep_prob=0.7,
-    data_type="mixed",
-    directed=False,
-    fully_connected_demand=True,
-):
-    transforms = [
-        SpaceScaleTransform(1 - space_scale, 1 + space_scale),
-        DemandScaleTransform(1 - demand_scale, 1 + demand_scale),
-    ]
-    return DynamicCityGraphDataset(
-        min_nodes,
-        max_nodes,
-        edge_keep_prob,
-        data_type,
-        directed,
-        fully_connected_demand,
-        transforms,
-    )
+    def __post_init__(self):
+        if not 2 <= self.min_nodes <= self.max_nodes or not 0 <= self.edge_keep_prob <= 1 or self.side_length_m <= 0:
+            raise ValueError('invalid synthetic city size, edge probability or side length')
+        if self.data_type not in (MST, OUT_KNN, IN_KNN, VORONOI, GRID4, GRID8, CIRC, SMALLWORLD, MIXED):
+            raise ValueError(f'unknown synthetic graph type: {self.data_type}')
+        if self.data_type == SMALLWORLD and self.directed:
+            raise ValueError('smallworld graphs must be undirected')
 
 
 class CityGraphDataset(InMemoryDataset):
@@ -755,74 +729,3 @@ def drop_nodes(graph_data, n_nodes_to_drop):
     graph_data = pygu.from_networkx(nx_graph)
 
     return graph_data
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("path", help="path at which to save the data")
-    parser.add_argument(
-        "graph_type",
-        choices=[MST, OUT_KNN, IN_KNN, VORONOI, GRID4, GRID8, CIRC, SMALLWORLD, MIXED],
-        help="type of graph to generate",
-    )
-    parser.add_argument("--edgekeepprob", type=float, default=0.7)
-    parser.add_argument("-n", type=int, default=2**15, help="number of graphs to generate")
-    parser.add_argument("--min", type=int, default=10, help="minimum graph size in nodes")
-    parser.add_argument("--max", type=int, default=100, help="maximum graph size in nodes")
-    parser.add_argument(
-        "--delete",
-        action="store_true",
-        help="if provided, and a dataset already exists at the given path, "
-        "delete it before creating a new one.",
-    )
-    parser.add_argument(
-        "--sparse_demand",
-        action="store_true",
-        help="make the demand graph not fully connected, so edges with 0 " "demand don't exist.",
-    )
-    parser.add_argument("--sidelen", type=float, default=SIDE_LENGTH_M, help="in meters")
-    parser.add_argument(
-        "-d",
-        "--directed",
-        action="store_true",
-        help="make the street and demand graphs directed (undirected by " "default).",
-    )
-    parser.add_argument(
-        "--ovaldemand",
-        action="store_true",
-        help="If provided, use ovoid demand regions.  Otherwise just use "
-        "uniform demand as in the Mumford dataset.",
-    )
-    parser.add_argument(
-        "--pos_only",
-        action="store_true",
-        help="If provided, give nodes only their positions as features.",
-    )
-    args = parser.parse_args()
-
-    dataset = DynamicCityGraphDataset(
-        args.min,
-        args.max,
-        args.edgekeepprob,
-        args.graph_type,
-        args.directed,
-        not args.sparse_demand,
-        side_length_m=args.sidelen,
-        mumford_style=not args.ovaldemand,
-        pos_only=args.pos_only,
-    )
-
-    graphs = [dataset.generate_graph() for _ in tqdm(range(args.n))]
-
-    # save the dataset as a pickled list
-    path = Path(args.path)
-    if args.delete and path.exists():
-        shutil.rmtree(path, ignore_errors=True)
-    if not path.exists():
-        path.mkdir(parents=True)
-    with open(path / RAW_GRAPH_FILENAME, "wb") as ff:
-        pickle.dump(graphs, ff)
-
-
-if __name__ == "__main__":
-    main()

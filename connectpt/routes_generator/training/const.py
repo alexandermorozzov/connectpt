@@ -8,6 +8,12 @@ class DatasetKind(StrEnum):
     EDIT = "edit"
 
 
+class DataSourceKind(StrEnum):
+    FILE = "file"
+    DYNAMIC = "dynamic"
+    BENCHMARK = "benchmark"
+
+
 DATASET_SCHEMA = 1
 DATASET_MANIFEST = "manifest.json"
 DATASET_CONTENT = "dataset.pt"
