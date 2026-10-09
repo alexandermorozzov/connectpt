@@ -50,6 +50,7 @@ class TrainingPaths:
 class OutputPaths:
     """Dataset preparation output folder."""
     output_dir: str | None
+    weights_dir: str
 
 
 @dataclass(frozen=True)

@@ -81,12 +81,6 @@ class ModelParams:
 
 
 @dataclass(frozen=True)
-class ModelProfileParams:
-    config: str
-    checkpoint_path: str | None
-
-
-@dataclass(frozen=True)
 class PolicyProfile:
     model: ModelParams
     constants: CostConstants
@@ -104,7 +98,7 @@ DECODER_PARAMS = {"PathCombiningRouteGenerator": DecoderParams, "TrimPathCombini
 BACKBONES = {"graph attn": GraphAttnNet}
 
 
-def load_policy(profile: PolicyProfile):
+def build_policy(profile: PolicyProfile):
     params = profile.model
     sizes = dims(params.features)
     backbone = BACKBONES[params.backbone_type](

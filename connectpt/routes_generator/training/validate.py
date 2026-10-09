@@ -10,7 +10,7 @@ from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader
 
 from ..common.logging import flush, log
-from ..policy.generate import evaluate_policy
+from ..policy.predict import evaluate_policy
 from ..policy.rollout import bind_env
 from ..env.state import RouteGenBatchState
 from ..env.base import EnvParams

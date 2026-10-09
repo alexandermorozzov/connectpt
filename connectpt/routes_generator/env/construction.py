@@ -12,7 +12,7 @@ from ..objectives.const import ACTION_PENALTIES
 class ConstructionEnv(Env):
     action_spec = ActionSpec("construction")
 
-    def reset(self, graphs, preferences, seed_networks=None, *, normalize=True):
+    def reset(self, graphs, preferences, seed_networks=None, *, normalize=True, route_idx=None, reference_networks=None):
         self.state = RouteGenBatchState(
             to_batch(graphs),
             self.cost.constants,
@@ -22,8 +22,20 @@ class ConstructionEnv(Env):
             preferences=preferences,
         )
         if seed_networks is not None:
-            self.state.add_new_routes(to_routes(seed_networks).to(self.state.device))
+            routes = to_routes(seed_networks).to(self.state.device)
+            if route_idx is not None:
+                self.state.set_route_slot_context(routes, route_idx)
+                routes = self.state.route_slot_context.clone()
+                routes[self.state.batch_indices, self.state.active_route_idx] = -1
+            self.state.add_new_routes(routes)
+        elif route_idx is not None:
+            raise ValueError("a selected route requires a seed network")
+        if reference_networks is not None:
+            self.state.set_adjustment_seed(reference_networks)
         return self.bind(self.state, normalize=normalize)
+
+    def updated_network(self):
+        return self.state.adjustment_routes()
 
     def action_mask(self, state):
         return self.mask_override if self.mask_override is not None else ActionMask(extend=True, trim_start=False, trim_end=False, halt=True)

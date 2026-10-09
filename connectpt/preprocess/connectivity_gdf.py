@@ -46,7 +46,7 @@ def _matrix(routes: torch.Tensor, tensors: dict, cost_obj) -> np.ndarray:
     lens = (routes[0] >= 0).sum(-1)
     state = RouteGenBatchState(data, cost_obj.constants, routes.shape[1], int(lens.min()), int(lens.max()), preferences=cost_obj.get_weights())
     state.add_new_routes(routes)
-    return (evaluate(state, cost_obj).connectivity_pair_times[0] / 60.0).cpu().numpy()
+    return (evaluate(state, cost_obj).connectivity_pair_times.squeeze(0) / 60.0).cpu().numpy()
 
 
 def map_polygons(gdf: gpd.GeoDataFrame, instance_dir: Path) -> gpd.GeoDataFrame:

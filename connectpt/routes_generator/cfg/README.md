@@ -87,7 +87,8 @@ YAML содержит только значения. Комментарии в �
 python scripts/run.py --config-name runs/search method=nea_edit "model_profile@models.edit=edit_v1" run.cpu=true --dry-run
 ```
 
-В профиле `config` выбирает архитектуру из `model/`, а `checkpoint_path` задаёт
-файл весов. Корень весов передаётся через `--weights-dir`; по умолчанию это
+Профиль подключает архитектуру из `model/` через `defaults`; готовая архитектура
+находится в `model_profile.model` или `models.<роль>.model`. Поле `checkpoint_path`
+задаёт файл весов. Корень весов передаётся через `--weights-dir`; по умолчанию это
 `artifacts/model_weights/`. Для обучения construction доступны архитектуры
 `construction` и `construction_holliday`, выбранные в пресетах `runs/`.

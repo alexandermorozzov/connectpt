@@ -8,7 +8,7 @@ import torch
 
 from ..objectives.const import ACTION_PENALTIES
 from ..policy.rollout import rollout
-from ..policy.generate import generate
+from ..policy.predict import predict
 from ..common.logging import log, flush
 from ..policy.checkpoints import save_model_weights
 from .records import (
@@ -154,7 +154,8 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget):
     with torch.no_grad():
         for graphs, seeds in data.warmup(budget.warmup_batches):
             env.reset(graphs, env.cost.get_weights(), seeds)
-            generate(env, policy, "sample", 1, seed_networks=seeds)
+            predict(policy, graphs, env.state.cost_weights, env.cost, type(env), env.params,
+                    "sample", seed_networks=seeds, mask=env.mask_override)
     if budget.warmup_batches:
         policy.update_and_freeze_feature_norms()
     policy.eval()

@@ -19,7 +19,6 @@ class EditEnv(Env):
         if seed_networks is None:
             raise ValueError("edit environment requires seed networks")
         routes = to_routes(seed_networks)
-        self.network = routes.clone()
         self.route_idx = route_idx
         self.state = RouteGenBatchState(
             to_batch(graphs, edit_features=True),
@@ -29,14 +28,16 @@ class EditEnv(Env):
             self.params.max_route_len,
             preferences=preferences,
         )
-        routes = routes.to(self.state.device)
+        routes = routes.to(self.state.device).expand(self.state.batch_size, -1, -1).clone()
+        self.network = routes.clone()
         self.state.set_adjustment_seed(routes if reference_networks is None else reference_networks)
         self.state.set_route_slot_context(routes, route_idx)
+        indices = self.state.batch_indices
+        route_idx = self.state.active_route_idx
         context = routes.clone()
-        context[:, route_idx] = -1
+        context[indices, route_idx] = -1
         self.state.add_new_routes(context, invalid_directly_connected=not bool((context >= 0).any()))
-        self.context_route_counts = self.state.n_finished_routes.clone()
-        self.state.set_current_routes(routes[:, route_idx])
+        self.state.set_current_routes(routes[indices, route_idx])
         if self.feature_set.adjustment_features:
             self.state.set_adjustment_conditioning(
                 self.cost.adjustment_degree_target,
@@ -47,17 +48,9 @@ class EditEnv(Env):
 
     def updated_network(self):
         """Write the planned route back into its original slot."""
-        width = max(self.network.shape[-1], self.state.current_routes.shape[-1])
-        network = to_routes(self.network, width=width).to(self.state.device)
-        for bi, routes in enumerate(self.state.routes):
-            route = routes[-1] if len(routes) > int(self.context_route_counts[bi]) else self.state.current_routes[bi]
-            route = route[route >= 0]
-            if not route.numel():
-                route = self.network[bi, self.route_idx]
-                route = route[route >= 0]
-            network[bi, self.route_idx] = -1
-            network[bi, self.route_idx, : route.numel()] = route
-        return network
+        network = self.state.adjustment_routes()
+        original = to_routes(self.network, width=network.shape[-1]).to(self.state.device)
+        return torch.where((network >= 0).any(-1, keepdim=True), network, original)
 
     def bind(self, state, *, normalize=True, single_route=False, evaluation=None):
         self.trim_counts = torch.zeros(state.batch_size, device=state.device, dtype=torch.long)

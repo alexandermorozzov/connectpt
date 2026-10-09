@@ -12,8 +12,8 @@ from ..env.actions import ActionSpec
 from ..env.base import EnvParams
 from ..network.corruption import CopyTierParams
 from ..objectives.cost import build_cost
-from ..policy.build import load_policy
-from ..policy.checkpoints import load_model_weights, save_model_weights
+from ..policy.build import build_policy
+from ..policy.checkpoints import save_model_weights
 from ..policy.rollout import ENVS
 from ..training.algorithms.base import AlgorithmParams
 from ..training.algorithms.d3po import D3PO
@@ -29,11 +29,10 @@ from ..training.validate import (
     evaluate_preferences, log_evaluation_metrics, log_pareto_metrics,
 )
 from .artifacts import ArtifactStore
-from .config import compose_policy_config, cost_params, policy_profile
+from .config import cost_params, policy_profile
 from .const import DATASETS_DIR
 from .context import RunContext, resolve_device, resolve_under_root, resolve_weights_path
 from .instances import load_instance
-from .policy import PolicyRun
 from .runs import ExperimentRun, RunArtifact
 from .schemas import OutputPaths, TrainingPaths, TrainingRunParams, params
 
@@ -57,17 +56,12 @@ class TrainingRun(ExperimentRun):
         self.loop_params = params(LoopParams, cfg.train_loop)
         if self.loop_params.cpu_threads is not None:
             torch.set_num_threads(self.loop_params.cpu_threads)
-        self.policy = load_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, device))
+        checkpoint_path = (resolve_weights_path(self.paths.init_checkpoint_path, self.paths.weights_dir)
+                           if self.paths.init_checkpoint_path else None)
+        self.policy = build_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, device,
+                                                  checkpoint_path=checkpoint_path))
         self.env_name = cfg.env.name
         ActionSpec(self.env_name).validate(self.policy.action_spec)
-        if self.paths.init_checkpoint_path:
-
-            load_model_weights(
-                self.policy,
-                resolve_weights_path(self.paths.init_checkpoint_path, self.paths.weights_dir),
-                strict=True,
-                map_location=device,
-            )
         self.cost = build_cost(
             cost_params(cfg.cost), symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
         ).to(device)
@@ -328,16 +322,22 @@ class DatasetRun(ExperimentRun):
         cfg = self.cfg
         self.run_params = params(TrainingRunParams, cfg.run)
 
-        policy_run = PolicyRun(compose_policy_config(), resolve_device(cpu=self.run_params.cpu))
-        policy_run.setup()
+        device = resolve_device(cpu=self.run_params.cpu)
+        paths = params(OutputPaths, cfg.paths)
+        profile = policy_profile(
+            cfg.model_profile.model, cfg.cost, cfg.experiment, device,
+            checkpoint_path=resolve_weights_path(cfg.model_profile.checkpoint_path, paths.weights_dir),
+        )
+        cost = build_cost(cost_params(cfg.cost), symmetric_routes=cfg.experiment.symmetric_routes,
+                          low_memory_mode=cfg.experiment.low_memory_mode)
         self.dataset = copytier_config(
             params(DatasetBuildParams, cfg.dataset_build),
             params(EditDatasetParams, cfg.dataset),
-            policy_run.profile,
-            policy_run.cost,
-            policy_run.seed,
+            profile,
+            cost,
+            cfg.experiment.seed,
         )
-        self.run_dir = resolve_under_root(params(OutputPaths, cfg.paths).output_dir)
+        self.run_dir = resolve_under_root(paths.output_dir)
 
     def _artifact(self, seconds, dry_run):
         return RunArtifact(

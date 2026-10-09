@@ -327,10 +327,10 @@ def build(cfg: CopyTierConfig):
     from connectpt.routes_generator.city.synthetic import DynamicCityGraphDataset
     from torch_geometric.loader import DataLoader
     from ..city.graph import to_batch
-    from ..env.state import RouteGenBatchState
-    from ..policy.build import load_policy
-    from ..policy.generate import generate
-    from ..policy.rollout import bind_env
+    from ..env.base import EnvParams
+    from ..env.construction import ConstructionEnv
+    from ..policy.build import build_policy
+    from ..policy.predict import predict
     from ..common.random import seed_everything
     from connectpt.routes_generator.network.io import save_routes
     from connectpt.routes_generator.network.routes import to_routes
@@ -380,24 +380,15 @@ def build(cfg: CopyTierConfig):
             for _s in tqdm(range(0, len(combo_idxs), LC_GEN_BATCH), desc=f"LC construct [{ctag}]"):
                 chunk = combo_idxs[_s : _s + LC_GEN_BATCH]
                 seed_everything(cfg.policy_seed)
-                policy = load_policy(cfg.policy_profile)
+                policy = build_policy(cfg.policy_profile)
                 graphs = [to_batch(tensors_all[gi]).to_data_list()[0] for gi in chunk]
                 data = next(iter(DataLoader(graphs, batch_size=len(chunk)))).to(cfg.policy_profile.device)
-                state = RouteGenBatchState(
-                    data,
-                    cost.constants,
-                    cfg.target_n_routes,
-                    cfg.min_route_len,
-                    cfg.max_route_len,
-                    preferences=cost.get_weights(),
-                )
-                routes_b = generate(
-                    bind_env(state, policy, cost, normalize=False),
-                    policy,
-                    "sample",
-                    cfg.lc_n_samples,
-                    sample_batch_size=len(chunk),
-                )
+                limits = EnvParams(cfg.target_n_routes, cfg.min_route_len, cfg.max_route_len,
+                                   True, 1.0, policy.force_linking_unlinked, policy.max_act_len,
+                                   None, None, False, False, False)
+                routes_b = predict(policy, data, cost.get_weights(), cost, ConstructionEnv,
+                                   limits, "sample", cfg.lc_n_samples,
+                                   sample_batch_size=len(chunk)).routes
                 for _j, gi in enumerate(chunk):
                     lc_routes[gi] = routes_b[_j]
 

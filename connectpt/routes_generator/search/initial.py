@@ -282,19 +282,15 @@ def build_init_routes(
 def learned_initial(spec, tensors, *, device, cost, initial, policy) -> torch.Tensor:
     from torch_geometric.loader import DataLoader
     from ..city.graph import to_batch
-    from ..policy.generate import generate
-    from ..policy.rollout import bind_env
+    from ..env.base import EnvParams
+    from ..env.construction import ConstructionEnv
+    from ..policy.predict import predict
 
     data = next(iter(DataLoader(to_batch(tensors).to_data_list(), batch_size=1))).to(device)
-    state = RouteGenBatchState(
-        data,
-        cost.constants,
-        spec["n_routes"],
-        spec["min_route_len"],
-        spec["max_route_len"],
-        preferences=cost.get_weights(),
-    )
-    return generate(bind_env(state, policy, cost, normalize=False), policy, "sample", 1)
+    limits = EnvParams(spec["n_routes"], spec["min_route_len"], spec["max_route_len"],
+                       True, 1.0, policy.force_linking_unlinked, policy.max_act_len,
+                       None, None, False, False, False)
+    return predict(policy, data, cost.get_weights(), cost, ConstructionEnv, limits, "sample").routes
 
 
 def _heuristic_construct(spec, tensors, *, device, generator, cost, initial):

@@ -2,6 +2,8 @@
 defaults:
   - /cost: rtt_wmc
   - /adjustment: cap
+  - /experiment: standard
+  - /model_profile: construction_v1
   - /dataset: lc_copytiers
   - /dataset_build: copytiers
   - _self_
@@ -13,6 +15,7 @@ run:
   cpu: false
 
 paths:
+  weights_dir: artifacts/model_weights
   output_dir: artifacts/runs/prepare_dataset
 
 logger_list: []

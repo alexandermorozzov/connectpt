@@ -18,14 +18,14 @@ from omegaconf import OmegaConf
 
 from connectpt.routes_generator.network.corruption import RealisticParams
 from connectpt.routes_generator.objectives.cost import build_cost
-from connectpt.routes_generator.run.config import load_experiment
-from connectpt.routes_generator.run.context import resolve_under_root
+from connectpt.routes_generator.run.config import load_experiment, policy_profile
+from connectpt.routes_generator.run.context import resolve_under_root, resolve_weights_path
 from connectpt.routes_generator.run.context import resolve_device, seed_everything
-from connectpt.routes_generator.run.policy import PolicyRun
+from connectpt.routes_generator.policy.build import build_policy
 from connectpt.routes_generator.run.schemas import InitialParams, params
 from connectpt.routes_generator.search.initial import build_init_routes
 from connectpt.routes_generator.run.instances import load_instance
-from connectpt.routes_generator.run.const import INSTANCES_DIR
+from connectpt.routes_generator.run.const import INSTANCES_DIR, MODEL_WEIGHTS_DIR
 from connectpt.routes_generator.network.routes import write_routes_txt
 
 INSTANCES = ["mandl", "mumford0", "mumford1", "mumford2", "mumford3"]
@@ -57,10 +57,11 @@ def main() -> None:
         seed_everything(args.seed)
         policy, instance_cost = None, cost
         if args.generator == "lc":
-            # PolicyRun.setup reseeds with experiment.seed and builds the policy per instance.
-            policy_run = PolicyRun(cfg, device)
-            policy_run.setup()
-            policy, instance_cost = policy_run.policy, policy_run.cost
+            seed_everything(cfg.experiment.seed)
+            policy = build_policy(policy_profile(
+                cfg.model_profile.model, cfg.cost, cfg.experiment, device,
+                checkpoint_path=resolve_weights_path(cfg.model_profile.checkpoint_path, MODEL_WEIGHTS_DIR),
+            ))
         routes = build_init_routes(
             spec,
             instance.tensors,

@@ -39,7 +39,7 @@ class Env(ABC):
 
     action_spec: ActionSpec
 
-    def __init__(self, cost, features: FeatureParams, params: EnvParams, policy_spec: ActionSpec, *, node_normalizer):
+    def __init__(self, cost, features: FeatureParams, params: EnvParams, policy_spec: ActionSpec, *, node_normalizer, mask=None):
         self.action_spec.validate(policy_spec)
         self.cost = cost
         self.feature_set = features
@@ -48,7 +48,7 @@ class Env(ABC):
         self.state = None
         self.steps = 0
         self.result = None
-        self.mask_override = None
+        self.mask_override = mask
 
     @abstractmethod
     def reset(self, graphs, preferences, seed_networks=None, *, normalize=True):

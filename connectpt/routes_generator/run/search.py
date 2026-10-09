@@ -15,8 +15,8 @@ from .schemas import AdjustmentParams, SearchPaths, SearchRunParams, SweepParams
 from .instances import load_instance
 from ..objectives.metrics import select_metrics
 from .evaluation import export_evaluation
-from ..policy.build import ModelProfileParams, load_policy
-from .config import compose_policy_model, cost_params, policy_profile
+from ..policy.build import build_policy
+from .config import cost_params, policy_profile
 from ..objectives.cost import build_cost
 from ..search.plan import MethodParams, ExecutablePlan
 from ..search.search import run_search
@@ -57,14 +57,13 @@ class SearchRun(ExperimentRun):
             if role not in cfg.models:
                 continue
             m_cfg = cfg.models[role]
-            profile = ModelProfileParams(**m_cfg)
-            model = load_policy(
+            model = build_policy(
                 policy_profile(
-                    compose_policy_model(profile.config),
+                    m_cfg.model,
                     cfg.cost,
                     cfg.experiment,
                     device,
-                    checkpoint_path=resolve_weights_path(profile.checkpoint_path, self.paths.weights_dir),
+                    checkpoint_path=resolve_weights_path(m_cfg.checkpoint_path, self.paths.weights_dir),
                 )
             )
             if model.action_spec.role != role:

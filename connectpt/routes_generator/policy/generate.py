@@ -1,12 +1,12 @@
-"""Network generation and policy evaluation over the shared rollout."""
+"""Internal network sampling for the public predict interface."""
 import torch
-from torch_geometric.loader import DataLoader
+from dataclasses import replace
 
 from ..env.state import RouteGenBatchState
 from ..network.routes import to_routes
 from ..objectives.evaluate import Evaluation
 from ..objectives.preferences import batch_value
-from .rollout import bind_env, rollout
+from .rollout import rollout
 
 
 def _seed(state, networks, current):
@@ -22,7 +22,7 @@ def _seed(state, networks, current):
             state.set_current_routes(current)
 
 
-def _finish(env, policy, greedy, revisit):
+def _finish(env, policy, greedy, revisit, env_factory):
     if revisit is not None:
         revisit = to_routes(revisit, n_routes=int(env.state.n_routes_to_plan.min().item()))
         revisit = revisit.expand(env.state.batch_size, -1, -1).to(env.state.device)
@@ -33,7 +33,10 @@ def _finish(env, policy, greedy, revisit):
             if not has_route.all():
                 raise NotImplementedError("revisiting requires equal route counts across a batch")
             env.state.set_current_routes(route)
-            route_env = bind_env(env.state, policy, env.cost, single_route=True, max_trim_actions=1)
+            route_env = env_factory(env.cost, policy.feature_set,
+                                    replace(env.params, max_trim_actions_per_route=1), policy.action_spec,
+                                    node_normalizer=policy.node_norm, mask=env.mask_override)
+            route_env.bind(env.state, single_route=True)
             rollout(route_env, policy, greedy, record_states=False)
     env.bind(env.state)
     if not env.state.is_done().all():
@@ -42,35 +45,27 @@ def _finish(env, policy, greedy, revisit):
 
 
 @torch.no_grad()
-def generate(
+def _generate(
     env,
     policy,
     mode,
     n=1,
     *,
+    env_factory,
     sample_batch_size=None,
     seed_networks=None,
     current_routes=None,
     revisit_routes=None,
-    return_trajectory=False,
 ):
     """Generate greedily or select the cheapest of n independent samples."""
     if mode not in ("greedy", "sample") or n < 1:
         raise ValueError("generation requires greedy/sample mode and n >= 1")
-    if env.single_route:
-        if n != 1:
-            raise ValueError("a route episode produces one trajectory")
-        trajectory = rollout(env, policy, mode == "greedy", record_states=False)
-        return trajectory if return_trajectory else to_routes(env.state.routes).to(env.state.device)
-    if return_trajectory:
-        raise ValueError("return_trajectory requires a single-route environment")
-    policy.eval()
     if env.action_spec.role == "edit":
         return _generate_edit(env, policy, mode, n, env.network if seed_networks is None else seed_networks)
     state = env.state
     if mode == "greedy":
         _seed(state, seed_networks, current_routes)
-        _finish(env, policy, True, revisit_routes)
+        _finish(env, policy, True, revisit_routes, env_factory)
         return to_routes(state.routes).to(state.device)
     graphs = state.graph_data.to_data_list() * n
     batch_size = state.batch_size
@@ -102,14 +97,17 @@ def generate(
         _seed(
             sample_state, None if seeds is None else seeds[start:end], None if currents is None else currents[start:end]
         )
-        sample_env = bind_env(sample_state, policy, env.cost, normalize=False)
-        _finish(sample_env, policy, False, None if revisits is None else revisits[start:end])
+        sample_env = env_factory(env.cost, policy.feature_set, env.params, policy.action_spec,
+                                node_normalizer=policy.node_norm, mask=env.mask_override)
+        sample_env.bind(sample_state, normalize=False)
+        _finish(sample_env, policy, False, None if revisits is None else revisits[start:end], env_factory)
         all_routes.extend(sample_state.routes)
         evaluations.append(sample_env.result)
         all_costs.append(sample_env.result.cost)
     costs = torch.cat(all_costs).reshape(n, batch_size)
     best = costs.argmin(0)
-    routes = to_routes([all_routes[int(best[i]) * batch_size + i] for i in range(batch_size)])
+    routes = to_routes(all_routes).to(state.device)[best * batch_size + state.batch_indices]
+    routes = routes[..., :int((routes >= 0).sum(-1).max())]
     state.replace_routes(routes.to(state.device))
     selected = Evaluation.concatenate(evaluations).select(best * batch_size + state.batch_indices)
     env.bind(state, normalize=False, evaluation=selected)
@@ -119,6 +117,7 @@ def generate(
 def _generate_edit(env, policy, mode, n, networks):
     original = env.state
     seed = to_routes(networks).to(original.device)
+    reference = original.adjustment_seed if original.adjustment_seed.numel() else seed
     candidates, costs, evaluations = [], [], []
     for _ in range(n if mode == "sample" else 1):
         working = seed.clone()
@@ -129,7 +128,7 @@ def _generate_edit(env, policy, mode, n, networks):
                 working,
                 route_idx=route_idx,
                 normalize=False,
-                reference_networks=seed,
+                reference_networks=reference,
             )
             env.bind(env.state, single_route=True)
             rollout(env, policy, mode == "greedy", record_states=False)
@@ -143,13 +142,13 @@ def _generate_edit(env, policy, mode, n, networks):
             preferences=original.cost_weights,
         )
         final.add_new_routes(working)
-        final.set_adjustment_seed(seed)
+        final.set_adjustment_seed(reference)
         candidates.append(working)
         result = env.cost(final)
         evaluations.append(result)
         costs.append(result.cost)
     best = torch.stack(costs).argmin(0)
-    routes = to_routes([candidates[int(best[bi])][bi] for bi in range(original.batch_size)])
+    routes = torch.stack(candidates)[best, original.batch_indices]
     final = RouteGenBatchState(
         original.graph_data,
         env.cost.constants,
@@ -159,22 +158,7 @@ def _generate_edit(env, policy, mode, n, networks):
         preferences=original.cost_weights,
     )
     final.add_new_routes(routes)
-    final.set_adjustment_seed(seed)
+    final.set_adjustment_seed(reference)
     selected = Evaluation.concatenate(evaluations).select(best * original.batch_size + original.batch_indices)
     env.bind(final, normalize=False, evaluation=selected)
-    env.network = routes
     return routes
-
-
-@torch.no_grad()
-def evaluate_policy(env, policy, graphs, prefs, mode, n=1, *, seed_networks=None):
-    """Return the prepared Evaluation and networks from the generation rollout."""
-    batches = graphs if isinstance(graphs, DataLoader) else (graphs,)
-    evaluations, networks = [], []
-    device = next(policy.parameters()).device
-    for data in batches:
-        env.reset(data.to(device), prefs, seed_networks if env.action_spec.role == "edit" else None, normalize=False)
-        routes = generate(env, policy, mode, n, seed_networks=seed_networks)
-        evaluations.append(env.result)
-        networks.extend([[route for route in network if (route >= 0).any()] for network in routes])
-    return Evaluation.concatenate(evaluations), to_routes(networks).to(device)

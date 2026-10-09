@@ -35,13 +35,6 @@ def cost_params(cost_cfg) -> CostParams:
     return CostParams(**OmegaConf.to_container(cost_cfg.kwargs, resolve=True))
 
 
-def compose_policy_model(name: str):
-    """Model group for a named profile, without an evaluation stack."""
-    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        cfg = compose(config_name=None, overrides=[f"+model={name}"])
-    return cfg.model
-
-
 def policy_profile(model_cfg, cost_cfg, experiment, device, *, checkpoint_path=None):
     """Resolve config groups at the Run.setup boundary."""
 
@@ -54,16 +47,6 @@ def policy_profile(model_cfg, cost_cfg, experiment, device, *, checkpoint_path=N
         checkpoint_path,
         device,
     )
-
-
-def compose_policy_config(name="construction_v1"):
-    """Compose the groups used by standalone policy runs."""
-    with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        cfg = compose(
-            config_name=None,
-            overrides=["+cost=rtt_wmc", "+adjustment=cap", "+experiment=standard", f"+model_profile={name}"],
-        )
-    return cfg
 
 
 def _runs_root(cfg) -> str:

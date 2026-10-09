@@ -1,2 +1,4 @@
-config: edit_trim_seeded
+defaults:
+  - /model@model: edit_trim_seeded
+  - _self_
 checkpoint_path: improvement/improvement_lc_rttconn_adj_w10_t02_finetune100.pt

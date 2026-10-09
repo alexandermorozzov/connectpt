@@ -11,7 +11,7 @@ from hydra import compose, initialize_config_dir
 
 from connectpt.routes_generator.run.const import CFG_DIR
 from connectpt.routes_generator.city.synthetic import DynamicCityGraphDataset
-from connectpt.routes_generator.policy.build import load_policy
+from connectpt.routes_generator.policy.build import build_policy
 from connectpt.routes_generator.run.config import policy_profile
 from connectpt.routes_generator.objectives.cost import build_cost
 from connectpt.routes_generator.env.state import RouteGenBatchState
@@ -141,7 +141,7 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
     torch.manual_seed(9)
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
         cfg = compose(config_name="runs/train_construction")
-    model = load_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, torch.device("cpu")))
+    model = build_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, torch.device("cpu")))
     model.freeze_feature_norms()
     cost = build_cost(cost_params(cfg.cost), low_memory_mode=False, symmetric_routes=True)
     data = DynamicCityGraphDataset(15, 15, data_type="voronoi")
@@ -318,7 +318,7 @@ def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
         cfg = compose(config_name="runs/train_construction")
         legacy = compose(config_name="runs/train_construction", overrides=["model=construction"])
-    model = load_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, torch.device("cpu")))
+    model = build_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, torch.device("cpu")))
     assert cfg.train_loop.batch_size == cfg.algorithm.minibatch_size == cfg.evaluation.graph_count == 64
     assert cfg.algorithm.gamma == 1.0 and cfg.env.params.diff_reward
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
@@ -348,7 +348,7 @@ def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     permuted = replace(model.feature_set, critic=tuple(reversed(model.feature_set.critic)))
     reordered = ValueHead(2, permuted, critic_params, torch.device("cpu"), scalar=False)
     assert torch.equal(reordered._features_from_state(state), vector._features_from_state(state).flip(-1))
-    legacy_model = load_policy(policy_profile(legacy.model, legacy.cost, legacy.experiment, torch.device("cpu")))
+    legacy_model = build_policy(policy_profile(legacy.model, legacy.cost, legacy.experiment, torch.device("cpu")))
     assert legacy_model.edge_feat_dim == 14
     load_model_weights(
         legacy_model, "artifacts/model_weights/inductive_random_graphs_weighted_connectivity.pt", strict=True
@@ -436,7 +436,7 @@ def test_fixed_preference_evaluation_does_not_consume_training_rng():
                 "evaluation.stochastic_samples=2",
             ],
         )
-    model = load_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, torch.device("cpu")))
+    model = build_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, torch.device("cpu")))
     model.freeze_feature_norms()
     cost = build_cost(cost_params(cfg.cost), low_memory_mode=False, symmetric_routes=True)
     dataset = DynamicCityGraphDataset(9, 9, data_type="voronoi")
