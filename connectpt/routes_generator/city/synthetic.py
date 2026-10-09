@@ -73,6 +73,24 @@ def load_graphs(path):
         return _GraphUnpickler(stream).load()
 
 
+class StoredCityGraphs(InMemoryDataset):
+    """Read an existing collated dataset without creating files or applying transforms."""
+    def __init__(self, path):
+        super().__init__(root=None)
+        self.data, self.slices = torch.load(path, weights_only=False, pickle_module=_GraphPickle)
+
+
+def load_graph_collection(path):
+    """Read raw or collated legacy cities without modifying their source folder."""
+    path = Path(path)
+    if path.is_file():
+        return load_graphs(path)
+    collated = path / 'processed' / 'collated.pt'
+    if collated.is_file():
+        return StoredCityGraphs(collated)
+    return load_graphs(path / RAW_GRAPH_FILENAME)
+
+
 def get_default_train_and_eval_split(path, split=0.9, space_scale=0.01, demand_scale=0.01):
     transforms = [
         SpaceScaleTransform(1 - space_scale, 1 + space_scale),
