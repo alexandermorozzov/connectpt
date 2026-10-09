@@ -8,7 +8,7 @@ from .actions import ActionSpec, RouteAction
 from .const import RouteActionKind
 from .features import FeatureParams, observe, select_features, NODE_COLUMNS
 from ..city.graph import STOP_KEY
-from ..objectives.penalties import ACTION_PENALTIES
+from ..objectives.const import ACTION_PENALTIES
 
 
 @dataclass(frozen=True)
@@ -70,7 +70,7 @@ class Env(ABC):
     def action_penalties(self, action: RouteAction, active, forced):
         """Unweighted penalties of the action, ``[B, len(ACTION_PENALTIES)]``."""
 
-    def bind(self, state, *, normalize=True, single_route=False):
+    def bind(self, state, *, normalize=True, single_route=False, evaluation=None):
         self.state = state
         self.state.set_redundancy_feature_mode(self.feature_set.redundancy)
         if normalize:
@@ -78,7 +78,7 @@ class Env(ABC):
         self.steps = 0
         self.single_route = single_route
         self.ended = torch.zeros(state.batch_size, dtype=torch.bool, device=state.device)
-        self.result = self.cost(state)
+        self.result = self.cost(state) if evaluation is None else evaluation
         return self.observe(state)
 
     def is_done(self):

@@ -9,6 +9,7 @@ from ..city.graph import to_batch
 from ..env.state import RouteGenBatchState
 from ..network.routes import to_routes
 from ..objectives.metrics import Metrics, evaluate_network
+from ..objectives.evaluate import Evaluation
 from ..common.random import seed_everything
 from .colony import run_colony
 from .plan import ExecutablePlan
@@ -19,6 +20,7 @@ class SearchResult:
     routes: torch.Tensor
     metrics: Metrics
     history: torch.Tensor
+    evaluation: Evaluation
 
 
 def run_search(
@@ -44,7 +46,7 @@ def run_search(
     # Iterator creation consumes the same torch base seed as the original runner.
     loader = DataLoader(to_batch(instance.tensors).to_data_list(), batch_size=1)
     seed_everything(seed)
-    histories, routes, collected = [], [], None
+    histories, routes, evaluations, collected = [], [], [], None
     for graph in loader:
         graph = graph.to(device)
         started = perf_counter()
@@ -59,7 +61,7 @@ def run_search(
         )
         initial = to_routes(instance.init_routes, n_routes=int(state.n_routes_to_plan.min().item()))
         initial = initial.expand(state.batch_size, -1, -1).to(device)
-        state, history = run_colony(
+        state, evaluation, history = run_colony(
             state,
             cost,
             initial,
@@ -74,10 +76,10 @@ def run_search(
             silent=silent,
             logger_list=logger_list,
             mutation_counts_out=mutation_counts_out,
-            **adjustment,
         )
         elapsed = perf_counter() - started
-        metrics = evaluate_network(state, cost)
+        metrics = evaluate_network(evaluation)
+        evaluations.append(evaluation)
         metrics["average wall-clock duration"] = torch.full_like(metrics["ATT"], elapsed)
         metrics["average # iterations"] = torch.full_like(metrics["ATT"], history.shape[1])
         if collected is None:
@@ -87,4 +89,4 @@ def run_search(
                 collected[key] = torch.cat((collected[key], value))
         routes.append(to_routes(state.routes).to(device))
         histories.append(history)
-    return SearchResult(torch.cat(routes), collected, torch.cat(histories))
+    return SearchResult(torch.cat(routes), collected, torch.cat(histories), Evaluation.concatenate(evaluations))

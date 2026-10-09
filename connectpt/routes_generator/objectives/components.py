@@ -6,7 +6,6 @@ import torch
 from torch import Tensor
 from ..city.shortest_paths import aggregate_edge_features
 from ..network.routes import get_route_edge_matrix, get_nodes_on_routes_mask, to_routes
-from .preferences import scalarize
 from ..common.parameters import CostConstants
 
 from ..common.const import EPSILON
@@ -44,14 +43,7 @@ class CostHelperOutput:
     penalty_weights: Optional[list] = None
     components: Optional[Tensor] = None
     constraint_cost: Optional[Tensor] = None
-
-    @property
-    def cost(self):
-        return scalarize(self.goals, self.preferences, self.penalties, self.penalty_weights)
-
-    def add_penalty(self, value, weight=1.0):
-        self.penalties = torch.cat((self.penalties, value.reshape(-1, 1)), dim=-1)
-        self.penalty_weights = [*self.penalty_weights, weight]
+    connectivity_pair_times: Optional[Tensor] = None
 
     @property
     def mean_demand_time(self):
@@ -149,12 +141,9 @@ class PhysicalCost(torch.nn.Module):
         conn_vals = torch.where(unreachable, unreached_penalty.expand_as(all_pairs), all_pairs)
         return conn_vals.masked_fill(eye, float("nan"))
 
-    def connectivity_pair_times(self, state):
-        return self._demand_weighted_pair_times(self._connectivity_values(state), state.demand, dim=2)
-
-    def _cost_helper(self, state, return_per_route_riders=False):
+    def physical(self, state, return_per_route_riders=False):
         """
-        Compute cost components including median connectivity using transit_times converted to NetworkX graph.
+        Compute physical components once from the State transit-time matrices.
 
         Args:
             state: Object containing graph_data, transit_times, demand, etc.
@@ -168,7 +157,8 @@ class PhysicalCost(torch.nn.Module):
         dev = drive_times_matrix.device
 
         # assemble route graph
-        batch_routes = to_routes(state.routes).to(dev)
+        batch_routes = to_routes(state.routes, n_routes=int(state.n_routes_to_plan.max()))
+        batch_routes = to_routes(batch_routes, width=max(state.max_n_nodes, batch_routes.shape[-1])).to(dev)
         route_lens = (batch_routes > -1).sum(-1)
 
         log.debug("summing cost components")
@@ -215,9 +205,6 @@ class PhysicalCost(torch.nn.Module):
         n_duplicate_stops = count_duplicate_stops(state.max_n_nodes, batch_routes)
 
         # all-pairs transit times (tau_Rij, transfer penalties included)
-        all_pairs = self._compute_all_pairs_times_floyd(state)
-        B, N, _ = all_pairs.shape
-
         conn_vals = self._connectivity_values(state)
         node_cw = self._demand_weighted_node_times(conn_vals, demand_matrix, dim=2)
         values = torch.nanmedian(node_cw, dim=1).values
@@ -239,6 +226,7 @@ class PhysicalCost(torch.nn.Module):
             batch_routes,
             unserved_demand_matrix,
             median_connectivity_weighted=median_connectivity_weighted,
+            connectivity_pair_times=self._demand_weighted_pair_times(conn_vals, demand_matrix, dim=2),
         )
 
         if return_per_route_riders:

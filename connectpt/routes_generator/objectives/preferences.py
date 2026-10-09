@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from .const import GOAL_NAMES, COST_WEIGHT_KEY_ORDER, COST_COMPONENT_NAMES
+from .const import GOAL_NAMES, COST_WEIGHT_KEY_ORDER, PREFERENCE_KEYS
 
 from ..common.const import EPSILON
 
@@ -16,7 +16,46 @@ from ..common.const import EPSILON
 # with COST_WEIGHT_KEY_ORDER. Used to enable / disable individual components.
 
 
+def batch_value(value, batch_size, device):
+    """Broadcast a named scalar weight using the historical batch convention."""
+    if type(value) is not Tensor:
+        value = torch.tensor([value], device=device)
+    else:
+        value = value.to(device)
+        if value.ndim == 0:
+            value = value[None]
+    if value.shape[0] == 1 and batch_size > 1:
+        value = value.expand(batch_size)
+    if value.shape[0] > batch_size:
+        value = value[:batch_size]
+    return value
+
+
+def named_preferences(state, goals):
+    """Use goal IDs in configuration order, independent of model input slots."""
+    weights = torch.stack([batch_value(state.cost_weights[PREFERENCE_KEYS.get(name, name)],
+                                      state.batch_size, state.device) for name in goals], -1)
+    if set(goals) == set(GOAL_NAMES):
+        return weights
+    total = weights.sum(-1, keepdim=True)
+    return torch.where(total > EPSILON, weights / total.clamp_min(EPSILON), torch.full_like(weights, 1 / len(goals)))
+
+
 class PreferenceSampler:
+    """Legacy preference sampling adapter; retain checkpoint slots and RNG."""
+
+    def __init__(self, *, objectives, demand_time_weight, route_time_weight,
+                 median_connectivity_weight, variable_weights, pp_fraction,
+                 op_fraction, mcw_fraction):
+        self.objectives = tuple(objectives)
+        self.demand_time_weight = demand_time_weight
+        self.route_time_weight = route_time_weight
+        self.median_connectivity_weight = median_connectivity_weight
+        self.variable_weights = variable_weights
+        self.pp_fraction, self.op_fraction, self.mcw_fraction = pp_fraction, op_fraction, mcw_fraction
+        self._enabled_components = tuple(name in objectives for name in GOAL_NAMES)
+        self._all_components_enabled = all(self._enabled_components)
+
     def _enabled_mask_row(self, device=None, dtype=torch.float32):
         return torch.tensor([1.0 if on else 0.0 for on in self._enabled_components], device=device, dtype=dtype)
 
@@ -130,6 +169,9 @@ class PreferenceSampler:
 
     def sample(self, batch_size, device=None):
         """Sample only active goals, in configured objective order."""
+        if any(name not in GOAL_NAMES for name in self.objectives):
+            weights = torch.rand(batch_size, len(self.objectives), device=device)
+            return weights / weights.sum(-1, keepdim=True)
         named = self.sample_variable_weights(batch_size, device)
         return torch.stack([named[COST_WEIGHT_KEY_ORDER[GOAL_NAMES.index(name)]] for name in self.objectives], dim=-1)
 

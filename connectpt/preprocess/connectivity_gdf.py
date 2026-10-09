@@ -9,7 +9,7 @@ import torch
 from connectpt.routes_generator.city.graph import to_batch
 from connectpt.routes_generator.network.routes import to_routes
 from connectpt.routes_generator.city.instances import load_city_tensors
-from connectpt.routes_generator.objectives.metrics import connectivity_matrix
+from connectpt.routes_generator.objectives.evaluate import evaluate
 from connectpt.routes_generator.env.state import RouteGenBatchState
 
 
@@ -46,7 +46,7 @@ def _matrix(routes: torch.Tensor, tensors: dict, cost_obj) -> np.ndarray:
     lens = (routes[0] >= 0).sum(-1)
     state = RouteGenBatchState(data, cost_obj.constants, routes.shape[1], int(lens.min()), int(lens.max()), preferences=cost_obj.get_weights())
     state.add_new_routes(routes)
-    return (connectivity_matrix(state, cost_obj)[0] / 60.0).cpu().numpy()
+    return (evaluate(state, cost_obj).connectivity_pair_times[0] / 60.0).cpu().numpy()
 
 
 def map_polygons(gdf: gpd.GeoDataFrame, instance_dir: Path) -> gpd.GeoDataFrame:

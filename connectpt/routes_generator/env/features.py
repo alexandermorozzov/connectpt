@@ -333,34 +333,11 @@ def current_adjustment(state):
     """Per-graph adjustment degree of the CURRENT network vs the stored
     seed routes ([batch] in [0,1]). Used as a closed-loop conditioning
     feature."""
-    from ..objectives.penalties import adjustment_degree
+    from ..objectives.penalties import network_adjustment
 
-    if state.route_slot_context.numel() > 0:
-        cur = state.route_slot_context.clone()
-        for bi, route_idx in enumerate(state.active_route_idx.tolist()):
-            if route_idx < 0:
-                continue
-            cur[bi, route_idx] = -1
-            route = state.current_routes[bi]
-            copy_len = min(cur.shape[-1], route.shape[-1])
-            cur[bi, route_idx, :copy_len] = route[:copy_len]
-    else:
-        cur = to_routes(state.routes).to(state.device)
-    seed = state.adjustment_seed.to(state.device)
-    if seed.dim() == 2:  # unbatched [n_routes, L]
-        seed = seed.unsqueeze(0)
-    nr = min(cur.shape[1], seed.shape[1])
-    ll = min(cur.shape[-1], seed.shape[-1])
-    adj = adjustment_degree(
-        cur[:, :nr, :ll],
-        seed[:, :nr, :ll].long(),
-        state.symmetric_routes,
-        gap=state._adjustment_gap,
-        mode=state._adjustment_mode,
-    )
-    # adjustment_degree returns per-route [batch, n_routes]; the
-    # feature is the per-graph mean adjustment.
-    return adj.reshape(adj.shape[0], -1).mean(dim=1).float()
+    if not state.adjustment_seed.numel():
+        return state.drive_times.new_zeros(state.batch_size)
+    return network_adjustment(state.adjustment_routes(), state.adjustment_seed, state.symmetric_routes)
 
 
 def added_redundancy_features(state, candidate_paths, dtype):

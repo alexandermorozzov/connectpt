@@ -1,6 +1,5 @@
 """Constraint, adjustment and edit penalties, independent of policy and search."""
 import torch
-from .const import STATE_PENALTIES, ACTION_PENALTIES, PENALTIES
 
 # Order of the penalty vector: cost computes the state penalties, the environment
 # step appends the action penalties.
@@ -63,11 +62,18 @@ def needleman_wunsch(scores, gap=0.1):
 
 def _get_alignment_scores(candidate_routes, reference_routes, symmetric_routes, gap):
     """Return best alignment scores and route lengths for each route pair."""
-    if candidate_routes.shape != reference_routes.shape:
+    if candidate_routes.shape[:-1] != reference_routes.shape[:-1]:
         raise ValueError(
-            "candidate_routes and reference_routes must have the same shape, "
+            "candidate_routes and reference_routes must have corresponding route slots, "
             f"got {candidate_routes.shape} and {reference_routes.shape}"
         )
+
+    width = max(candidate_routes.shape[-1], reference_routes.shape[-1])
+    candidate_routes = torch.nn.functional.pad(candidate_routes, (0, width - candidate_routes.shape[-1]), value=-1)
+    reference_routes = torch.nn.functional.pad(reference_routes, (0, width - reference_routes.shape[-1]), value=-1)
+    if width == 0:
+        zero = torch.zeros(candidate_routes.shape[:-1], device=candidate_routes.device).reshape(-1)
+        return zero, zero.long(), zero.long()
 
     max_n_nodes = candidate_routes.shape[-1]
     flat_candidates = candidate_routes.reshape(-1, max_n_nodes)
@@ -115,23 +121,17 @@ def _get_alignment_scores(candidate_routes, reference_routes, symmetric_routes, 
     return alignment_scores, cand_lens, ref_lens
 
 
-def get_current_adjustment_degrees(candidate_routes, reference_routes, symmetric_routes, gap=0.1):
-    """Return the current normalized alignment-based adjustment degree."""
-    alignment_scores, cand_lens, ref_lens = _get_alignment_scores(
-        candidate_routes, reference_routes, symmetric_routes, gap=gap
-    )
-    norm = torch.maximum(cand_lens, ref_lens).to(torch.float32)
-    match_score = max(1.0 - gap, 1e-6)
-    norm = norm * match_score
-    both_empty = (cand_lens == 0) & (ref_lens == 0)
-    norm[both_empty] = 1.0
+def network_adjustment(candidate_routes, reference_routes, symmetric_routes):
+    """Paper (12)-(19), pure [B,R,L] -> [B], retaining complete route sequences.
 
-    similarities = alignment_scores / norm
-    similarities = similarities.clamp(min=0.0, max=1.0)
-    adjustment_degrees = 1.0 - similarities
-    adjustment_degrees[both_empty] = 0.0
-
-    return adjustment_degrees.reshape(candidate_routes.shape[:-1])
+    Route slots and batch sizes must correspond. Different padding widths are
+    allowed; empty/empty slots have degree 0, empty/nonempty slots degree 1.
+    Zero route slots produce degree 0. No RNG or input mutation.
+    """
+    if candidate_routes.ndim != 3 or reference_routes.ndim != 3:
+        raise ValueError("network adjustment requires [B,R,L] tensors")
+    degrees = get_paper_adjustment_degrees(candidate_routes, reference_routes, symmetric_routes)
+    return degrees.mean(-1) if degrees.shape[-1] else degrees.new_zeros(degrees.shape[0])
 
 
 def get_paper_adjustment_degrees(candidate_routes, reference_routes, symmetric_routes):
@@ -164,53 +164,18 @@ def get_paper_adjustment_degrees(candidate_routes, reference_routes, symmetric_r
     return adjustment_degrees.reshape(candidate_routes.shape[:-1])
 
 
-def adjustment_degree(candidate_routes, reference_routes, symmetric_routes, gap=0.1, mode="current"):
-    """Return route-wise adjustment degree in [0, 1], 0 means unchanged."""
-    if mode == "current":
-        return get_current_adjustment_degrees(
-            candidate_routes,
-            reference_routes,
-            symmetric_routes,
-            gap=gap,
-        )
-    if mode == "paper":
-        return get_paper_adjustment_degrees(
-            candidate_routes,
-            reference_routes,
-            symmetric_routes,
-        )
-    raise ValueError(f"Unknown adjustment degree mode '{mode}'. Expected 'current' or 'paper'.")
+ADJUSTMENT_OBJECTIVES = {
+    "raw": lambda degrees, target: degrees,
+    "target": lambda degrees, target: (degrees - target).abs(),
+    "cap": lambda degrees, target: (degrees - target).clamp_min(0),
+    "cap_sq": lambda degrees, target: (degrees - target).clamp_min(0).square(),
+}
 
 
 def adjustment_penalty(adjustment_degrees, objective="raw", target=0.2):
-    """Convert raw adjustment degrees into the penalty used in the objective."""
-    if objective == "raw":
-        return adjustment_degrees
-    if objective == "target":
-        if not bool(((torch.as_tensor(target) >= 0) & (torch.as_tensor(target) <= 1)).all()):
-            raise ValueError(f"adjustment_degree_target must be in [0, 1], got {target}")
-        target_tensor = adjustment_degrees.new_tensor(target)
-        return (adjustment_degrees - target_tensor).abs()
-    if objective == "cap":
-        # One-sided (hinge) penalty: penalize only EXCEEDING the target, i.e.
-        # treat `target` as an upper bound the routes should not pass. No
-        # penalty (and no pull) while adjustment <= target.
-        if not bool(((torch.as_tensor(target) >= 0) & (torch.as_tensor(target) <= 1)).all()):
-            raise ValueError(f"adjustment_degree_target must be in [0, 1], got {target}")
-        target_tensor = adjustment_degrees.new_tensor(target)
-        return (adjustment_degrees - target_tensor).clamp(min=0.0)
-    if objective == "cap_sq":
-        # Quadratic one-sided penalty: max(0, adj - target)**2. Same upper-bound
-        # semantics as 'cap' (no penalty below target), but the gradient
-        # 2*(adj - target) GROWS with the overshoot -- gentle near the target
-        # (does not swamp the main objective / keeps return variance low) and
-        # firm on large excess. Unlike linear 'cap' (constant gradient = W),
-        # the optimal adjustment depends on the target, so target/W become real
-        # controllability levers under conditioning.
-        if not bool(((torch.as_tensor(target) >= 0) & (torch.as_tensor(target) <= 1)).all()):
-            raise ValueError(f"adjustment_degree_target must be in [0, 1], got {target}")
-        target_tensor = adjustment_degrees.new_tensor(target)
-        return (adjustment_degrees - target_tensor).clamp(min=0.0) ** 2
-    raise ValueError(
-        f"Unknown adjustment degree objective '{objective}'. " "Expected 'raw', 'target', 'cap', or 'cap_sq'."
-    )
+    """Paper (20) for cap; explicitly selected alternative objectives share Fadj."""
+    if objective not in ADJUSTMENT_OBJECTIVES:
+        raise ValueError(f"Unknown adjustment degree objective {objective!r}")
+    if not bool(((torch.as_tensor(target) >= 0) & (torch.as_tensor(target) <= 1)).all()):
+        raise ValueError(f"adjustment_degree_target must be in [0, 1], got {target}")
+    return ADJUSTMENT_OBJECTIVES[objective](adjustment_degrees, adjustment_degrees.new_tensor(target))

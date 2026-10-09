@@ -3,14 +3,13 @@ from collections import deque
 from dataclasses import asdict, dataclass, fields
 
 import torch
-from torch import Tensor
 
 from ..network.routes import get_route_leg_times
-from ..common.const import EPSILON
-from .preferences import COST_WEIGHT_KEY_ORDER, COST_COMPONENT_NAMES, PreferenceSampler
-from .criteria import GOAL_NAMES, criterion
+from .preferences import PreferenceSampler
+from .criteria import criterion
+from .const import GOAL_NAMES, COST_WEIGHT_KEY_ORDER, COST_COMPONENT_NAMES
 from .components import PhysicalCost
-from .const import PENALTIES
+from .const import ACTION_PENALTIES, STATE_PENALTIES
 from ..common.parameters import CostConstants
 from .components import CostHelperOutput
 
@@ -31,8 +30,6 @@ class CostParams:
     ignore_stops_oob: bool
     adjustment_degree_target: float
     adjustment_degree_objective: str
-    adjustment_degree_gap: float
-    adjustment_degree_mode: str
     objectives: list
     penalties: dict
     monitor: list
@@ -42,7 +39,7 @@ def build_cost(parameters: CostParams, *, symmetric_routes: bool, low_memory_mod
     if not isinstance(parameters, CostParams):
         raise TypeError("build_cost requires CostParams")
     values = asdict(parameters)
-    weights = dict(values["penalties"])
+    weights = dict(overrides.pop("penalties", values["penalties"]))
     for key, name in (("constraint_violation_weight", "constraints"), ("adjustment_degree_weight", "adjustment")):
         if key in overrides:
             weights[name] = overrides.pop(key)
@@ -52,7 +49,7 @@ def build_cost(parameters: CostParams, *, symmetric_routes: bool, low_memory_mod
     return MyCostModule(low_memory_mode=low_memory_mode, symmetric_routes=symmetric_routes, **values)
 
 
-class MyCostModule(PhysicalCost, PreferenceSampler):
+class MyCostModule(PhysicalCost):
     def with_params(self, **overrides):
         values = {f.name: getattr(self, f.name) for f in fields(CostParams) if f.name != "penalties"}
         values["penalties"] = self.penalty_weights
@@ -83,12 +80,10 @@ class MyCostModule(PhysicalCost, PreferenceSampler):
         monitor,
         adjustment_degree_target,
         adjustment_degree_objective,
-        adjustment_degree_gap,
-        adjustment_degree_mode,
     ):
         super().__init__(mean_stop_time_s, avg_transfer_wait_time_s, symmetric_routes, low_memory_mode)
-        expected = set(PENALTIES)
-        if set(penalties) != expected:
+        expected = set(ACTION_PENALTIES) | set(STATE_PENALTIES)
+        if not expected <= set(penalties):
             raise ValueError(f"penalties must contain {sorted(expected)}")
         constraint_violation_weight = penalties["constraints"]
         adjustment_degree_weight = penalties["adjustment"]
@@ -98,8 +93,6 @@ class MyCostModule(PhysicalCost, PreferenceSampler):
         self.adjustment_degree_weight = float(adjustment_degree_weight)
         self.adjustment_degree_target = float(adjustment_degree_target)
         self.adjustment_degree_objective = adjustment_degree_objective
-        self.adjustment_degree_gap = float(adjustment_degree_gap)
-        self.adjustment_degree_mode = adjustment_degree_mode
         self.demand_time_weight = demand_time_weight
         self.route_time_weight = route_time_weight
         self.median_connectivity_weight = median_connectivity_weight
@@ -108,12 +101,8 @@ class MyCostModule(PhysicalCost, PreferenceSampler):
         self.pp_fraction = pp_fraction
         self.op_fraction = op_fraction
         self.mcw_fraction = mcw_fraction
-        if self.variable_weights:
-            self.pp_fraction = pp_fraction
-            self.op_fraction = op_fraction
-            self.mcw_fraction = mcw_fraction
-            if not pp_fraction + op_fraction + mcw_fraction <= 1:
-                raise ValueError("fractions of extreme samples must sum to <= 1")
+        if self.variable_weights and not pp_fraction + op_fraction + mcw_fraction <= 1:
+            raise ValueError("fractions of extreme samples must sum to <= 1")
         self.ignore_stops_oob = ignore_stops_oob
         # Which of the three cost components (demand / route / connectivity)
         # are active. Disabled components are dropped from the weighted cost
@@ -124,11 +113,37 @@ class MyCostModule(PhysicalCost, PreferenceSampler):
         self.monitor = tuple(monitor)
         if not self.objectives or len(set(self.objectives)) != len(self.objectives):
             raise ValueError("objectives must be nonempty and unique")
-        for name in (*self.objectives, *self.monitor):
-            criterion(name)
+        self.goal_criteria = {name: criterion(name) for name in dict.fromkeys((*GOAL_NAMES, *self.objectives))}
+        self.monitor_criteria = {name: criterion(name) for name in self.monitor}
         self.penalty_weights = dict(penalties)
+        parameters = {
+            "constraints": {"ignore_stops_oob": self.ignore_stops_oob},
+            "adjustment": {"target": self.adjustment_degree_target, "objective": self.adjustment_degree_objective},
+        }
+        self.penalty_criteria = {
+            name: criterion(name, **parameters.get(name, {}))
+            for name in penalties if name not in ACTION_PENALTIES
+        }
         self._enabled_components = tuple(name in self.objectives for name in ("ATT", "RTT", "WMC"))
         self._all_components_enabled = all(self._enabled_components)
+        self.preference_sampler = PreferenceSampler(
+            objectives=self.objectives, demand_time_weight=demand_time_weight,
+            route_time_weight=route_time_weight, median_connectivity_weight=median_connectivity_weight,
+            variable_weights=variable_weights, pp_fraction=pp_fraction,
+            op_fraction=op_fraction, mcw_fraction=mcw_fraction,
+        )
+
+    def get_weights(self, device=None):
+        return self.preference_sampler.get_weights(device)
+
+    def sample_variable_weights(self, batch_size, device=None):
+        return self.preference_sampler.sample_variable_weights(batch_size, device)
+
+    def get_preference_weights(self, state, normalize=False):
+        return self.preference_sampler.get_preference_weights(state, normalize)
+
+    def sample(self, batch_size, device=None):
+        return self.preference_sampler.sample(batch_size, device)
 
     @property
     def cost_component_names(self):
@@ -163,97 +178,15 @@ class MyCostModule(PhysicalCost, PreferenceSampler):
     def n_enabled_components(self):
         return int(sum(self._enabled_components))
 
-    def _expand_batch_value(self, value, batch_size, device):
-        if type(value) is not Tensor:
-            value = torch.tensor([value], device=device)
-        else:
-            value = value.to(device)
-            if value.ndim == 0:
-                value = value[None]
-        if value.shape[0] == 1 and batch_size > 1:
-            value = value.expand(batch_size)
-        if value.shape[0] > batch_size:
-            value = value[:batch_size]
-        return value
-
-    def _compute_cost_components_from_result(self, state, cho, constraint_weight=None, no_norm=False):
-        cost_weights = state.cost_weights
-        demand_time_weight = cost_weights["demand_time_weight"]
-        route_time_weight = cost_weights["route_time_weight"]
-        median_connectivity_weight = cost_weights["median_connectivity_weight"]
-
-        if constraint_weight is None:
-            constraint_weight = self.constraint_violation_weight
-
-        # if we have more weights than routes, truncate the weights
-        demand_time_weight = self._expand_batch_value(demand_time_weight, state.batch_size, state.device)
-        route_time_weight = self._expand_batch_value(route_time_weight, state.batch_size, state.device)
-        median_connectivity_weight = self._expand_batch_value(
-            median_connectivity_weight, state.batch_size, state.device
-        )
-        constraint_weight = self._expand_batch_value(constraint_weight, state.batch_size, state.device)
-
-        cost_components = torch.stack(
-            [criterion(name).compute(state, cho, no_norm=no_norm) for name in GOAL_NAMES], dim=-1
-        )
-        weights = torch.stack((demand_time_weight, route_time_weight, median_connectivity_weight), dim=-1)
-        # Drop disabled components from the weighted cost (no-op when all
-        # three are enabled). The raw cost_components above are left intact
-        # so get_cost_components() still reports every component.
-        weights = self.apply_enabled_mask(weights)
-
-        if bool((constraint_weight != 0).any()):
-            constraint_cost = (
-                criterion("constraints", ignore_stops_oob=self.ignore_stops_oob).compute(state, cho) * constraint_weight
-            )
-        else:
-            constraint_cost = state.drive_times.new_zeros(state.batch_size)
-        return cost_components, weights, constraint_cost
-
     def get_cost_components(self, state, result=None, include_constraint=True, no_norm=False):
-        if result is None:
-            result = self._cost_helper(state)
-        components, _, constraint_cost = self._compute_cost_components_from_result(state, result, no_norm=no_norm)
-        if include_constraint:
-            components = components + constraint_cost[:, None]
-        return components
+        result = self(state, no_norm=no_norm) if result is None else result
+        components = torch.stack([result.raw_goals[name] for name in GOAL_NAMES], -1) if no_norm else result.components
+        return components + result.constraint_cost[:, None] if include_constraint else components
 
     def forward(self, state, constraint_weight=None, no_norm=False, return_per_route_riders=False):
-        result = self._cost_helper(state, return_per_route_riders)
-        components, weights, constraints = self._compute_cost_components_from_result(
-            state, result, constraint_weight=constraint_weight, no_norm=no_norm
-        )
-        indices = [GOAL_NAMES.index(name) for name in self.objectives]
-        result.goals = components[:, indices]
-        result.preferences = weights[:, indices]
-        result.components = components
-        result.constraint_cost = constraints
-        penalty_weight = self._expand_batch_value(
-            self.constraint_violation_weight if constraint_weight is None else constraint_weight,
-            state.batch_size,
-            state.device,
-        )
-        raw_constraint = (
-            criterion("constraints", ignore_stops_oob=self.ignore_stops_oob).compute(state, result)
-            if bool((penalty_weight != 0).any())
-            else constraints
-        )
-        result.penalties = raw_constraint[:, None]
-        result.penalty_weights = [penalty_weight]
-        if self.penalty_weights["adjustment"] > 0 and state.adjustment_seed.numel():
-            penalty = criterion(
-                "adjustment",
-                gap=self.adjustment_degree_gap,
-                mode=self.adjustment_degree_mode,
-                target=self.adjustment_degree_target,
-                objective=self.adjustment_degree_objective,
-            ).compute(state)
-            result.add_penalty(penalty, self.penalty_weights["adjustment"])
-        else:
-            result.add_penalty(constraints.new_zeros(state.batch_size), 1.0)
-        assert result.cost.isfinite().all(), "invalid cost was computed!"
-        assert (result.cost >= 0).all(), "cost is negative!"
-        return result
+        from .evaluate import evaluate
+        return evaluate(state, self, constraint_weight=constraint_weight, no_norm=no_norm,
+                        return_per_route_riders=return_per_route_riders)
 
 
 def check_for_duplicate_routes(routes_tensor):

@@ -101,8 +101,6 @@ class RouteGenBatchState:
         self._finished_routes = [[] for _ in range(graph_data.num_graphs)]
         self._route_update_deferred = False
         self._redundancy_features_enabled = False
-        self._adjustment_gap = 0.1
-        self._adjustment_mode = "paper"
 
         # the object isn't ready to give this property yet, so find it here
         dev = graph_data[STOP_KEY].x.device
@@ -1118,12 +1116,31 @@ class RouteGenBatchState:
             raise ValueError("adjustment seed batch size differs from state")
         self.extra_data.adjustment_seed = seed.clone()
 
-    def set_adjustment_conditioning(self, target, weight=None, seed_routes=None, gap=0.1, mode="paper"):
+    def adjustment_routes(self):
+        """Read the current network in reference-slot order; preserve every stop."""
+        if self.route_slot_context.numel():
+            width = max(self.route_slot_context.shape[-1], self.current_routes.shape[-1])
+            routes = to_routes(self.route_slot_context, width=width).clone()
+            active = self.active_route_idx >= 0
+            indices = self.batch_indices[active]
+            current = torch.nn.functional.pad(self.current_routes, (0, width - self.current_routes.shape[-1]), value=-1)
+            context_count = (self.route_slot_context >= 0).any(-1).sum(-1)
+            context_count = context_count - (self.route_slot_context[self.batch_indices, self.active_route_idx.clamp_min(0)] >= 0).any(-1).long()
+            finalized = self.n_finished_routes > context_count
+            finished = to_routes(self._finished_routes, n_routes=int(self.n_routes_to_plan.max()), width=width).to(self.device)
+            last_finished = finished[self.batch_indices, (self.n_finished_routes.long() - 1).clamp_min(0)]
+            current = torch.where(finalized[:, None], last_finished, current)
+            routes[indices, self.active_route_idx[active]] = current[active]
+            return routes
+        routes = to_routes(self._finished_routes, n_routes=int(self.n_routes_to_plan.max()), width=self.current_routes.shape[-1]).to(self.device)
+        active = (self.current_routes >= 0).any(-1) & (self.n_finished_routes < self.n_routes_to_plan)
+        routes[self.batch_indices[active], self.n_finished_routes[active].long()] = self.current_routes[active]
+        return routes
+
+    def set_adjustment_conditioning(self, target, weight=None, seed_routes=None):
         """Store conditioning values; the feature set selects their columns."""
         bs = self.batch_size
         dev = self.device
-        self._adjustment_gap = float(gap)
-        self._adjustment_mode = str(mode)
         tt = torch.as_tensor(target, device=dev, dtype=torch.float32)
         if tt.numel() == 1:
             tt = tt.expand(bs)

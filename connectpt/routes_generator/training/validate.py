@@ -14,7 +14,6 @@ from ..policy.generate import evaluate_policy
 from ..policy.rollout import bind_env
 from ..env.state import RouteGenBatchState
 from ..env.base import EnvParams
-from ..objectives.penalties import STATE_PENALTIES
 from ..objectives.pareto import canonical_network, summarize_evaluation
 from ..objectives.metrics import evaluate_network
 from .records import ParetoRecord, ValidationRecord
@@ -61,7 +60,7 @@ class Validation:
         for graphs, seeds, route_count in self.batches(progress):
             self.env.params = replace(self.env.params, n_routes=route_count)
             self.env.reset(graphs.to(self.device), self.cost.get_weights(), seeds, normalize=False)
-            metrics, routes = evaluate_policy(
+            result, routes = evaluate_policy(
                 self.env,
                 policy,
                 graphs.to(self.device),
@@ -70,8 +69,9 @@ class Validation:
                 1,
                 seed_networks=seeds,
             )
+            metrics = evaluate_network(result)
             collected.append(metrics)
-            results.append(self.cost(self.env.state))
+            results.append(result)
         metrics = {key: torch.cat([item[key] for item in collected]) for key in collected[0]}
         log(
             logger_list,
@@ -83,7 +83,7 @@ class Validation:
                 },
                 penalty={
                     name: float(torch.cat([r.penalties[:, i] for r in results]).mean())
-                    for i, name in enumerate(STATE_PENALTIES)
+                    for i, name in enumerate(results[0].penalty_names)
                 },
                 monitor={
                     name: float(metrics[key].mean())
@@ -209,7 +209,7 @@ def evaluate_preferences(
                     )
                     env = bind_env(template, model, fixed_cost, normalize=False)
                     env.params = profile.env
-                    _, routes = evaluate_policy(
+                    result, routes = evaluate_policy(
                         env,
                         model,
                         loader,
@@ -218,27 +218,15 @@ def evaluate_preferences(
                         1,
                         seed_networks=seeds,
                     )
-                    state = RouteGenBatchState(
-                        Batch.from_data_list(chunk).to(device),
-                        fixed_cost.constants,
-                        int(profile.env.n_routes),
-                        int(profile.env.min_route_len),
-                        int(profile.env.max_route_len),
-                        preferences=fixed_cost.get_weights(),
-                    )
-                    state.add_new_routes(routes.to(device))
-                    if seeds is not None:
-                        state.set_adjustment_seed(seeds)
-                    result = fixed_cost(state)
                     metrics = evaluate_network(result)
-                    from ..objectives.preferences import GOAL_NAMES
-
-                    columns = [GOAL_NAMES.index(name) for name in fixed_cost.objectives]
-                    pure = fixed_cost.get_cost_components(state, result, include_constraint=False)[:, columns]
-                    penalized = fixed_cost.get_cost_components(state, result)[:, columns]
+                    pure = result.goals
+                    penalty_cost = torch.zeros_like(result.cost)
+                    for j, weight in enumerate(result.penalty_weights):
+                        penalty_cost = penalty_cost + result.penalties[:, j] * weight
+                    penalized = pure + penalty_cost[:, None]
                     feasible = ~result.are_constraints_violated()
                     for i in range(len(chunk)):
-                        route_list = [r.cpu().tolist() for r in state.routes[i]]
+                        route_list = result.batch_routes[i].cpu().tolist()
                         rows.append(
                             dict(
                                 graph=start + i,
@@ -252,7 +240,7 @@ def evaluate_preferences(
                                 penalized_1=float(penalized[i, 1]),
                                 scalar_cost=float(result.cost[i]),
                                 objective={name: float(result.goals[i, j]) for j, name in enumerate(cost.objectives)},
-                                penalty={name: float(result.penalties[i, j]) for j, name in enumerate(STATE_PENALTIES)},
+                                penalty={name: float(result.penalties[i, j]) for j, name in enumerate(result.penalty_names)},
                                 monitor={
                                     name: float(metrics[key][i])
                                     for name, key in (

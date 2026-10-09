@@ -7,8 +7,6 @@ from ..env.state import RouteGenBatchState
 from ..city.shortest_paths import reconstruct_all_paths
 from ..common.logging import log as log_metrics
 from ..objectives.metrics import evaluate_network
-from ..objectives.preferences import scalarize
-from ..objectives.penalties import STATE_PENALTIES, adjustment_degree, adjustment_penalty
 from .records import MONITOR_FIELDS, SearchBestRecord, SearchRecord
 from .operators import get_direct_sat_dmd
 
@@ -72,17 +70,17 @@ def _ensure_selection_stats_bucket(mutation_counts_out):
     return bucket
 
 
-def _record_selection_stats(mutation_counts_out, parent_idxs, bee_objective_costs):
+def _record_selection_stats(mutation_counts_out, parent_idxs, bee_costs):
     """Record which population members survive the selection step."""
     if mutation_counts_out is None:
         return
     bucket = _ensure_selection_stats_bucket(mutation_counts_out)
-    parent_costs = bee_objective_costs.gather(1, parent_idxs)
-    best_costs = bee_objective_costs.min(dim=1, keepdim=True).values
+    parent_costs = bee_costs.gather(1, parent_idxs)
+    best_costs = bee_costs.min(dim=1, keepdim=True).values
 
     bucket["parent_copies"] += int(parent_idxs.numel())
     bucket["nonbest_parent_copies"] += int((parent_costs > best_costs).sum().item())
-    bucket["worse_parent_copies"] += int((parent_costs > bee_objective_costs).sum().item())
+    bucket["worse_parent_copies"] += int((parent_costs > bee_costs).sum().item())
 
 
 def _choose_route_indices(bee_networks, n_routes):
@@ -109,13 +107,7 @@ def run_colony(
     force_linking_unlinked,
     logger_list,
     mutation_counts_out,
-    adjustment_degree_weight,
-    adjustment_degree_gap,
-    adjustment_degree_mode,
-    adjustment_degree_objective,
-    adjustment_degree_target,
     process_neural_bees_sequentially,
-    iteration_callback=None,
 ):
     """Mutate, accept strict improvements and select recruiter networks."""
     plan.validate(n_bees)
@@ -135,10 +127,7 @@ def run_colony(
     n_init_routes = init_network.shape[1]
     best_networks[:, :n_init_routes, : init_network.shape[-1]] = init_network
     reference_networks = best_networks.clone()
-    use_adjustment_penalty = adjustment_degree_weight > 0
-    if use_adjustment_penalty:
-        state.set_adjustment_seed(reference_networks)
-    route_count = max(float(n_routes.item()), 1.0)
+    state.set_adjustment_seed(reference_networks)
 
     # expand state to networks
 
@@ -170,60 +159,36 @@ def run_colony(
         if planning_model is not None:
             normalize_nodes(single_bee_states, planning_model.node_norm, planning_model.feature_set)
 
-    metric_names = cost_obj.get_metric_names()
-
     def batched_cost_fn(bee_networks):
         bee_states.replace_routes(bee_networks.flatten(0, 1))
 
-        result = cost_obj(bee_states)
-
-        costs = scalarize(result.goals, result.preferences, result.penalties, result.penalty_weights).reshape(
-            batch_size, n_bees
-        )
-        metrics = evaluate_network(result)
-        other_metrics = torch.stack(list(metrics.values()), dim=-1)
-        other_metrics = other_metrics.reshape(batch_size, n_bees, -1)
-        return costs, other_metrics
+        return cost_obj(bee_states)
 
     # initialize bees' networks
     # batch size x n_bees x n_routes x max_n_nodes
     bee_networks = best_networks[:, None].repeat(1, n_bees, 1, 1)
     # evaluate and record the reward of the initial network
-    bee_raw_costs, bee_metrics = batched_cost_fn(bee_networks)
-    bee_adjustment_degrees = torch.zeros_like(bee_raw_costs)
-    bee_adjustment_penalties = adjustment_penalty(
-        bee_adjustment_degrees,
-        objective=adjustment_degree_objective,
-        target=adjustment_degree_target,
-    )
-    # adj already included in bee_raw_costs via cost_obj (unified penalty)
-    bee_objective_costs = bee_raw_costs
-    best_objective_costs, best_idxs = bee_objective_costs.min(1)
-    best_raw_costs = bee_raw_costs[batch_idxs, best_idxs]
-    best_metrics = bee_metrics[batch_idxs, best_idxs]
-    best_adjustment_degrees = bee_adjustment_degrees[batch_idxs, best_idxs]
-    best_adjustment_penalties = bee_adjustment_penalties[batch_idxs, best_idxs]
+    bee_evaluation = batched_cost_fn(bee_networks)
+    bee_costs = bee_evaluation.cost.reshape(batch_size, n_bees).clone()
+    best_costs, best_idxs = bee_costs.min(1)
+    best_evaluation = bee_evaluation.select(batch_idxs * n_bees + best_idxs)
 
     def log_best(step):
-        measured = state.clone()
-        measured.replace_routes(best_networks)
-        result = cost_obj(measured)
+        result = best_evaluation
+        metrics = evaluate_network(result)
         record = SearchBestRecord(
-            float(best_raw_costs.mean()),
-            {name: float(result.goals[:, i].mean()) for i, name in enumerate(cost_obj.objectives)},
-            {name: float(result.penalties[:, i].mean()) for i, name in enumerate(STATE_PENALTIES)},
-            {
-                MONITOR_FIELDS[name]: float(value.mean())
-                for name, value in zip(metric_names, best_metrics.unbind(-1))
-                if name in MONITOR_FIELDS and MONITOR_FIELDS[name] in cost_obj.monitor
-            },
+            float(result.cost.mean()),
+            {name: float(result.goals[:, i].mean()) for i, name in enumerate(result.goal_names)},
+            {name: float(result.penalties[:, i].mean()) for i, name in enumerate(result.penalty_names)},
+            {MONITOR_FIELDS[name]: float(value.mean()) for name, value in metrics.items()
+             if name in MONITOR_FIELDS and MONITOR_FIELDS[name] in cost_obj.monitor},
         )
         log_metrics(logger_list, record, step)
 
     log_best(0)
 
     cost_history = torch.zeros((batch_size, n_iterations + 1), device=dev)
-    cost_history[:, 0] = best_raw_costs
+    cost_history[:, 0] = best_costs
 
     log_metrics(logger_list, SearchRecord(0.0), 0)
     for iteration in tqdm(range(n_iterations), disable=silent):
@@ -232,9 +197,6 @@ def run_colony(
             for mi in range(mod_steps_per_pass):
 
                 chosen_route_idxs = _choose_route_indices(bee_networks, n_routes)
-                gather_idx = chosen_route_idxs[..., None, None]
-                gather_idx = gather_idx.expand(-1, -1, -1, max_n_nodes)
-                old_modified_routes = bee_networks.gather(2, gather_idx).squeeze(2)
                 _record_attempted_mutations(mutation_counts_out, plan.summary())
                 new_bee_networks, mutation_types = plan.get_mutants(
                     bee_networks,
@@ -247,48 +209,16 @@ def run_colony(
                     env_state=bee_states,
                     cost=cost_obj,
                     single_bee_env_state=single_bee_states,
-                    adj_condition_target=adjustment_degree_target,
-                    adj_condition_weight=adjustment_degree_weight,
+                    adj_condition_target=cost_obj.adjustment_degree_target,
+                    adj_condition_weight=cost_obj.adjustment_degree_weight,
                     process_neural_bees_sequentially=process_neural_bees_sequentially,
                 )
 
-                new_bee_raw_costs, new_bee_metrics = batched_cost_fn(new_bee_networks)
-
-                if use_adjustment_penalty:
-                    reference_routes = (
-                        reference_networks[:, None].expand(-1, n_bees, -1, -1).gather(2, gather_idx).squeeze(2)
-                    )
-                    old_route_adjustments = adjustment_degree(
-                        old_modified_routes,
-                        reference_routes,
-                        cost_obj.symmetric_routes,
-                        gap=adjustment_degree_gap,
-                        mode=adjustment_degree_mode,
-                    )
-                    new_modified_routes = new_bee_networks.gather(2, gather_idx).squeeze(2)
-                    new_route_adjustments = adjustment_degree(
-                        new_modified_routes,
-                        reference_routes,
-                        cost_obj.symmetric_routes,
-                        gap=adjustment_degree_gap,
-                        mode=adjustment_degree_mode,
-                    )
-                    new_bee_adjustment_degrees = (
-                        bee_adjustment_degrees + (new_route_adjustments - old_route_adjustments) / route_count
-                    )
-                else:
-                    new_bee_adjustment_degrees = bee_adjustment_degrees
-
-                new_bee_adjustment_penalties = adjustment_penalty(
-                    new_bee_adjustment_degrees,
-                    objective=adjustment_degree_objective,
-                    target=adjustment_degree_target,
-                )
-                # adj already included in new_bee_raw_costs via cost_obj
-                new_bee_objective_costs = new_bee_raw_costs
+                new_evaluation = batched_cost_fn(new_bee_networks)
+                new_bee_costs = new_evaluation.cost.reshape(batch_size, n_bees)
 
                 # greedy acceptance: keep only strict improvements
-                accepted_idxs = (new_bee_objective_costs - bee_objective_costs) < 0
+                accepted_idxs = (new_bee_costs - bee_costs) < 0
                 accepted_count += int(accepted_idxs.sum())
 
                 _record_accepted_mutations(
@@ -298,51 +228,29 @@ def run_colony(
                     plan.group_names(),
                 )
                 bee_networks[accepted_idxs] = new_bee_networks[accepted_idxs]
-                bee_raw_costs[accepted_idxs] = new_bee_raw_costs[accepted_idxs]
-                bee_objective_costs[accepted_idxs] = new_bee_objective_costs[accepted_idxs]
-                bee_adjustment_degrees[accepted_idxs] = new_bee_adjustment_degrees[accepted_idxs]
-                bee_adjustment_penalties[accepted_idxs] = new_bee_adjustment_penalties[accepted_idxs]
-                bee_metrics[accepted_idxs] = new_bee_metrics[accepted_idxs]
+                bee_costs[accepted_idxs] = new_bee_costs[accepted_idxs]
+                bee_evaluation = bee_evaluation.updated(new_evaluation, accepted_idxs.flatten())
 
             # do "backward pass"
 
             # update the best solution found so far
-            current_best_objective_cost, current_best_idx = bee_objective_costs.min(1)
-            is_improvement = current_best_objective_cost < best_objective_costs
+            current_best_objective_cost, current_best_idx = bee_costs.min(1)
+            is_improvement = current_best_objective_cost < best_costs
             improvement_idx = current_best_idx[is_improvement]
-            best_objective_costs[is_improvement] = current_best_objective_cost[is_improvement]
+            best_costs[is_improvement] = current_best_objective_cost[is_improvement]
             best_networks[is_improvement] = bee_networks[is_improvement, improvement_idx]
-            best_raw_costs[is_improvement] = bee_raw_costs[is_improvement, improvement_idx]
-            best_adjustment_degrees[is_improvement] = bee_adjustment_degrees[is_improvement, improvement_idx]
-            best_adjustment_penalties[is_improvement] = bee_adjustment_penalties[is_improvement, improvement_idx]
-            cost_history[:, iteration + 1] = best_raw_costs
-            new_best = bee_metrics[is_improvement, improvement_idx]
-            best_metrics[is_improvement] = new_best
-
-            # Live checkpoint: whenever the incumbent improves, hand the current
-            # best network (+ its costs/metrics) to an optional callback so a
-            # caller can persist it -- so an early stop never loses the best.
-            if iteration_callback is not None and bool(is_improvement.any()):
-                try:
-                    iteration_callback(
-                        int(iteration),
-                        best_networks,
-                        best_objective_costs,
-                        best_adjustment_degrees,
-                        best_metrics,
-                        metric_names,
-                    )
-                except Exception as _cb_exc:
-                    log.warning(f"bee_colony iteration_callback failed: {_cb_exc}")
+            candidate_best = bee_evaluation.select(batch_idxs * n_bees + current_best_idx)
+            best_evaluation = best_evaluation.updated(candidate_best, is_improvement)
+            cost_history[:, iteration + 1] = best_costs
 
             # decide whether each bee is a recruiter or follower
-            max_bee_costs, _ = bee_objective_costs.max(dim=1)
-            min_bee_costs, _ = bee_objective_costs.min(dim=1)
+            max_bee_costs, _ = bee_costs.max(dim=1)
+            min_bee_costs, _ = bee_costs.min(dim=1)
             spread = max_bee_costs - min_bee_costs
             # avoid division by 0
             spread[spread == 0] = 1
 
-            qualities = (max_bee_costs[:, None] - bee_objective_costs) / spread[:, None]
+            qualities = (max_bee_costs[:, None] - bee_costs) / spread[:, None]
             min_quality, _ = qualities.min(1)
             follow_probs = (-qualities + min_quality[:, None]).exp()
             are_recruiters = follow_probs < torch.rand(n_bees, device=dev)
@@ -364,15 +272,12 @@ def run_colony(
             recruiters = recruit_probs.multinomial(n_bees, replacement=True)
             recruiters[no_valid_recruiters] = bee_idxs
             recruiters[are_recruiters] = bee_idxs[None].expand(batch_size, -1)[are_recruiters]
-            _record_selection_stats(mutation_counts_out, recruiters, bee_objective_costs)
+            _record_selection_stats(mutation_counts_out, recruiters, bee_costs)
 
             # update the networks and costs of the followers
             bee_networks = bee_networks[batch_idxs[:, None], recruiters]
-            bee_raw_costs = bee_raw_costs[batch_idxs[:, None], recruiters]
-            bee_objective_costs = bee_objective_costs[batch_idxs[:, None], recruiters]
-            bee_adjustment_degrees = bee_adjustment_degrees[batch_idxs[:, None], recruiters]
-            bee_adjustment_penalties = bee_adjustment_penalties[batch_idxs[:, None], recruiters]
-            bee_metrics = bee_metrics[batch_idxs[:, None], recruiters]
+            bee_costs = bee_costs[batch_idxs[:, None], recruiters]
+            bee_evaluation = bee_evaluation.select((batch_idxs[:, None] * n_bees + recruiters).flatten())
 
         log_best(iteration + 1)
         log_metrics(
@@ -383,8 +288,4 @@ def run_colony(
 
     # return the best solution
     state.replace_routes(best_networks)
-    # reset the unified adjustment-degree penalty so the shared cost_obj does
-    # not carry this run's seed into any later evaluation.
-    if use_adjustment_penalty:
-        state.set_adjustment_seed(torch.full((state.batch_size, 0, 0), -1.0, device=dev))
-    return state, cost_history
+    return state, best_evaluation, cost_history

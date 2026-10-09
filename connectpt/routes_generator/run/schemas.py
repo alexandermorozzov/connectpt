@@ -67,8 +67,6 @@ class AdjustmentParams:
     adjustment_degree_weight: float
     adjustment_degree_target: float
     adjustment_degree_objective: str
-    adjustment_degree_gap: float
-    adjustment_degree_mode: str
 
     @classmethod
     def from_cost(cls, cost_kwargs):

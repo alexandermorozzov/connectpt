@@ -4,7 +4,8 @@ from torch_geometric.loader import DataLoader
 
 from ..env.state import RouteGenBatchState
 from ..network.routes import to_routes
-from ..objectives.metrics import evaluate_network
+from ..objectives.evaluate import Evaluation
+from ..objectives.preferences import batch_value
 from .rollout import bind_env, rollout
 
 
@@ -34,8 +35,8 @@ def _finish(env, policy, greedy, revisit):
             env.state.set_current_routes(route)
             route_env = bind_env(env.state, policy, env.cost, single_route=True, max_trim_actions=1)
             rollout(route_env, policy, greedy, record_states=False)
+    env.bind(env.state)
     if not env.state.is_done().all():
-        env.bind(env.state)
         rollout(env, policy, greedy, record_states=False)
     return env.state
 
@@ -83,7 +84,7 @@ def generate(
     if current_routes is not None:
         currents = to_routes(current_routes, width=state.max_n_nodes).reshape(-1, state.max_n_nodes)
         currents = currents.expand(batch_size, -1).to(state.device).repeat(n, 1)
-    all_routes, all_costs = [], []
+    all_routes, all_costs, evaluations = [], [], []
     for start in range(0, len(graphs), sample_batch_size):
         end = min(start + sample_batch_size, len(graphs))
         indices = torch.arange(start, end, device=state.device) % batch_size
@@ -93,26 +94,32 @@ def generate(
             state.n_routes_to_plan[indices],
             state.min_route_len[indices],
             state.max_route_len[indices],
-            preferences=env.cost.get_weights(),
+            preferences={name: batch_value(value, batch_size, state.device)[indices].clone()
+                         for name, value in state.cost_weights.items()},
         )
+        if state.adjustment_seed.numel():
+            sample_state.set_adjustment_seed(state.adjustment_seed[indices])
         _seed(
             sample_state, None if seeds is None else seeds[start:end], None if currents is None else currents[start:end]
         )
         sample_env = bind_env(sample_state, policy, env.cost, normalize=False)
         _finish(sample_env, policy, False, None if revisits is None else revisits[start:end])
         all_routes.extend(sample_state.routes)
-        all_costs.append(env.cost(sample_state).cost)
+        evaluations.append(sample_env.result)
+        all_costs.append(sample_env.result.cost)
     costs = torch.cat(all_costs).reshape(n, batch_size)
     best = costs.argmin(0)
     routes = to_routes([all_routes[int(best[i]) * batch_size + i] for i in range(batch_size)])
-    state.add_new_routes(routes.to(state.device))
+    state.replace_routes(routes.to(state.device))
+    selected = Evaluation.concatenate(evaluations).select(best * batch_size + state.batch_indices)
+    env.bind(state, normalize=False, evaluation=selected)
     return routes.to(state.device)
 
 
 def _generate_edit(env, policy, mode, n, networks):
     original = env.state
     seed = to_routes(networks).to(original.device)
-    candidates, costs = [], []
+    candidates, costs, evaluations = [], [], []
     for _ in range(n if mode == "sample" else 1):
         working = seed.clone()
         for route_idx in range(seed.shape[1]):
@@ -138,7 +145,9 @@ def _generate_edit(env, policy, mode, n, networks):
         final.add_new_routes(working)
         final.set_adjustment_seed(seed)
         candidates.append(working)
-        costs.append(env.cost(final).cost)
+        result = env.cost(final)
+        evaluations.append(result)
+        costs.append(result.cost)
     best = torch.stack(costs).argmin(0)
     routes = to_routes([candidates[int(best[bi])][bi] for bi in range(original.batch_size)])
     final = RouteGenBatchState(
@@ -151,21 +160,21 @@ def _generate_edit(env, policy, mode, n, networks):
     )
     final.add_new_routes(routes)
     final.set_adjustment_seed(seed)
-    env.bind(final, normalize=False)
+    selected = Evaluation.concatenate(evaluations).select(best * original.batch_size + original.batch_indices)
+    env.bind(final, normalize=False, evaluation=selected)
     env.network = routes
     return routes
 
 
 @torch.no_grad()
 def evaluate_policy(env, policy, graphs, prefs, mode, n=1, *, seed_networks=None):
-    """Return per-network metrics without consuming a second policy rollout."""
+    """Return the prepared Evaluation and networks from the generation rollout."""
     batches = graphs if isinstance(graphs, DataLoader) else (graphs,)
-    metrics, networks = [], []
+    evaluations, networks = [], []
     device = next(policy.parameters()).device
     for data in batches:
         env.reset(data.to(device), prefs, seed_networks if env.action_spec.role == "edit" else None, normalize=False)
         routes = generate(env, policy, mode, n, seed_networks=seed_networks)
-        metrics.append(evaluate_network(env.state, env.cost))
+        evaluations.append(env.result)
         networks.extend([[route for route in network if (route >= 0).any()] for network in routes])
-    combined = {key: torch.cat([row[key] for row in metrics]) for key in metrics[0]}
-    return combined, to_routes(networks).to(device)
+    return Evaluation.concatenate(evaluations), to_routes(networks).to(device)

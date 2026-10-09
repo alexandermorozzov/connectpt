@@ -6,7 +6,7 @@ from .masks import ActionMask
 from .state import RouteGenBatchState
 from ..city.graph import to_batch
 from ..network.routes import to_routes
-from ..objectives.penalties import ACTION_PENALTIES
+from ..objectives.const import ACTION_PENALTIES
 
 
 class ConstructionEnv(Env):

@@ -8,7 +8,8 @@ from .masks import ActionMask
 from .state import RouteGenBatchState
 from ..city.graph import to_batch
 from ..network.routes import to_routes
-from ..objectives.penalties import ACTION_PENALTIES, edit_step_penalty, forced_halt_penalty
+from ..objectives.const import ACTION_PENALTIES
+from ..objectives.penalties import edit_step_penalty, forced_halt_penalty
 
 
 class EditEnv(Env):
@@ -41,8 +42,6 @@ class EditEnv(Env):
                 self.cost.adjustment_degree_target,
                 self.cost.penalty_weights["adjustment"],
                 routes,
-                gap=self.cost.adjustment_degree_gap,
-                mode=self.cost.adjustment_degree_mode,
             )
         return self.bind(self.state, normalize=normalize)
 
@@ -60,9 +59,9 @@ class EditEnv(Env):
             network[bi, self.route_idx, : route.numel()] = route
         return network
 
-    def bind(self, state, *, normalize=True, single_route=False):
+    def bind(self, state, *, normalize=True, single_route=False, evaluation=None):
         self.trim_counts = torch.zeros(state.batch_size, device=state.device, dtype=torch.long)
-        return super().bind(state, normalize=normalize, single_route=single_route)
+        return super().bind(state, normalize=normalize, single_route=single_route, evaluation=evaluation)
 
     def forced_halt(self):
         limit = self.params.max_route_edit_steps

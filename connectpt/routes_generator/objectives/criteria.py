@@ -1,107 +1,62 @@
-"""Named, pure criteria used as objectives, penalties or monitors."""
-from abc import ABC, abstractmethod
+"""Criterion factories consume shared physical results, never rescore a state."""
+from dataclasses import dataclass
+
+from .components import _finite_time_diameter
+from .penalties import constraint_penalty, adjustment_penalty
 
 
-from .preferences import GOAL_NAMES
-from .penalties import PENALTIES
+@dataclass(frozen=True)
+class Criterion:
+    name: str
+    value: object
+    normalize: object = None
+
+    def compute(self, state, result, *, no_norm=False):
+        value = self.value(state, result)
+        return value if no_norm or self.normalize is None else self.normalize(state, value)
 
 
-class Criterion(ABC):
-    @property
-    @abstractmethod
-    def name(self):
-        pass
-
-    @abstractmethod
-    def compute(self, state):
-        """Return one value per graph."""
+def _att(state, result):
+    served = result.total_demand - result.unserved_demand
+    value = result.mean_demand_time * served + result.unserved_demand * _finite_time_diameter(state.drive_times) * 2
+    return value / result.total_demand
 
 
-class NetworkCriterion(Criterion):
-    def __init__(self, name):
-        self._name = name
-
-    @property
-    def name(self):
-        return self._name
-
-    def compute(self, state, result=None, *, no_norm=False):
-        from .components import PhysicalCost
-        from .components import _finite_time_diameter
-
-        values = (
-            result
-            if result is not None
-            else PhysicalCost(
-                state.mean_stop_time[0].item(), state.transfer_time_s[0].item(), state.symmetric_routes
-            )._cost_helper(state)
-        )
-        diameter = _finite_time_diameter(state.drive_times)
-        if self.name == "ATT":
-            served = values.total_demand - values.unserved_demand
-            value = values.mean_demand_time * served + values.unserved_demand * diameter * 2
-            value /= values.total_demand
-            return value if no_norm else value / diameter
-        if self.name == "RTT":
-            value = values.total_route_time
-            return value if no_norm else value / (diameter * state.n_routes_to_plan + 1e-6)
-        if self.name == "WMC":
-            value = values.median_connectivity_weighted
-            return value if no_norm else value / diameter
-        if self.name == "n_disconnected":
-            return values.n_disconnected_demand_edges
-        return (values.trips_at_transfers / values.total_demand[:, None])[
-            :, ("d0", "d1", "d2", "d_un").index(self.name)
-        ] * 100
+def _time(state, value):
+    return value / _finite_time_diameter(state.drive_times)
 
 
-class PenaltyCriterion(Criterion):
-    def __init__(self, name, **parameters):
-        self._name = name
-        self.parameters = parameters
+def _rtt(state, value):
+    return value / (_finite_time_diameter(state.drive_times) * state.n_routes_to_plan + 1e-6)
 
-    @property
-    def name(self):
-        return self._name
 
-    def compute(self, state, result=None):
-        from .penalties import constraint_penalty, adjustment_degree, adjustment_penalty
-        from .penalties import edit_step_penalty, forced_halt_penalty
-        from ..network.routes import to_routes
+def _constraints(*, ignore_stops_oob):
+    return Criterion("constraints", lambda state, result: constraint_penalty(state, result, ignore_stops_oob))
 
-        if self.name == "constraints":
-            if result is None:
-                from .components import PhysicalCost
 
-                result = PhysicalCost(
-                    state.mean_stop_time[0].item(), state.transfer_time_s[0].item(), state.symmetric_routes
-                )._cost_helper(state)
-            return constraint_penalty(state, result, self.parameters["ignore_stops_oob"])
-        if self.name == "adjustment":
-            current = to_routes(state.routes).to(state.device)
-            seed = state.adjustment_seed.to(state.device)
-            nr, width = min(current.shape[1], seed.shape[1]), min(current.shape[-1], seed.shape[-1])
-            degrees = adjustment_degree(
-                current[:, :nr, :width],
-                seed[:, :nr, :width],
-                state.symmetric_routes,
-                gap=self.parameters["gap"],
-                mode=self.parameters["mode"],
-            )
-            network_degree = degrees.sum(-1) / max(float(current.shape[1]), 1.0)
-            return adjustment_penalty(network_degree, self.parameters["objective"], self.parameters["target"])
-        if self.name == "edit_step":
-            return edit_step_penalty(self.parameters["action"], self.parameters["active"], 1.0)
-        return forced_halt_penalty(self.parameters["active"], self.parameters["forced"], 1.0)
+def _adjustment(*, target, objective):
+    import torch
+    adjustment_penalty(torch.zeros(1), objective, target)
+    return Criterion("adjustment", lambda state, result: adjustment_penalty(result.adjustment, objective, target)
+                     if state.adjustment_seed.numel() else torch.zeros_like(result.adjustment))
+
+
+def _transfer(name, index):
+    return lambda: Criterion(name, lambda state, result: (result.trips_at_transfers / result.total_demand[:, None])[:, index] * 100)
 
 
 REGISTRY = {
-    **dict.fromkeys((*GOAL_NAMES, "d0", "d1", "d2", "d_un", "n_disconnected"), NetworkCriterion),
-    **dict.fromkeys(PENALTIES, PenaltyCriterion),
+    "ATT": lambda: Criterion("ATT", _att, _time),
+    "RTT": lambda: Criterion("RTT", lambda state, result: result.total_route_time, _rtt),
+    "WMC": lambda: Criterion("WMC", lambda state, result: result.median_connectivity_weighted, _time),
+    **{name: _transfer(name, index) for index, name in enumerate(("d0", "d1", "d2", "d_un"))},
+    "n_disconnected": lambda: Criterion("n_disconnected", lambda state, result: result.n_disconnected_demand_edges),
+    "constraints": _constraints,
+    "adjustment": _adjustment,
 }
 
 
 def criterion(name, **parameters):
     if name not in REGISTRY:
         raise ValueError(f"unknown criterion {name!r}")
-    return REGISTRY[name](name, **parameters)
+    return REGISTRY[name](**parameters)

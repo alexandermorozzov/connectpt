@@ -3,5 +3,3 @@ penalties:
   adjustment: 10.0
 adjustment_degree_target: 0.2
 adjustment_degree_objective: cap
-adjustment_degree_gap: 0.1
-adjustment_degree_mode: paper

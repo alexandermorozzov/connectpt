@@ -20,7 +20,7 @@ from connectpt.routes_generator.run.factory import make_run
 from connectpt.routes_generator.run.config import build_experiment
 from connectpt.routes_generator.run.const import LOGS_DIR, RESULTS_DIR
 from connectpt.routes_generator.run.context import resolve_under_root
-from connectpt.routes_generator.run.network import NetworkRun
+from connectpt.routes_generator.run.evaluation import evaluate_initial, export_evaluation
 from connectpt.routes_generator.objectives.metrics import select_metrics
 from connectpt.routes_generator.network.io import save_route_artifact
 
@@ -102,7 +102,8 @@ def main() -> None:
                             adj_target=adj_target,
                             **common,
                         )
-                        artifact = make_run(cfg).run(dry_run=args.dry_run)
+                        run = make_run(cfg)
+                        artifact = run.run(dry_run=args.dry_run)
                         if args.dry_run:
                             log.info("dry-run OK: %s", artifact.plan)
                             continue
@@ -123,17 +124,15 @@ def main() -> None:
 
                 if not args.no_initial and name not in seen_initial:
                     seen_initial.add(name)
-                    scorer = NetworkRun(cfg)
-                    scorer.setup()
                     for alpha in args.alpha:
                         for adj_target in args.adj_target:
+                            initial_cost = run.cost_obj.with_params(
+                                route_time_weight=alpha, median_connectivity_weight=1-alpha,
+                                adjustment_degree_target=run.cost_obj.adjustment_degree_target if adj_target is None else adj_target,
+                                adjustment_degree_weight=run.cost_obj.adjustment_degree_weight if cfg.sweep.adj_weight is None else cfg.sweep.adj_weight,
+                            )
                             row = select_metrics(
-                                scorer.table(
-                                    artifact.instance,
-                                    alpha=alpha,
-                                    adj_target=adj_target,
-                                    adj_weight=cfg.sweep.adj_weight,
-                                ),
+                                export_evaluation(evaluate_initial(artifact.instance, initial_cost, device=run.context.device), index=0),
                                 cfg.metrics,
                             )
                             row.update(method="Initial", alpha=alpha, adj_target=adj_target, instance=name, seed=0)

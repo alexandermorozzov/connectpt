@@ -13,7 +13,8 @@ from .context import RunContext
 from ..city.instances import InstanceParams
 from .schemas import AdjustmentParams, SearchPaths, SearchRunParams, SweepParams, params
 from .instances import load_instance
-from ..objectives.metrics import evaluate_network, select_metrics
+from ..objectives.metrics import select_metrics
+from .evaluation import export_evaluation
 from ..policy.build import ModelProfileParams, load_policy
 from .config import compose_policy_model, cost_params, policy_profile
 from ..objectives.cost import build_cost
@@ -115,9 +116,17 @@ class SearchRun(ExperimentRun):
             silent=self.run_params.silent,
             logger_list=self.logger_list,
         )
-        routes, metrics = result.routes, result.metrics
+        routes = result.routes
         keep = self.keep_metrics
-        row = evaluate_network(metrics, routes=routes, seed=inst.init_routes, adjustment=self.adjustment)
+        row = export_evaluation(result.evaluation, reduction="mean")
+        evaluation = result.evaluation
+        self.metadata["evaluation_protocol"] = dict(
+            goals=list(evaluation.goal_names), penalties=list(evaluation.penalty_names),
+            preferences=evaluation.preferences.cpu().tolist(),
+            penalty_weights=[value.cpu().tolist() for value in evaluation.penalty_weights],
+            reference_routes=evaluation.reference_routes.cpu().tolist(),
+            adjustment=adjustment,
+        )
         row = select_metrics(row, keep) if keep else row
         row.update(method=label, alpha=alpha, adj_target=adj_target, n_iterations=n_iterations)
         return SearchArtifact(

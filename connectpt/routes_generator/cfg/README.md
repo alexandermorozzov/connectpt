@@ -49,6 +49,11 @@ python scripts/run.py --config-name runs/prepare_dataset
 Поиск и edit-обучение используют одну цель `cost=rtt_wmc`. Штраф за изменение
 сети задаёт `adjustment/cap.yaml`. Выключить штраф: `cost.kwargs.penalties.adjustment=0`
 (в поиске — `--adj-weight 0`). Режим «цель»: `cost.kwargs.adjustment_degree_objective=target`.
+Adjustment рассчитывается по LCS полных последовательностей маршрутов из статьи.
+При `cap` штраф равен `weight · max(adjustment − target, 0)`. Поле `cost` в таблицах
+и логах включает настроенные штрафы; экспорт использует готовый результат оценки.
+Порядок целей задаёт `cost.kwargs.objectives`, дополнительные штрафы —
+`cost.kwargs.penalties` после регистрации вычислителя в `objectives/criteria.py`.
 
 `run.type`: `search`, `training`, `dataset_prepare`.
 Seed запуска задаётся через `run.seed`, выбор CPU — через `run.cpu=true`.
