@@ -10,56 +10,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
 from typing import Any
 
 import torch
 
-from ..city.graph import STOP_KEY, to_batch, SpaceScaleTransform, DemandScaleTransform
+from ..city.graph import STOP_KEY
 from ..city.synthetic import load_graphs
 from ..network.io import load_routes
 from ..network.routes import to_routes
 from .params import EditDatasetParams
+from .curriculum import prepare_curriculum
+from .pipeline import GraphPipeline
+from .split import SplitParams, graph_source_id, prepare_split
 
 
 @dataclass(frozen=True)
-class EditDataset(EditDatasetParams):
+class EditDataset:
+    params: EditDatasetParams
+    train_pipeline: GraphPipeline
+    evaluation_pipeline: GraphPipeline
+
     def prepare(self, cost, batch_size, evaluation, device, env_params, curriculum, resample_preferences):
-        folder = Path(self.dataset_dirname)
+        folder = Path(self.params.dataset_dirname)
         if not folder.is_absolute():
             raise ValueError("edit dataset directory must be an absolute Path")
         module = TrainingDataModule(
-            folder / "raw_graphs_1000.pkl", folder, device, self.min_route_len, self.max_route_len, self.target_n_routes
+            folder / "raw_graphs_1000.pkl", folder, device, self.params.min_route_len,
+            self.params.max_route_len, self.params.target_n_routes, self.train_pipeline, self.evaluation_pipeline,
         )
-        module, stages, train_indices, val_indices = load(module, self, curriculum)
-        data = EditData(module, stages, train_indices, val_indices, batch_size)
-        data.training_count = len(train_indices)
-        data.validation_count = len(val_indices)
+        module, stages, split = load(module, self.params, curriculum)
+        data = EditData(module, stages, split.train, split.validation, split.monitor, batch_size)
+        data.training_count = len(split.train)
+        data.validation_count = len(split.monitor)
         return data, cost
-
-
-@dataclass(frozen=True)
-class CurriculumStage:
-    until: float
-    tiers: tuple[str, ...]
-    label: str
-
-
-@dataclass(frozen=True)
-class Curriculum:
-    stages: tuple[CurriculumStage, ...]
-    train_by_tier: dict
-    validation_by_tier: dict
-
-    def get(self, progress):
-        stage = self.stages[-1]
-        for candidate in self.stages:
-            if progress < candidate.until:
-                stage = candidate
-                break
-        train = torch.cat([self.train_by_tier[t] for t in stage.tiers])
-        validation = torch.cat([self.validation_by_tier[t] for t in stage.tiers])
-        return train, validation, stage.label
 
 
 @dataclass
@@ -72,6 +55,8 @@ class TrainingDataModule:
     min_route_len: int | None
     max_route_len: int | None
     target_n_routes: int | None
+    train_pipeline: GraphPipeline
+    evaluation_pipeline: GraphPipeline
 
     graphs: list = field(default_factory=list, init=False)
     seed_routes: torch.Tensor | None = field(default=None, init=False)
@@ -101,10 +86,8 @@ class TrainingDataModule:
     # --- batching (delegates to the existing builder) -----------------------
     def make_batch(self, indices, *, training: bool = False):
         """Build a (graph_batch, route_batch) for ``indices``."""
-        transforms = (SpaceScaleTransform(0.95, 1.05), DemandScaleTransform(0.9, 1.1)) if training else ()
-        graph_batch = to_batch(
-            [self.graphs[int(i)] for i in indices], self.device, transforms=transforms, edit_features=True
-        )
+        pipeline = self.train_pipeline if training else self.evaluation_pipeline
+        graph_batch = pipeline.prepare([self.graphs[int(i)] for i in indices], self.device)
         node_capacity = int((graph_batch[STOP_KEY].ptr[1:] - graph_batch[STOP_KEY].ptr[:-1]).max())
         routes = to_routes(
             self.seed_routes[torch.as_tensor(indices, dtype=torch.long)],
@@ -112,65 +95,6 @@ class TrainingDataModule:
             width=min(self.seed_routes.shape[-1], node_capacity),
         ).to(self.device)
         return graph_batch, routes
-
-    # --- splits -------------------------------------------------------------
-    def random_split(self, train_fraction: float = 0.9, seed: int = 0):
-        """Seeded permutation split (matches the trainer's fallback split)."""
-        n = len(self.graphs)
-        perm = torch.randperm(n, generator=torch.Generator().manual_seed(seed))
-        train_size = int(train_fraction * n)
-        return perm[:train_size], perm[train_size:]
-
-    def stratified_split(
-        self,
-        tier_of: dict,
-        tiers: Sequence[str],
-        *,
-        train_fraction: float = 0.9,
-        n_val_per_tier: int = 4,
-        seed: int = 0,
-    ):
-        """Per-tier stratified split (reproduces the training notebook cell).
-
-        Returns ``(train_indices, val_indices, monitor_val_indices,
-        train_by_tier, val_by_tier)`` where the *_by_tier maps hold per-tier
-        long tensors (val capped at ``n_val_per_tier`` for the monitor slice).
-        """
-        n = len(tier_of)
-        perm = torch.randperm(n, generator=torch.Generator().manual_seed(seed))
-        by_tier: dict[str, list[int]] = {t: [] for t in tiers}
-        for gi in perm.tolist():
-            by_tier[tier_of[gi]].append(gi)
-
-        train_l, val_l = [], []
-        for tier in tiers:
-            idxs = by_tier[tier]
-            n_val = max(n_val_per_tier, int(round((1 - train_fraction) * len(idxs))))
-            n_val = min(n_val, max(0, len(idxs) - 1))
-            if len(idxs) - n_val < 1 or n_val < n_val_per_tier:
-                raise ValueError(
-                    f"tier '{tier}' has only {len(idxs)} graphs -- too few for " f"n_val_per_tier={n_val_per_tier}"
-                )
-            val_l += idxs[:n_val]
-            train_l += idxs[n_val:]
-
-        train_indices = torch.tensor(train_l, dtype=torch.long)
-        val_indices = torch.tensor(val_l, dtype=torch.long)
-
-        val_by_tier = {t: [] for t in tiers}
-        for gi in val_indices.tolist():
-            val_by_tier[tier_of[gi]].append(gi)
-        monitor_val = torch.tensor(
-            [gi for t in tiers for gi in val_by_tier[t][:n_val_per_tier]],
-            dtype=torch.long,
-        )
-
-        train_by_tier = {t: [] for t in tiers}
-        for gi in train_indices.tolist():
-            train_by_tier[tier_of[gi]].append(gi)
-        train_by_tier_t = {t: torch.tensor(v, dtype=torch.long) for t, v in train_by_tier.items()}
-        val_by_tier_t = {t: torch.tensor(val_by_tier[t][:n_val_per_tier], dtype=torch.long) for t in tiers}
-        return train_indices, val_indices, monitor_val, train_by_tier_t, val_by_tier_t
 
 
 def _graph_tensors(g):
@@ -222,24 +146,22 @@ def load(module, dataset, curriculum_params):
     module.setup()
     meta = pd.read_csv(Path(module.lc_results_dir) / "meta.csv")
     tier_of = dict(zip(meta.graph_index.astype(int), meta.tier))
-    train, validation, monitor, train_by_tier, val_by_tier = module.stratified_split(
-        tier_of,
-        curriculum_params.tiers,
-        train_fraction=dataset.train_fraction,
-        n_val_per_tier=curriculum_params.n_val_per_tier,
-        seed=dataset.split_seed,
+    if set(tier_of) != set(range(len(module.graphs))) or len(meta) != len(module.graphs):
+        raise ValueError('metadata must contain every graph exactly once')
+    tiers = tuple(tier_of[i] for i in range(len(module.graphs)))
+    split = prepare_split(
+        [graph_source_id(g) for g in module.graphs], tiers,
+        SplitParams('stratified', dataset.train_fraction, dataset.split_seed, dataset.n_val_per_tier),
     )
-    stages = tuple(
-        CurriculumStage(float(until), tuple(tiers), label) for until, tiers, label in curriculum_params.schedule
-    )
-    return module, Curriculum(stages, train_by_tier, val_by_tier), train, validation
+    return module, prepare_curriculum(split.train, tiers, curriculum_params), split
 
 
 class EditData:
-    def __init__(self, module, curriculum, train_indices, val_indices, batch_size):
+    def __init__(self, module, curriculum, train_indices, val_indices, monitor_indices, batch_size):
         self.module, self.curriculum = module, curriculum
         self.train_indices, self.val_indices = train_indices, val_indices
         self.all_val_indices = val_indices
+        self.monitor_indices = monitor_indices
         self.batch_size = min(batch_size, len(train_indices))
         self.device = module.device
         self.indices = self.order = None
@@ -259,7 +181,7 @@ class EditData:
             yield self.module.make_batch(indices, training=True)
 
     def get(self, progress):
-        indices, self.val_indices, label = self.curriculum.get(progress)
+        indices, label = self.curriculum.get(progress)
         if self.label != label:
             self.indices, self.label = indices, label
             self.order = indices[torch.randperm(len(indices))]
@@ -302,7 +224,7 @@ class EditData:
     def bootstrap_mask(self, env):
         return ~env.is_done()
 
-    def test(self):
+    def final_validation(self):
         graphs, networks = self.module.make_batch(self.all_val_indices)
         return graphs.to_data_list(), networks
 

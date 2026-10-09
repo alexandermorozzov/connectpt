@@ -4,43 +4,79 @@ import torch
 from dataclasses import dataclass
 from pathlib import Path
 
+from .pipeline import GraphPipeline, GraphView, OnlineGraphs
+from .split import SplitParams, graph_source_id, prepare_split
+
+
+class RawGraphs:
+    """Expose collated legacy graphs without their attached transforms."""
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        return self.dataset.get(index)
+
 
 @dataclass(frozen=True)
 class ConstructionDataset:
     type: str
     kwargs: dict
     test_path: Path
+    train_pipeline: GraphPipeline
+    evaluation_pipeline: GraphPipeline
 
     def prepare(self, cost, batch_size, evaluation, device, env_params, curriculum, resample_preferences):
         data = self.load(batch_size, evaluation, device, env_params, resample_preferences=resample_preferences)
         data.training_count = len(data.train_loader.dataset) if self.type != "dynamic" else None
         data.validation_count = len(data.validation_loader.dataset)
-        data.test_path = self.test_path
         val_cost = cost.with_params(**cost.sample_variable_weights(data.validation_batch_size, device))
         return data, val_cost
 
     def load(self, batch_size, evaluation, device, env_params, *, resample_preferences):
         from torch_geometric.loader import DataLoader
-        from ..city.synthetic import CityGraphDataset, get_default_train_and_eval_split, get_dynamic_training_set
+        from ..city.synthetic import CityGraphDataset, DynamicCityGraphDataset
         from ..city.graph import to_batch
 
         validation_batch_size = batch_size * 4
+        test_graphs = RawGraphs(CityGraphDataset(self.test_path))
+        test_sources = [graph_source_id(g) for g in test_graphs]
         if self.type == "pickle":
-            train, validation = get_default_train_and_eval_split(**self.kwargs)
+            graphs = RawGraphs(CityGraphDataset(self.kwargs['path']))
+            sources = [graph_source_id(g) for g in graphs]
+            split = prepare_split(sources, (),
+                                  SplitParams('ordered', self.kwargs['split'], 0, 0))
+            train = GraphView(graphs, split.train, self.train_pipeline)
+            validation = GraphView(graphs, split.validation, self.evaluation_pipeline)
             train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, drop_last=True)
         elif self.type == "dynamic":
             values = dict(self.kwargs)
-            validation = CityGraphDataset(values.pop("val_path"))
-            train = get_dynamic_training_set(**values)
+            raw_validation = RawGraphs(CityGraphDataset(values.pop("val_path")))
+            sources = [graph_source_id(g) for g in raw_validation]
+            validation = GraphView(raw_validation, range(len(raw_validation)), self.evaluation_pipeline)
+            train = OnlineGraphs(DynamicCityGraphDataset(**values), self.train_pipeline,
+                                 forbidden_sources=[*sources, *test_sources])
             train_loader = DataLoader(train, batch_size=batch_size)
         elif self.type == "mumford":
             graph = to_batch(
                 self.kwargs["city"], scale_dynamically=self.kwargs["scale_dynamically"]
             ).to_data_list()[0]
-            train, validation = [graph] * batch_size, [graph] * validation_batch_size
+            if 'val_path' not in self.kwargs:
+                raise ValueError('benchmark training requires a separate fixed validation source')
+            raw_validation = RawGraphs(CityGraphDataset(self.kwargs['val_path']))
+            source = graph_source_id(graph)
+            sources = [source, *[graph_source_id(g) for g in raw_validation]]
+            if source in sources[1:]:
+                raise ValueError('benchmark city leaks between train and validation')
+            train = GraphView([graph], [0] * batch_size, self.train_pipeline)
+            validation = GraphView(raw_validation, range(len(raw_validation)), self.evaluation_pipeline)
             train_loader = DataLoader(train, batch_size=batch_size)
         else:
             raise ValueError(f"unknown construction dataset type: {self.type}")
+        if set(sources) & set(test_sources):
+            raise ValueError('source city leaks between train/validation and independent test')
         indices = list(range(len(validation)))
         if evaluation.graph_count is not None:
             if evaluation.graph_count < 1:
@@ -64,6 +100,9 @@ class ConstructionDataset:
         )
         data.validation_indices = indices
         data.validation_batch_size = validation_batch_size
+        data.test_graphs = GraphView(test_graphs, range(len(test_graphs)), self.evaluation_pipeline)
+        data.source_ids = tuple(sources)
+        data.test_source_ids = tuple(test_sources)
         return data
 
 
@@ -129,5 +168,4 @@ class ConstructionData:
         return torch.ones(env.state.batch_size, dtype=torch.bool, device=self.device)
 
     def test(self):
-        from ..city.synthetic import CityGraphDataset
-        return CityGraphDataset(self.test_path), None
+        return self.test_graphs, None

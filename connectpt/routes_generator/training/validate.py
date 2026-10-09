@@ -132,16 +132,14 @@ class ConstructionValidation(Validation):
 
 class EditValidation(Validation):
     def batches(self, progress):
-        _, indices, _ = self.data.curriculum.get(progress)
-        for chunk in indices.split(self.data.batch_size):
+        for chunk in self.data.monitor_indices.split(self.data.batch_size):
             graphs, seeds = self.data.module.make_batch(chunk)
             yield graphs, seeds, seeds.shape[1]
 
     def monitor(self, policy, logger_list, step, *, final=False):
         params = self.profile.evaluation
         if params.pareto_enabled and step != self.last_monitor_step and (final or step % params.pareto_period == 0):
-            _, indices, _ = self.data.curriculum.get(self.progress)
-            graphs, seeds = self.data.module.make_batch(indices)
+            graphs, seeds = self.data.module.make_batch(self.data.monitor_indices)
             evaluate_pareto(
                 policy,
                 graphs.to_data_list(),

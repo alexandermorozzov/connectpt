@@ -4,3 +4,16 @@ min_route_len: 8
 max_route_len: 15
 train_fraction: 0.9
 split_seed: 0
+n_val_per_tier: 4
+train_pipeline:
+  space_scale: 0.05
+  demand_scale: 0.1
+  flip: false
+  rotate: 0
+  edit_features: true
+evaluation_pipeline:
+  space_scale: 0
+  demand_scale: 0
+  flip: false
+  rotate: 0
+  edit_features: true

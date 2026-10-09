@@ -72,6 +72,13 @@ construction, выключен в edit. Частоту задаёт `evaluation.
 активных целей; `eu_preference_count` — размер сетки запросов EU.
 `evaluation.final_test` включает итоговую оценку last / best в режимах greedy /
 stochastic; её сетку и выборки задают `preference_count` и `stochastic_samples`.
+В construction она использует отдельный test и пишет `eval/test/…`; в edit — полную
+validation и пишет `eval/final_validation/…`.
+`dataset.n_val_per_tier` задаёт фиксированное число графов каждого тира для текущей
+edit-валидации. `curriculum.enabled` включает расписание `curriculum.schedule`
+только для train. Состав validation от этапа curriculum не зависит.
+`dataset.train_pipeline` и `dataset.evaluation_pipeline` задают масштабирование,
+поворот и отражение графов, а также подготовку признаков construction / edit.
 Протокол и выбранные индексы графов записываются в `run.json`, собранные параметры
 — в `config.yaml`, значения метрик — в `history.csv` и TensorBoard.
 

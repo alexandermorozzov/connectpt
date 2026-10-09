@@ -1,5 +1,4 @@
-tiers: [copy_full, copy_boundary, copy_mixed, covered_dup, lc_clean]
-n_val_per_tier: 4
+enabled: true
 schedule:
   - [0.15, [copy_full], full]
   - [0.30, [copy_full, copy_boundary], "+boundary"]

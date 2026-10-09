@@ -23,6 +23,7 @@ from ..training.data import ConstructionDataset
 from ..training.edit_dataset import CopyTierConfig, EditDataset, build
 from ..training.loop import Budget, train
 from ..training.params import CurriculumParams, DatasetBuildParams, EditDatasetParams, LoopParams, OptimizerParams
+from ..training.pipeline import GraphPipeline, PipelineParams
 from ..training.records import DataCounts
 from ..training.validate import (
     ConstructionValidation, EditValidation, EvaluationParams, EvaluationProfile,
@@ -84,6 +85,8 @@ class TrainingRun(ExperimentRun):
             self.evaluation, self.env_params, self.batch_size, cfg.experiment.symmetric_routes
         )
         dataset_values = OmegaConf.to_container(cfg.dataset, resolve=True)
+        train_pipeline = GraphPipeline(PipelineParams(**dataset_values.pop('train_pipeline')))
+        evaluation_pipeline = GraphPipeline(PipelineParams(**dataset_values.pop('evaluation_pipeline')))
 
         if self.env_name == "edit":
             dataset_values["dataset_dirname"] = resolve_under_root(DATASETS_DIR / dataset_values["dataset_dirname"])
@@ -94,7 +97,10 @@ class TrainingRun(ExperimentRun):
                     dataset_values["kwargs"][key] = resolve_under_root(dataset_values["kwargs"][key])
             if dataset_values["type"] == "mumford":
                 dataset_values["kwargs"]["city"] = load_instance(dataset_values["kwargs"]["city"])
-        self.dataset = {"construction": ConstructionDataset, "edit": EditDataset}[self.env_name](**dataset_values)
+        self.dataset = (EditDataset(EditDatasetParams(**dataset_values), train_pipeline, evaluation_pipeline)
+                        if self.env_name == 'edit' else
+                        ConstructionDataset(**dataset_values, train_pipeline=train_pipeline,
+                                            evaluation_pipeline=evaluation_pipeline))
         self.curriculum = params(CurriculumParams, cfg.curriculum)
         self.checkpoint = resolve_weights_path(self.paths.checkpoint_path, self.paths.weights_dir)
         self.best_checkpoint = self.checkpoint.with_name(
@@ -123,21 +129,15 @@ class TrainingRun(ExperimentRun):
         else:
             validation = dict(
                 split="held-out validation", indices=data.all_val_indices.tolist(),
-                stages=[
-                    dict(
-                        until=stage.until, label=stage.label,
-                        indices=torch.cat([data.curriculum.validation_by_tier[t] for t in stage.tiers]).tolist(),
-                    )
-                    for stage in data.curriculum.stages
-                ],
+                monitor_indices=data.monitor_indices.tolist(),
             )
-            monitor_counts = {stage["label"]: len(stage["indices"]) for stage in validation["stages"]}
+            monitor_counts = {'validation': len(data.monitor_indices)}
         validation.update(
             graph_count=data.validation_count, mode=evaluation.validation_mode,
             action_rng="training torch RNG" if evaluation.validation_mode != "greedy" else "greedy",
             preference_weights={key: torch.as_tensor(value).cpu().tolist() for key, value in val_cost.get_weights().items()},
         )
-        return dict(
+        protocol = dict(
             seed=evaluation.seed,
             grid_action_seed_rule="seed + preference_index * 1000 + sample_index",
             objectives=list(self.cost.objectives),
@@ -157,18 +157,19 @@ class TrainingRun(ExperimentRun):
                     for stage, count in monitor_counts.items()
                 },
             ),
-            test=dict(
-                enabled=evaluation.final_test, preference_count=evaluation.preference_count,
-                preference_grid="linspace(0, 1, preference_count)",
-                samples_per_preference=dict(greedy=1, stochastic=evaluation.stochastic_samples),
-                checkpoints=["last", "best"],
-            ),
             budget=dict(
                 training=asdict(self.loop_params),
                 validation_period=self.loop_params.val_period,
                 validation_before_update=self.loop_params.validate_before_update,
             ),
         )
+        protocol['test' if self.env_name == 'construction' else 'final_validation'] = dict(
+            enabled=evaluation.final_test, preference_count=evaluation.preference_count,
+            preference_grid="linspace(0, 1, preference_count)",
+            samples_per_preference=dict(greedy=1, stochastic=evaluation.stochastic_samples),
+            checkpoints=["last", "best"],
+        )
+        return protocol
 
     def execute(self):
         device, lp = self.context.device, self.loop_params
@@ -234,7 +235,8 @@ class TrainingRun(ExperimentRun):
             {"iterations": result.iterations, "best_cost": result.best_cost}, "training_result.json"
         )
         if self.evaluation.final_test:
-            test_data, test_seeds = data.test()
+            split_name = 'test' if self.env_name == 'construction' else 'final_validation'
+            test_data, test_seeds = data.test() if split_name == 'test' else data.final_validation()
             indices = list(range(len(test_data)))
             if self.evaluation.test_graph_count is not None:
                 generator = torch.Generator().manual_seed(self.evaluation.seed)
@@ -246,7 +248,7 @@ class TrainingRun(ExperimentRun):
                 test_data = [test_data[index] for index in indices]
                 if test_seeds is not None:
                     test_seeds = test_seeds[indices]
-            test_protocol = self.metadata["evaluation_protocol"]["test"]
+            test_protocol = self.metadata["evaluation_protocol"][split_name]
             test_protocol.update(
                 split="independent test" if self.env_name == "construction" else "held-out validation",
                 indices=indices if self.env_name == "construction" else data.all_val_indices[indices].tolist(),
@@ -268,7 +270,7 @@ class TrainingRun(ExperimentRun):
                         mode=mode,
                         seed_networks=test_seeds,
                     )
-                    prefix = f"eval/test/{label}/{mode}"
+                    prefix = f"eval/{split_name}/{label}/{mode}"
                     log_evaluation_metrics(rows, self.logger_list, result.iterations, prefix)
                     if self.evaluation.pareto_enabled:
                         log_pareto_metrics(
@@ -332,7 +334,7 @@ class DatasetRun(ExperimentRun):
                           low_memory_mode=cfg.experiment.low_memory_mode)
         self.dataset = copytier_config(
             params(DatasetBuildParams, cfg.dataset_build),
-            params(EditDatasetParams, cfg.dataset),
+            params(EditDatasetParams, OmegaConf.masked_copy(cfg.dataset, list(EditDatasetParams.__dataclass_fields__))),
             profile,
             cost,
             cfg.experiment.seed,

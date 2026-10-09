@@ -1,3 +1,2 @@
-tiers: []
-n_val_per_tier: 0
+enabled: false
 schedule: []

@@ -11,6 +11,7 @@ class EditDatasetParams:
     max_route_len: int
     train_fraction: float
     split_seed: int
+    n_val_per_tier: int
 
 
 @dataclass(frozen=True)
@@ -31,8 +32,7 @@ class DatasetBuildParams:
 
 @dataclass(frozen=True)
 class CurriculumParams:
-    tiers: list
-    n_val_per_tier: int
+    enabled: bool
     schedule: list
 
 
