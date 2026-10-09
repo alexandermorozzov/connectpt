@@ -2,13 +2,13 @@
 import logging as log
 import torch
 from tqdm import tqdm
-from ..env.construction import normalize_nodes
+from ..env.base import normalize_nodes
 from ..env.state import RouteGenBatchState
 from ..city.shortest_paths import reconstruct_all_paths
 from ..run.logger import log as log_metrics
 from ..objectives.metrics import evaluate_network
 from ..objectives.preferences import scalarize
-from ..objectives.penalties import adjustment_degree, adjustment_penalty
+from ..objectives.penalties import STATE_PENALTIES, adjustment_degree, adjustment_penalty
 from .records import MONITOR_FIELDS, SearchBestRecord, SearchRecord
 from .operators import get_direct_sat_dmd
 
@@ -211,7 +211,7 @@ def run_colony(
         record = SearchBestRecord(
             float(best_raw_costs.mean()),
             {name: float(result.goals[:, i].mean()) for i, name in enumerate(cost_obj.objectives)},
-            {name: float(result.penalties[:, i].mean()) for i, name in enumerate(("constraints", "adjustment"))},
+            {name: float(result.penalties[:, i].mean()) for i, name in enumerate(STATE_PENALTIES)},
             {
                 MONITOR_FIELDS[name]: float(value.mean())
                 for name, value in zip(metric_names, best_metrics.unbind(-1))

@@ -5,7 +5,7 @@
 
 ```text
 cfg/
-├── runs/            # точки входа: search, train, train_construction, train_construction_overnight, prepare_dataset, compare
+├── runs/            # точки входа: search, train, train_construction, train_construction_overnight, prepare_dataset, compare, init_routes (scripts/make_init_routes.py)
 ├── instance/        # путь к бенчмарку и ограничения маршрутов
 ├── method/          # методы поиска: ea, nea, nea_edit, nea_combined
 ├── initial/         # настройки эвристических начальных сетей

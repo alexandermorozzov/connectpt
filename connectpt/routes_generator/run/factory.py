@@ -1,7 +1,7 @@
 """ExperimentRunFactory -- dispatch a composed config to its run class.
 
-The factory imports the concrete run classes lazily so that ``import run`` does
-not statically pull in training/search.
+The run classes are imported on the first call, so that ``import run`` does not
+statically pull in training/search.
 """
 from __future__ import annotations
 
@@ -10,17 +10,11 @@ class ExperimentRunFactory:
 
     @staticmethod
     def from_cfg(cfg):
+        from ..search.runs import SearchRun
+        from ..training.runs import ComparisonRun, DatasetRun, TrainingRun
+
+        runs = {"training": TrainingRun, "search": SearchRun, "comparison": ComparisonRun, "dataset_prepare": DatasetRun}
         run_type = cfg.run.type
-        if run_type == "training":
-            from ..training.runs import TrainingRun
-            return TrainingRun(cfg)
-        if run_type == "search":
-            from ..search.runs import SearchRun
-            return SearchRun(cfg)
-        if run_type == "comparison":
-            from ..training.runs import ComparisonRun
-            return ComparisonRun(cfg)
-        if run_type == "dataset_prepare":
-            from ..training.runs import DatasetRun
-            return DatasetRun(cfg)
-        raise ValueError(f"Unknown run.type: {run_type!r}")
+        if run_type not in runs:
+            raise ValueError(f"Unknown run.type: {run_type!r}")
+        return runs[run_type](cfg)

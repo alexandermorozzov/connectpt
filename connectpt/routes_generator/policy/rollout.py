@@ -4,7 +4,8 @@ from dataclasses import dataclass, replace
 import torch
 
 from ..env.actions import RouteAction, ROUTE_ACTION_HALT
-from ..env.construction import ConstructionEnv, EnvParams
+from ..env.base import EnvParams
+from ..env.construction import ConstructionEnv
 from ..env.edit import EditEnv
 from .output import PolicyOut
 

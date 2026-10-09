@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 import torch
 from ..common.tensors import get_update_at_mask
-from ..env.construction import normalize_nodes
+from ..env.base import normalize_nodes
 from ..env.masks import ActionMask, check_extensions_add_connections
 from ..env.actions import ROUTE_ACTION_HALT
 from ..env.features import aggr_edges_over_sequences

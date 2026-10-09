@@ -14,7 +14,8 @@ from ..run.logger import flush, log
 from ..policy.generate import evaluate_policy
 from ..policy.rollout import bind_env
 from ..env.state import RouteGenBatchState
-from ..env.construction import EnvParams
+from ..env.base import EnvParams
+from ..objectives.penalties import STATE_PENALTIES
 from ..objectives.pareto import canonical_network, summarize_evaluation
 from .records import ParetoRecord, ValidationRecord
 
@@ -84,7 +85,7 @@ class Validation:
                 },
                 penalty={
                     name: float(torch.cat([r.penalties[:, i] for r in results]).mean())
-                    for i, name in enumerate(("constraints", "adjustment"))
+                    for i, name in enumerate(STATE_PENALTIES)
                 },
                 monitor={
                     name: float(metrics[key].mean())

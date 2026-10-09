@@ -1,4 +1,5 @@
 """Граф города, преобразования и сборка батча."""
+from functools import lru_cache
 from itertools import permutations
 import logging as log
 
@@ -81,6 +82,32 @@ def replace_nonfinite_drive_times(drive_times):
     while penalty.ndim < drive_times.ndim:
         penalty = penalty.unsqueeze(-1)
     return torch.where(torch.isfinite(drive_times), drive_times, penalty)
+
+
+@lru_cache(maxsize=None)
+def _warn_once(message):
+    log.warning(message)
+
+
+def warn_unreachable_stops(drive_times):
+    """Warn once per city when some stop pairs have no street path.
+
+    Holliday's code assumes a connected street graph and fails on such a city.
+    Here those pairs get 2 x the largest finite drive time in features and cost.
+    """
+    for times in drive_times.reshape(-1, *drive_times.shape[-2:]):
+        n_nodes = times.shape[-1]
+        unreachable = ~torch.isfinite(times)
+        n_pairs = int(unreachable.sum())
+        if not n_pairs:
+            continue
+        cut_off = (unreachable.sum(0) == n_nodes - 1) | (unreachable.sum(1) == n_nodes - 1)
+        stops = torch.where(cut_off)[0].tolist()
+        _warn_once(
+            f"street graph of {n_nodes} stops: {n_pairs} of {n_nodes * (n_nodes - 1)} stop pairs have no "
+            f"street path; stops cut off from all others: {stops[:20]}. Their drive times become "
+            f"2 x the largest finite drive time in features and cost."
+        )
 
 
 class InsertPosFeatures(BaseTransform):
@@ -261,6 +288,7 @@ class CityGraphData(HeteroData):
 
         # Compute all shortest paths
         nexts, drive_times = floyd_warshall(street_adj)
+        warn_unreachable_stops(drive_times)
         data.drive_times = drive_times.squeeze(0)
         data.nexts = nexts.squeeze(0)
 

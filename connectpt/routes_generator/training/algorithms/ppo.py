@@ -14,6 +14,6 @@ class PPO(Algorithm):
     def surrogate(self, ratios, clipped, advantages, preferences):
         return torch.minimum(ratios * advantages, clipped * advantages)
 
-    def diversity(self, policy, state, output, mask):
+    def diversity(self, policy, env, state, output, mask):
         zero = output.logp.new_zeros(())
         return Diversity(zero, zero, zero)

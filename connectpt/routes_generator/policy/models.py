@@ -981,7 +981,7 @@ class RouteGeneratorBase(nn.Module):
 
     def setup_planning(self, state):         
         # apply normalization to input features
-        from ..env.construction import normalize_nodes
+        from ..env.base import normalize_nodes
         normalize_nodes(state, self.node_norm, self.feature_set)
         return state
 

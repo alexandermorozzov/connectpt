@@ -61,7 +61,7 @@ def test_diversity_squares_full_kl_and_is_independent_of_replayed_action(monkeyp
 
     from types import SimpleNamespace
 
-    monkeypatch.setattr(learning, "observe", lambda state, *args, **kwargs: state)
+    env = SimpleNamespace(observe=lambda state: (state, None))
 
     class Model:
         feature_set = None
@@ -85,11 +85,11 @@ def test_diversity_squares_full_kl_and_is_independent_of_replayed_action(monkeyp
     for action in [0, 1]:
         params.diversity_alpha = alpha
         output = SimpleNamespace(log_probs=p.log(), action=torch.tensor([[action]]))
-        loss = algorithm.diversity(Model(), state, output, None).loss
+        loss = algorithm.diversity(Model(), env, state, output, None).loss
         assert loss.item() < 1e-20
         assert all(torch.equal(state.cost_weights[k], v) for k, v in original.items())
     params.diversity_alpha = 0.0
-    loss = algorithm.diversity(Model(), state, output, None).loss
+    loss = algorithm.diversity(Model(), env, state, output, None).loss
     assert torch.allclose(loss, exact_kl.square().mean())
     loss.backward()
     assert p.grad.isfinite().all() and q.grad.isfinite().all()

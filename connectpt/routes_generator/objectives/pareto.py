@@ -46,7 +46,7 @@ def canonical_network(routes, symmetric_routes=True):
     return tuple(sorted(canonical))
 
 
-def front_metrics(rows, reference, eu_preference_count=101):
+def front_metrics(rows, reference, eu_preference_count):
     """One city and one independent preference-grid draw; never pool cities."""
     if not rows:
         raise ValueError("Cannot evaluate an empty preference grid")
@@ -95,7 +95,7 @@ def front_metrics(rows, reference, eu_preference_count=101):
     return metrics
 
 
-def summarize_evaluation(rows, reference, eu_preference_count=101):
+def summarize_evaluation(rows, reference, eu_preference_count):
     groups = defaultdict(list)
     for row in rows:
         groups[row["graph"], row.get("sample", 0)].append(row)

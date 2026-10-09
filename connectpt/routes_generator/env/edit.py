@@ -1,16 +1,16 @@
 """Single-route editing with network slots and explicit episode limits."""
 import torch
 
-from .actions import ActionSpec, RouteAction, ROUTE_ACTION_HALT, ROUTE_ACTION_TRIM_START, ROUTE_ACTION_TRIM_END
-from .construction import ConstructionEnv
+from .actions import ActionSpec, RouteAction, ROUTE_ACTION_TRIM_START, ROUTE_ACTION_TRIM_END
+from .base import Env
 from .masks import ActionMask
 from .state import RouteGenBatchState
 from ..city.graph import to_batch
 from ..network.routes import to_routes
-from ..objectives.penalties import edit_step_penalty, forced_halt_penalty
+from ..objectives.penalties import ACTION_PENALTIES, edit_step_penalty, forced_halt_penalty
 
 
-class EditEnv(ConstructionEnv):
+class EditEnv(Env):
     action_spec = ActionSpec("edit")
 
     def reset(self, graphs, preferences, seed_networks=None, *, route_idx=0, normalize=True, reference_networks=None):
@@ -78,26 +78,14 @@ class EditEnv(ConstructionEnv):
         return ActionMask(True, trim, trim, halt)
 
     def _apply(self, action: RouteAction):
-        forced = self.forced_halt()
-        if forced:
-            action = RouteAction(torch.full_like(action.kind, ROUTE_ACTION_HALT), torch.full_like(action.indices, -1))
         active = ~self.is_done()
         trims = ((action.kind == ROUTE_ACTION_TRIM_START) | (action.kind == ROUTE_ACTION_TRIM_END)) & active
         self.trim_counts += trims.long()
         self.state.apply_route_actions(action.kind, action.indices)
 
-    def step(self, action: RouteAction):
-        active = ~self.is_done()
-        forced = self.forced_halt()
-        if forced:
-            action = RouteAction(torch.full_like(action.kind, ROUTE_ACTION_HALT), torch.full_like(action.indices, -1))
-        obs, mask, (goals, penalties), done, info = super().step(action)
-        # The two action penalties are episodic costs, not potential differences.
-        names = ("constraints", "adjustment", "edit_step", "forced_halt")
-        for name, values in (
-            ("edit_step", edit_step_penalty(action.kind, active, 1.0)),
-            ("forced_halt", forced_halt_penalty(active, forced, 1.0)),
-        ):
-            penalties[:, names.index(name)] -= values.to(penalties.dtype)
-        info["forced_halt"] = forced
-        return obs, mask, (goals, penalties), done, info
+    def action_penalties(self, action: RouteAction, active, forced):
+        values = {
+            "edit_step": edit_step_penalty(action.kind, active, 1.0),
+            "forced_halt": forced_halt_penalty(active, forced, 1.0),
+        }
+        return torch.stack([values[name] for name in ACTION_PENALTIES], dim=-1)

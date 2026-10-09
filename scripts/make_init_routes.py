@@ -7,13 +7,21 @@
 Writes ``datasets/instances/<name>/Routes.txt`` (one route per line, 0-indexed).
 Runs read that file and never build a network on the fly. Instances that ship
 with their own initial network (MACSA scenarios, EKB) do not need this.
+Config groups: ``cfg/runs/init_routes.yaml``.
 """
 from __future__ import annotations
 
 import argparse
 
+from omegaconf import OmegaConf
+
+from connectpt.routes_generator.network.corruption import RealisticParams
+from connectpt.routes_generator.objectives.cost import build_cost
+from connectpt.routes_generator.run.config import load_experiment
 from connectpt.routes_generator.run.context import resolve_under_root
 from connectpt.routes_generator.run.context import resolve_device, seed_everything
+from connectpt.routes_generator.run.policy import PolicyRun
+from connectpt.routes_generator.run.schemas import InitialParams, params
 from connectpt.routes_generator.search.initial import build_init_routes
 from connectpt.routes_generator.city.instances import INSTANCES_DIR, load_instance
 from connectpt.routes_generator.network.routes import write_routes_txt
@@ -33,14 +41,35 @@ def main() -> None:
 
     root = resolve_under_root(args.instances_dir) if args.instances_dir else INSTANCES_DIR
     device = resolve_device(cpu=args.cpu)
+    cfg = load_experiment("init_routes")
+    cost = build_cost(
+        cfg.cost, symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
+    )
+    initial = params(InitialParams, cfg.initial)
+    corruption = RealisticParams.from_values(OmegaConf.to_container(cfg.corruption, resolve=True))
 
     for name in args.instances:
         d = root / name
         instance = load_instance(d, require_routes=False)
         spec = instance.spec
         seed_everything(args.seed)
+        policy, instance_cost = None, cost
+        if args.generator == "lc":
+            # PolicyRun.setup reseeds with experiment.seed and builds the policy per instance.
+            policy_run = PolicyRun(cfg, device)
+            policy_run.setup()
+            policy, instance_cost = policy_run.policy, policy_run.cost
         routes = build_init_routes(
-            spec, instance.tensors, seed=args.seed, device=device, clean=args.clean, generator=args.generator
+            spec,
+            instance.tensors,
+            generator=args.generator,
+            cost=instance_cost,
+            initial=initial,
+            corruption=corruption,
+            policy=policy,
+            seed=args.seed,
+            clean=args.clean,
+            device=device,
         )
         tier = "construction only" if args.clean else "+ realistic tier"
         generator_label = "learned construction" if args.generator == "lc" else args.generator

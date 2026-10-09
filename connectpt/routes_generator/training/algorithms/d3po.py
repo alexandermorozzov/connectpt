@@ -1,7 +1,6 @@
 """Goal-wise clipped PPO with full categorical KL diversity."""
 import torch
 
-from ...env.features import observe
 from ...objectives.preferences import COST_WEIGHT_KEY_ORDER, scalarize
 from .base import Algorithm, Diversity
 
@@ -47,7 +46,7 @@ class D3PO(Algorithm):
         clipped_goals = torch.minimum(ratios[:, None] * advantages, clipped[:, None] * advantages)
         return (preferences * clipped_goals).sum(-1)
 
-    def diversity(self, policy, state, output, mask):
+    def diversity(self, policy, env, state, output, mask):
         if self.params.diversity_weight == 0:
             zero = output.logp.new_zeros(())
             return Diversity(zero, zero, zero)
@@ -59,11 +58,7 @@ class D3PO(Algorithm):
         saved = {key: value.clone() for key, value in state.cost_weights.items()}
         state.set_cost_weights(preference_dict(neighbor))
         try:
-            obs = observe(
-                state,
-                policy.feature_set,
-                allow_below_min=policy.allow_trim_below_min if policy.action_spec.role == "edit" else False,
-            )
+            obs, _ = env.observe(state)
             neighbor_output = policy.evaluate(obs, mask, output.action)
         finally:
             state.set_cost_weights(saved)

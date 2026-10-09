@@ -76,7 +76,7 @@ class TrainingRun(ExperimentRun):
         from ..run.config import policy_profile
         from ..policy.build import load_policy
         from ..objectives.cost import build_cost
-        from ..env.construction import EnvParams
+        from ..env.base import EnvParams
         from ..env.actions import ActionSpec
         from ..policy.rollout import ENVS
         from .algorithms.base import AlgorithmParams
@@ -198,6 +198,7 @@ class TrainingRun(ExperimentRun):
             device,
             scalar=self.algorithm.scalar_values,
             actor_model=self.policy if self.critic_params.shared else None,
+            observe=self.env.observe if self.critic_params.shared else None,
         )
         budget = Budget(
             lp.n_iterations,

@@ -10,6 +10,7 @@ from ..network.routes import get_route_leg_times
 from .preferences import COST_WEIGHT_KEY_ORDER, COST_COMPONENT_NAMES, PreferenceSampler
 from .criteria import GOAL_NAMES, criterion
 from .components import PhysicalCost
+from .penalties import ACTION_PENALTIES, PENALTIES
 from .components import CostConstants, CostHelperOutput
 
 __all__ = ["build_cost", "CostModule", "MyCostModule", "CostParams", "CostConstants", "CostHelperOutput"]
@@ -100,7 +101,7 @@ class MyCostModule(CostModule, PreferenceSampler):
     ):
         super().__init__(mean_stop_time_s, avg_transfer_wait_time_s, symmetric_routes, low_memory_mode)
         if penalties is not None:
-            expected = {"constraints", "adjustment", "edit_step", "forced_halt"}
+            expected = set(PENALTIES)
             if set(penalties) != expected:
                 raise ValueError(f"penalties must contain {sorted(expected)}")
             constraint_violation_weight = penalties["constraints"]
@@ -144,8 +145,7 @@ class MyCostModule(CostModule, PreferenceSampler):
             else {
                 "constraints": constraint_violation_weight,
                 "adjustment": adjustment_degree_weight,
-                "edit_step": 0.0,
-                "forced_halt": 0.0,
+                **dict.fromkeys(ACTION_PENALTIES, 0.0),
             }
         )
         self._enabled_components = tuple(name in self.objectives for name in ("ATT", "RTT", "WMC"))

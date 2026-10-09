@@ -6,7 +6,7 @@
 |---|---|
 | `run_search.py` | Оптимизация сети: EA, NEA, NEA-Edit, NEA-Combined. |
 | `run.py` | Один конфиг `cfg/runs/<имя>.yaml`: датасет edit, обучение, сравнение. |
-| `make_init_routes.py` | Строит начальные сети бенчмарков: `--generator lc`, `john`, `nikolic`. |
+| `make_init_routes.py` | Строит начальные сети бенчмарков: `--generator lc`, `john`, `nikolic`. Группы конфига — `cfg/runs/init_routes.yaml`. |
 | `launch.ps1` / `launch.sh` | Любой из скриптов выше в фоне, с логом. |
 
 Конфиги лежат в `connectpt/routes_generator/cfg/`. Точки входа — `cfg/runs/*.yaml`.

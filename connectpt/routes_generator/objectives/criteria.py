@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 
 
 from .preferences import GOAL_NAMES
+from .penalties import PENALTIES
 
 
 class Criterion(ABC):
@@ -96,7 +97,7 @@ class PenaltyCriterion(Criterion):
 
 REGISTRY = {
     **dict.fromkeys((*GOAL_NAMES, "d0", "d1", "d2", "d_un", "n_disconnected"), NetworkCriterion),
-    **dict.fromkeys(("constraints", "adjustment", "edit_step", "forced_halt"), PenaltyCriterion),
+    **dict.fromkeys(PENALTIES, PenaltyCriterion),
 }
 
 

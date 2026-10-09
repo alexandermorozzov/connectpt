@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 
+from ..objectives.penalties import ACTION_PENALTIES, PENALTIES, STATE_PENALTIES
 from ..policy.rollout import rollout
 from ..policy.generate import generate
 from ..run.logger import log, flush
@@ -86,8 +87,8 @@ def collect(env, policy, algorithm, critic, data, horizon):
             else:
                 ended = done & active
                 reward = -current * env.params.reward_scale * (ended[:, None] if current.ndim > 1 else ended)
-            action_penalty = trajectory.rewards[0][1][:, 2:]
-            for index, name in enumerate(("edit_step", "forced_halt")):
+            action_penalty = trajectory.rewards[0][1][:, len(STATE_PENALTIES):]
+            for index, name in enumerate(ACTION_PENALTIES):
                 weight = env.cost.penalty_weights[name]
                 if weight:
                     reward = reward + action_penalty[:, index].reshape((-1,) + (1,) * (reward.ndim - 1)) * weight
@@ -200,7 +201,7 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget):
             ),
             iteration,
         )
-        stats = update(policy, algorithm, critic, optimizer, batch)
+        stats = update(env, policy, algorithm, critic, optimizer, batch)
         log(
             logger_list,
             TrainRecord(
@@ -239,7 +240,7 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget):
                 {name: float(batch.objective_rewards[..., i].mean()) for i, name in enumerate(names)},
                 {
                     name: float(batch.penalty_rewards[..., i].mean())
-                    for i, name in enumerate(("constraints", "adjustment", "edit_step", "forced_halt"))
+                    for i, name in enumerate(PENALTIES)
                 },
             ),
             iteration,

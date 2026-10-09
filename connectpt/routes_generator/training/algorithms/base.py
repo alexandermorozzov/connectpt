@@ -34,7 +34,7 @@ class Algorithm(ABC):
         """Clipped policy objective in scalar or goal space."""
 
     @abstractmethod
-    def diversity(self, policy, state, output, mask):
+    def diversity(self, policy, env, state, output, mask):
         """Extra algorithm objective, from the replay's full distribution."""
 
     @property

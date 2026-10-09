@@ -4,7 +4,6 @@ import numpy as np
 import torch
 
 from ..env.actions import RouteAction
-from ..env.features import observe
 from ..env.masks import ActionMask
 from ..env.state import RouteGenBatchState
 from .algorithms.base import normalize_advantages
@@ -75,7 +74,7 @@ def replay_mask(masks, indices, batch_size, score, device):
     return ActionMask(**values)
 
 
-def update(policy, algorithm, critic, optimizer, batch):
+def update(env, policy, algorithm, critic, optimizer, batch):
     p = algorithm.params
     device = next(policy.parameters()).device
     batch_size = batch.rewards.shape[1]
@@ -104,11 +103,7 @@ def update(policy, algorithm, critic, optimizer, batch):
             value_buffer.append(value_stats["values"])
             target_buffer.append(value_stats["targets"])
             per_goal_mse.append(value_stats["per_obj_mse"].detach())
-            obs = observe(
-                state,
-                policy.feature_set,
-                allow_below_min=policy.allow_trim_below_min if policy.action_spec.role == "edit" else False,
-            )
+            obs, _ = env.observe(state)
             output = policy.evaluate(obs, mask, action)
             if p.normalize_advantages:
                 advantages = normalize_advantages(advantages, per_objective=advantages.ndim > 1)
@@ -120,7 +115,7 @@ def update(policy, algorithm, critic, optimizer, batch):
                     raise RuntimeError(f"Initial replay ratio differs from 1: {initial_error}")
             clipped = ratios.clamp(1 - p.epsilon, 1 + p.epsilon)
             surrogate = algorithm.surrogate(ratios, clipped, advantages, preferences)
-            diversity = algorithm.diversity(policy, state, output, mask)
+            diversity = algorithm.diversity(policy, env, state, output, mask)
             objective = (
                 surrogate.mean() + output.entropy.mean() * p.entropy_weight - p.diversity_weight * diversity.loss
             )

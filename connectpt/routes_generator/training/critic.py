@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import torch
 from torch_geometric.data import Batch
 from ..policy.models import FeatureNorm, get_mlp
-from ..env.features import observe, critic_inputs, critic_features, PREFERENCE_KEYS, dims
+from ..env.features import critic_inputs, critic_features, PREFERENCE_KEYS, dims
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,7 @@ class CriticParams:
 class ValueHead:
     """Only the value head trains; shared actor features are detached."""
 
-    def __init__(self, k, features, params, device, *, scalar, actor_model=None):
+    def __init__(self, k, features, params, device, *, scalar, actor_model=None, observe=None):
         self.n_objectives = k
         self.scalar = scalar
         self.params = params
@@ -40,6 +40,8 @@ class ValueHead:
         self.optim = self.model = self._curr_estimate = None
         self.loss_fn = torch.nn.MSELoss()
         self.actor_model = actor_model
+        # A shared critic reads the environment's observation of a State.
+        self.observe = observe
         self._shared_critic = actor_model is not None
         self.normalize_returns = params.normalize_returns
         self.huber = params.huber
@@ -159,15 +161,7 @@ class ValueHead:
 
     def _features_from_state(self, state):
         if self._shared_critic:
-            return self.actor_model.get_critic_features(
-                observe(
-                    state,
-                    self.actor_model.feature_set,
-                    allow_below_min=self.actor_model.allow_trim_below_min
-                    if self.actor_model.action_spec.role == "edit"
-                    else False,
-                )
-            )
+            return self.actor_model.get_critic_features(self.observe(state)[0])
         return critic_features(state, self.feature_set)
 
     def from_state(self, state):

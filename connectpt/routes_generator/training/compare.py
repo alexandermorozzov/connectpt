@@ -74,7 +74,7 @@ def compare_runs(root, names=("ppo", "d3po"), *, checkpoint="last", mode="greedy
         if any(r != references[0] for r in references):
             raise ValueError("HV references differ")
         reference = pure_reference = references[0]
-    query_counts = {m.get("eu_preference_count", 101) for m in metadata.values()}
+    query_counts = {m["eu_preference_count"] for m in metadata.values()}
     if len(query_counts) != 1:
         raise ValueError("EU query preference counts differ")
     query_count = query_counts.pop()

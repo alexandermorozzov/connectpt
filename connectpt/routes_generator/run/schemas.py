@@ -144,6 +144,13 @@ class CurriculumParams:
     schedule: list
 
 
+@dataclass(frozen=True)
+class InitialParams:
+    """``cfg/initial``: heuristic initial networks (John et al.)."""
+    alpha: float
+    prioritize_direct_connections: bool
+
+
 def logger_names(node) -> list[str]:
     """The ``logger_list`` key: names from ``run.logger.LOGGERS``."""
     from .logger import LOGGERS

@@ -249,10 +249,14 @@ def nikolic_init(state: RouteGenBatchState):
 
 
 def build_init_routes(
-    spec, tensors, *, seed: int = 0, device=None, clean: bool = False, generator: str = "lc"
+    spec, tensors, *, generator: str, cost, initial, corruption, policy=None, seed: int, clean: bool, device=None
 ) -> torch.Tensor:
-    """Build an initial network: one stochastic sample of the learned
-    construction model, plus the realistic corruption tier unless ``clean``."""
+    """Build an initial network with ``INITIALIZERS[generator]``. The ``lc`` network
+    also gets the realistic corruption tier unless ``clean``.
+
+    The objects come from ``scripts/make_init_routes.py`` (``cfg/runs/init_routes.yaml``):
+    ``cost``, ``initial`` (``InitialParams``), ``corruption`` (``RealisticParams``) and,
+    for ``lc``, the construction ``policy``."""
     import random
 
     from ..network.corruption import inject_realistic_tier
@@ -262,9 +266,7 @@ def build_init_routes(
 
         device = resolve_device()
 
-    run = InitialRun(generator)
-    run.setup()
-    routes = INITIALIZERS[generator](spec, tensors, device=device, profile=run)
+    routes = INITIALIZERS[generator](spec, tensors, device=device, cost=cost, initial=initial, policy=policy)
     routes = to_routes(routes, n_routes=spec["n_routes"], width=spec["max_route_len"])[0]
     if generator == "lc" and not clean:
         rng = random.Random(seed)
@@ -276,101 +278,55 @@ def build_init_routes(
             street_adj=tensors["street_adj"],
             demand=tensors["demand"],
             n_nodes=tensors["node_locs"].shape[0],
-            params=run.corruption,
+            params=corruption,
         )
     routes = to_routes(routes)
     return routes[None] if routes.ndim == 2 else routes
 
 
-def learned_initial(spec, tensors, *, device, profile) -> torch.Tensor:
+def learned_initial(spec, tensors, *, device, cost, initial, policy) -> torch.Tensor:
     from torch_geometric.loader import DataLoader
     from ..city.graph import to_batch
-    from ..env.state import RouteGenBatchState
     from ..policy.generate import generate
     from ..policy.rollout import bind_env
-    from ..run.policy import PolicyRun
-    from ..run.config import compose_policy_config
 
-    run = PolicyRun(compose_policy_config(), device)
-    run.setup()
     data = next(iter(DataLoader(to_batch(tensors).to_data_list(), batch_size=1))).to(device)
     state = RouteGenBatchState(
         data,
-        run.cost.constants,
+        cost.constants,
         spec["n_routes"],
         spec["min_route_len"],
         spec["max_route_len"],
-        preferences=run.cost.get_weights(),
+        preferences=cost.get_weights(),
     )
-    return generate(bind_env(state, run.policy, run.cost, normalize=False), run.policy, "sample", 1)
+    return generate(bind_env(state, policy, cost, normalize=False), policy, "sample", 1)
 
 
-class InitialRun:
-    """Resolve heuristic initialization settings once at the config boundary."""
-
-    def __init__(self, generator):
-        self.generator = generator
-
-    def setup(self):
-        from hydra import compose, initialize_config_dir
-        from dataclasses import dataclass
-        from ..run.context import CFG_DIR
-        from ..objectives.cost import build_cost
-
-        @dataclass(frozen=True)
-        class InitialParams:
-            alpha: float
-            prioritize_direct_connections: bool
-
-        with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-            cfg = compose(
-                config_name=None,
-                overrides=[
-                    "+cost=rtt_wmc",
-                    "+adjustment=cap",
-                    "+experiment=standard",
-                    "+initial=heuristic",
-                    "+corruption=realistic",
-                ],
-            )
-        cost = build_cost(
-            cfg.cost, symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
-        )
-        self.constants = cost.constants
-        self.preferences = cost.get_weights()
-        self.params = InitialParams(**cfg.initial)
-        from omegaconf import OmegaConf
-        from ..network.corruption import RealisticParams
-
-        self.corruption = RealisticParams.from_values(OmegaConf.to_container(cfg.corruption, resolve=True))
-
-
-def _heuristic_construct(spec, tensors, *, device, generator, profile):
+def _heuristic_construct(spec, tensors, *, device, generator, cost, initial):
     from ..city.graph import to_batch
 
-    run = profile
     # The preserved heuristic implementations operate on CPU matrices.
     state = RouteGenBatchState(
         to_batch(tensors, torch.device("cpu")),
-        run.constants,
+        cost.constants,
         spec["n_routes"],
         spec["min_route_len"],
         spec["max_route_len"],
-        preferences=run.preferences,
+        preferences=cost.get_weights(),
     )
     if generator == "john":
-        routes = john_init(state, run.params.alpha, run.params.prioritize_direct_connections)
+        routes = john_init(state, initial.alpha, initial.prioritize_direct_connections)
     else:
         routes = nikolic_init(state)
     return routes.to(device)
 
 
-def _john_construct(spec, tensors, *, device, profile):
-    return _heuristic_construct(spec, tensors, device=device, generator="john", profile=profile)
+def _john_construct(spec, tensors, *, device, cost, initial, policy):
+    return _heuristic_construct(spec, tensors, device=device, generator="john", cost=cost, initial=initial)
 
 
-def _nikolic_construct(spec, tensors, *, device, profile):
-    return _heuristic_construct(spec, tensors, device=device, generator="nikolic", profile=profile)
+def _nikolic_construct(spec, tensors, *, device, cost, initial, policy):
+    return _heuristic_construct(spec, tensors, device=device, generator="nikolic", cost=cost, initial=initial)
 
 
 INITIALIZERS = {"lc": learned_initial, "john": _john_construct, "nikolic": _nikolic_construct}

@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from connectpt.routes_generator.env.features import observe
 from connectpt.routes_generator.env.masks import ActionMask
 from connectpt.routes_generator.env.features import global_state_features, redundancy_global_features
@@ -157,7 +158,7 @@ def test_three_way_comparison_separates_conditioned_utility_and_archive(tmp_path
             )
             for w, x, y in [(0.0, 1.0, 5.0), (1.0, 5.0, 1.0)]
         ]
-        (run / "test_evaluation.json").write_text(json.dumps({"rows": rows}))
+        (run / "test_evaluation.json").write_text(json.dumps({"rows": rows, "eu_preference_count": 101}))
         write_run(run, status="iterations", timesteps=2048, max_seconds=None)
     report = compare_runs(tmp_path, names=("ppo", "ablation", "d3po"))
     assert report["summary"]["ppo"]["eu_conditioned_penalized"] == -5.0
@@ -210,7 +211,7 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
     state = RouteGenBatchState(
         graphs, cost.constants, 3, min_route_len=2, max_route_len=8, preferences=preference_dict(ws)
     )
-    from connectpt.routes_generator.env.construction import normalize_nodes
+    from connectpt.routes_generator.env.base import normalize_nodes
 
     normalize_nodes(state, model.node_norm, model.feature_set)
     phases = set()
@@ -233,7 +234,8 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
             values.pop("critic")
             algorithm = D3PO(AlgorithmParams(**values), cost)
             algorithm.params = __import__("dataclasses").replace(algorithm.params, diversity_weight=0.01)
-            loss = algorithm.diversity(model, state, replay_out, ActionMask()).loss
+            env = SimpleNamespace(observe=lambda s: (observe(s, model.feature_set), None))
+            loss = algorithm.diversity(model, env, state, replay_out, ActionMask()).loss
             assert loss.isfinite() and loss >= 0
             assert all(torch.equal(state.cost_weights[k], v) for k, v in original.items())
             assert entropy.isfinite().all()
@@ -450,7 +452,7 @@ def test_pareto_network_identity_and_per_city_fronts():
                     network_signature=original,
                 )
             )
-    report = summarize_evaluation(rows, [3.0, 3.0])
+    report = summarize_evaluation(rows, [3.0, 3.0], 101)
     # Average of city HVs (3 and 1), not the HV of the pooled front (3).
     assert report["summary"]["hv_feasible"] == 2.0
     assert report["summary"]["distinct_networks"] == 1.0
@@ -462,7 +464,7 @@ def test_pareto_network_identity_and_per_city_fronts():
 
 def test_fixed_preference_evaluation_does_not_consume_training_rng():
     from connectpt.routes_generator.training.validate import evaluate_preferences, EvaluationProfile, EvaluationParams
-    from connectpt.routes_generator.env.construction import EnvParams
+    from connectpt.routes_generator.env.base import EnvParams
     from connectpt.routes_generator.run.schemas import params
 
     torch.set_num_threads(2)
