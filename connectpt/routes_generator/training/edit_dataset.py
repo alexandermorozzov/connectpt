@@ -5,8 +5,10 @@ import torch
 
 from ..city.const import STOP_KEY
 from ..network.routes import to_routes
+from ..objectives.preferences import PreferenceSampler,state_preferences
 from .curriculum import prepare_curriculum
-from .dataset import Dataset, load_dataset
+from .dataset import Dataset, load_dataset,read_manifest
+from .const import DATASET_MANIFEST,DatasetKind
 from .episodes import EpisodeSource
 from .params import DatasetInputParams
 from .pipeline import GraphPipeline
@@ -18,6 +20,24 @@ class EditDataset:
     params: DatasetInputParams
     train_pipeline: GraphPipeline
     evaluation_pipeline: GraphPipeline
+    sampler: PreferenceSampler
+
+    def validate_input(self):
+        """Check required seed artifacts before training; prepare validates their tensors."""
+        paths=[self.params.path]
+        if self.params.test_path is not None:
+            paths.append(self.params.test_path)
+        for path in paths:
+            if (path/DATASET_MANIFEST).exists():
+                if DatasetKind(read_manifest(path)['kind'])!=DatasetKind.EDIT:
+                    raise ValueError('edit task requires an edit dataset manifest')
+                continue
+            if not (path/'meta.csv').is_file():
+                raise ValueError('edit dataset requires seed metadata')
+            directories=sorted(path.glob('graph_*'))
+            if not directories or any(not list(folder.glob('lc_*_routes_routes.pt')) and
+                                      not list(folder.glob('lc_*_routes_routes.pkl')) for folder in directories):
+                raise ValueError('edit dataset requires seed networks for every graph folder')
 
     def prepare(self, cost, batch_size, evaluation, device, env_params, curriculum, resample_preferences):
         dataset = load_dataset(self.params.path, kind=self.params.kind, legacy_limits=self.params.limits,
@@ -39,7 +59,7 @@ class EditDataset:
         stages = prepare_curriculum(dataset.split.train,dataset.params.tiers,curriculum)
         monitor = evaluation_indices(dataset.split.monitor,evaluation.graph_count,evaluation.seed)
         data = EditData(module,stages,dataset.split.train,dataset.split.validation,monitor,batch_size,
-                        final_module,final_indices,final_split)
+                        final_module,final_indices,final_split,self.sampler)
         return data,cost
 
 
@@ -62,8 +82,9 @@ class SeedDataModule:
 
 class EditData(EpisodeSource):
     def __init__(self, module, curriculum, train_indices, val_indices, monitor_indices, batch_size,
-                 final_module, final_indices, final_split):
+                 final_module, final_indices, final_split,sampler):
         super().__init__()
+        self.sampler=sampler
         self.module, self.curriculum = module, curriculum
         self.train_indices, self.val_indices = train_indices, val_indices
         self.all_val_indices = val_indices
@@ -133,7 +154,7 @@ class EditData(EpisodeSource):
             width = max(self.working.shape[-1], env.params.max_route_len)
             self.working = to_routes(self.working, width=width)
             self.reference = self.working.clone()
-            self.preferences = env.cost.sample_variable_weights(self.graphs.num_graphs, self.device)
+            self.preferences = state_preferences(self.sampler.sample_named(self.graphs.num_graphs, self.device))
             self.route_cursor = 0
             self.graph_instances_loaded += self.graphs.num_graphs
             self.graph_batches_loaded += 1

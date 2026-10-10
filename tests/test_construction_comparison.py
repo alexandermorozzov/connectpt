@@ -120,13 +120,14 @@ def test_returns_cut_terminal_and_bootstrap_only_truncated_episode(vector, use_g
 
 
 def test_common_sampler_matches_holliday_and_respects_fixed_weights():
-    from connectpt.routes_generator.objectives.cost import build_cost
     from connectpt.routes_generator.run.config import load_experiment
 
-    cost = build_cost(
-        cost_params(load_experiment("train_construction").cost), symmetric_routes=True, low_memory_mode=False,
-        variable_weights=True, pp_fraction=0.33, op_fraction=0.33, mcw_fraction=0.0, objectives=["ATT", "RTT"]
-    )
+    from connectpt.routes_generator.objectives.preferences import PreferenceSampler,state_preferences
+    from connectpt.routes_generator.run.config import sampler_params
+    from dataclasses import replace
+
+    parameters=sampler_params(load_experiment("train_construction").cost)
+    sampler=PreferenceSampler(parameters)
     torch.manual_seed(41)
     selector = torch.rand(4096)
     expected = torch.zeros(4096)
@@ -134,12 +135,12 @@ def test_common_sampler_matches_holliday_and_respects_fixed_weights():
     intermediate = selector >= 0.66
     expected[intermediate] = torch.rand(int(intermediate.sum()))
     torch.manual_seed(41)
-    sampled = cost.sample_variable_weights(4096)
+    sampled = state_preferences(sampler.sample_named(4096))
     assert torch.equal(sampled["demand_time_weight"], expected)
     assert torch.equal(sampled["route_time_weight"], 1 - expected)
     assert torch.equal(sampled["median_connectivity_weight"], torch.zeros(4096))
-    cost = cost.with_params(variable_weights=False, demand_time_weight=0.2, route_time_weight=0.8)
-    assert torch.allclose(cost.sample_variable_weights(5)["demand_time_weight"], torch.full((5,), 0.2))
+    sampler = PreferenceSampler(replace(parameters,variable_weights=False,demand_time_weight=0.2,route_time_weight=0.8))
+    assert torch.allclose(sampler.sample_named(5)["ATT"], torch.full((5,), 0.2))
 
 
 def test_replayed_action_and_existing_d3po_diversity_restore_state():

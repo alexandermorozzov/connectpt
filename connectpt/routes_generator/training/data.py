@@ -6,6 +6,7 @@ import torch
 from torch_geometric.loader import DataLoader
 
 from ..city.synthetic import load_graph_collection
+from ..objectives.preferences import PreferenceSampler,state_preferences
 from .const import DatasetKind, DataSourceKind, DATASET_MANIFEST
 from .dataset import load_dataset
 from .episodes import EpisodeSource
@@ -27,12 +28,13 @@ class ConstructionDataset:
     evaluation_pipeline: GraphPipeline
     online_source: object | None
     benchmark: object | None
+    sampler: PreferenceSampler
 
     def prepare(self, cost, batch_size, evaluation, device, env_params, curriculum, resample_preferences):
         if curriculum.enabled:
             raise ValueError('construction data has no curriculum tiers; use curriculum.enabled=false')
         data = self.load(batch_size, evaluation, device, env_params, resample_preferences=resample_preferences)
-        val_cost = cost.with_params(**cost.sample_variable_weights(data.validation_batch_size, device))
+        val_cost = cost.with_params(**state_preferences(self.sampler.sample_named(data.validation_batch_size, device)))
         return data, val_cost
 
     def load(self, batch_size, evaluation, device, env_params, *, resample_preferences):
@@ -94,13 +96,14 @@ class ConstructionDataset:
             test_graphs=test_graphs,full_validation=full_validation,
             training_source_ids=train_ids,validation_source_ids=validation_ids,test_source_ids=test_ids,
             online=source==DataSourceKind.DYNAMIC,
+            sampler=self.sampler,
         )
 
 
 class ConstructionData(EpisodeSource):
     def __init__(self, train_loader, validation_loader, device, *, n_routes, resample_preferences_on_terminal,
                  validation_indices, validation_batch_size, test_graphs, full_validation,
-                 training_source_ids, validation_source_ids, test_source_ids, online):
+                 training_source_ids, validation_source_ids, test_source_ids, online,sampler):
         super().__init__()
         self.train_loader = train_loader
         self.validation_loader = validation_loader
@@ -111,6 +114,7 @@ class ConstructionData(EpisodeSource):
         self.test_graphs, self.full_validation = test_graphs, full_validation
         self.training_source_ids, self.validation_source_ids, self.test_source_ids = training_source_ids, validation_source_ids, test_source_ids
         self.online = online
+        self.sampler=sampler
         self.batch_size = train_loader.batch_size
         self.generator = None
         self.finished = None
@@ -152,7 +156,7 @@ class ConstructionData(EpisodeSource):
             self.graph_instances_loaded += graphs.num_graphs
             self.graph_batches_loaded += 1
             env.set_route_count(self.route_count)
-            env.reset(graphs, env.cost.sample_variable_weights(graphs.num_graphs, self.device))
+            env.reset(graphs, state_preferences(self.sampler.sample_named(graphs.num_graphs, self.device)))
             self.finished = env.is_done().clone()
             self.start_episode(graphs.num_graphs,self.device)
 
@@ -163,7 +167,7 @@ class ConstructionData(EpisodeSource):
         self.finished |= done
         sampled = None
         if self.resample_preferences and done.any():
-            sampled = env.cost.sample_variable_weights(int(done.sum()), self.device)
+            sampled = state_preferences(self.sampler.sample_named(int(done.sum()), self.device))
         env.reset_completed(done, sampled)
 
     def bootstrap_mask(self, env):

@@ -10,13 +10,15 @@ from ..training.edit_dataset import EditDataset
 from ..training.validate import ConstructionValidation,EditValidation
 
 
-def construction_source(prepared):
+def construction_source(prepared,sampler):
     return ConstructionDataset(prepared.params,prepared.train_pipeline,prepared.evaluation_pipeline,
-                               prepared.online_source,prepared.benchmark)
+                               prepared.online_source,prepared.benchmark,sampler)
 
 
-def edit_source(prepared):
-    return EditDataset(prepared.params,prepared.train_pipeline,prepared.evaluation_pipeline)
+def edit_source(prepared,sampler):
+    source=EditDataset(prepared.params,prepared.train_pipeline,prepared.evaluation_pipeline,sampler)
+    source.validate_input()
+    return source
 
 
 @dataclass(frozen=True)
@@ -55,10 +57,10 @@ class Task:
                          policy.forbid_halt_when_overlong if self.requires_seed else False)
         return EnvironmentBinding(self.env_factory,params)
 
-    def source(self,prepared):
+    def source(self,prepared,sampler):
         if prepared.params.kind!=self.kind:
             raise ValueError('dataset kind does not match task')
-        return self.source_factory(prepared)
+        return self.source_factory(prepared,sampler)
 
 
 TASKS={

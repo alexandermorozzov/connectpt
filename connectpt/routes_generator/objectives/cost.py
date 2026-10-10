@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, fields
 import torch
 
 from ..network.routes import get_route_leg_times
-from .preferences import PreferenceSampler
+from .preferences import fixed_preferences,component_preferences
 from .criteria import criterion
 from .const import GOAL_NAMES, COST_WEIGHT_KEY_ORDER, COST_COMPONENT_NAMES
 from .components import PhysicalCost
@@ -23,10 +23,6 @@ class CostParams:
     demand_time_weight: float
     route_time_weight: float
     median_connectivity_weight: float
-    variable_weights: bool
-    pp_fraction: float
-    op_fraction: float
-    mcw_fraction: float
     ignore_stops_oob: bool
     adjustment_degree_target: float
     adjustment_degree_objective: str
@@ -70,11 +66,7 @@ class MyCostModule(PhysicalCost):
         demand_time_weight,
         route_time_weight,
         median_connectivity_weight,
-        variable_weights,
         ignore_stops_oob,
-        pp_fraction,
-        op_fraction,
-        mcw_fraction,
         objectives,
         penalties,
         monitor,
@@ -97,12 +89,6 @@ class MyCostModule(PhysicalCost):
         self.route_time_weight = route_time_weight
         self.median_connectivity_weight = median_connectivity_weight
         self.constraint_violation_weight = constraint_violation_weight
-        self.variable_weights = variable_weights
-        self.pp_fraction = pp_fraction
-        self.op_fraction = op_fraction
-        self.mcw_fraction = mcw_fraction
-        if self.variable_weights and not pp_fraction + op_fraction + mcw_fraction <= 1:
-            raise ValueError("fractions of extreme samples must sum to <= 1")
         self.ignore_stops_oob = ignore_stops_oob
         # Which of the three cost components (demand / route / connectivity)
         # are active. Disabled components are dropped from the weighted cost
@@ -126,24 +112,13 @@ class MyCostModule(PhysicalCost):
         }
         self._enabled_components = tuple(name in self.objectives for name in ("ATT", "RTT", "WMC"))
         self._all_components_enabled = all(self._enabled_components)
-        self.preference_sampler = PreferenceSampler(
-            objectives=self.objectives, demand_time_weight=demand_time_weight,
-            route_time_weight=route_time_weight, median_connectivity_weight=median_connectivity_weight,
-            variable_weights=variable_weights, pp_fraction=pp_fraction,
-            op_fraction=op_fraction, mcw_fraction=mcw_fraction,
-        )
 
     def get_weights(self, device=None):
-        return self.preference_sampler.get_weights(device)
-
-    def sample_variable_weights(self, batch_size, device=None):
-        return self.preference_sampler.sample_variable_weights(batch_size, device)
+        return fixed_preferences(self.objectives,self.demand_time_weight,self.route_time_weight,
+                                 self.median_connectivity_weight,device=device)
 
     def get_preference_weights(self, state, normalize=False):
-        return self.preference_sampler.get_preference_weights(state, normalize)
-
-    def sample(self, batch_size, device=None):
-        return self.preference_sampler.sample(batch_size, device)
+        return component_preferences(state,self.enabled_component_mask,normalize=normalize)
 
     @property
     def cost_component_names(self):

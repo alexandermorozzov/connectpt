@@ -9,6 +9,7 @@ from omegaconf import OmegaConf
 
 from ..common.logging import log
 from ..objectives.cost import build_cost
+from ..objectives.preferences import PreferenceSampler
 from ..policy.build import build_policy
 from ..policy.checkpoints import save_model_weights
 from ..training.algorithms.base import AlgorithmParams
@@ -23,7 +24,7 @@ from ..training.validate import (
     evaluate_preferences, log_evaluation_metrics, log_pareto_metrics,
 )
 from .artifacts import ArtifactStore
-from .config import cost_params, policy_profile
+from .config import cost_params, policy_profile,sampler_params
 from .context import RunContext, resolve_weights_path
 from .dataset import prepare_data_input
 from .runs import ExperimentRun, RunArtifact
@@ -75,7 +76,8 @@ class TrainingRun(ExperimentRun):
         self.evaluation_profile = EvaluationProfile(
             self.evaluation, self.env_params, self.batch_size, cfg.experiment.symmetric_routes,self.task.env_factory
         )
-        self.dataset=self.task.source(self.data_input)
+        self.sampler=PreferenceSampler(sampler_params(cfg.cost))
+        self.dataset=self.task.source(self.data_input,self.sampler)
         self.curriculum = params(CurriculumParams, cfg.curriculum)
         self.checkpoint = resolve_weights_path(self.paths.checkpoint_path, self.paths.weights_dir)
         self.best_checkpoint = self.checkpoint.with_name(

@@ -18,6 +18,7 @@ from omegaconf import OmegaConf, open_dict
 
 from .const import CFG_DIR
 from ..objectives.cost import CostParams
+from ..objectives.preferences import PreferenceSamplerParams
 from ..policy.build import ModelParams, PolicyProfile
 from ..common.parameters import CostConstants
 
@@ -32,7 +33,18 @@ def load_experiment(name: str, *, overrides=None):
 def cost_params(cost_cfg) -> CostParams:
     """Decode the cost group into library parameters at the run boundary."""
 
-    return CostParams(**OmegaConf.to_container(cost_cfg.kwargs, resolve=True))
+    values=OmegaConf.to_container(cost_cfg.kwargs,resolve=True)
+    for key in ('variable_weights','pp_fraction','op_fraction','mcw_fraction'):
+        values.pop(key)
+    return CostParams(**values)
+
+
+def sampler_params(cost_cfg):
+    """Decode sampling settings separately; YAML ownership moves with the cfg layout."""
+    values=OmegaConf.to_container(cost_cfg.kwargs,resolve=True)
+    return PreferenceSamplerParams(tuple(values['objectives']),values['demand_time_weight'],
+        values['route_time_weight'],values['median_connectivity_weight'],values['variable_weights'],
+        values['pp_fraction'],values['op_fraction'],values['mcw_fraction'])
 
 
 def policy_profile(model_cfg, cost_cfg, experiment, device, *, checkpoint_path=None):
