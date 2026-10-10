@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 import torch
 from ..network.routes import get_unselected_routes
-from .operators import MutationContext, OPERATOR_FACTORIES, get_new_route_variants
+from .operators import MutationContext, OPERATOR_FACTORIES, EmptyRouteInitializer
 
 
 @dataclass(frozen=True)
@@ -53,23 +53,17 @@ class ExecutablePlan:
     def summary(self) -> dict:
         return {g.op.name: int(g.count) for g in self.groups}
 
-    def get_mutants(
-        self,
-        bee_networks,
-        chosen_route_idxs,
-        *,
-        direct_sat_dmd,
-        shorten_prob,
-        street_node_neighbours,
-        shortest_paths,
-        force_linking_unlinked,
-        env_state,
-        cost,
-        single_bee_env_state=None,
-        adj_condition_target=None,
-        adj_condition_weight=None,
-        process_neural_bees_sequentially=False,
-    ):
+    def prepare(self, state, bee_state, cost, params):
+        """Prepare each active operator's static inputs once for this colony."""
+        self.empty_routes = EmptyRouteInitializer(state, cost, params.force_linking_unlinked)
+        self.remaining_template = None
+        if self.needs_remaining_state() or params.force_linking_unlinked:
+            self.remaining_template = bee_state.clone()
+        for group in self.groups:
+            if group.count > 0:
+                group.op.prepare(state, bee_state, cost, params)
+
+    def get_mutants(self, bee_networks, chosen_route_idxs):
         """Apply one mutation step to every bee, dispatched by plan group.
 
         Reproduces the legacy ``bee_colony.get_mutants`` bit-for-bit without the
@@ -78,8 +72,11 @@ class ExecutablePlan:
         each group's operator over its slots. Returns the mutated networks and a
         per-bee 1-based group slot tensor for mutation stats.
         """
+        if bee_networks.ndim != 4 or tuple(chosen_route_idxs.shape) != tuple(bee_networks.shape[:2]):
+            raise ValueError('mutation requires networks [B,bees,R,L] and route indices [B,bees]')
+        if bee_networks.shape[1] != self.total_bees:
+            raise ValueError('population bee count must match the plan')
         bee_networks = bee_networks.clone()
-        seq_state = single_bee_env_state if single_bee_env_state is not None else env_state
         max_n_nodes = bee_networks.shape[3]
         gather_idx = chosen_route_idxs[..., None, None].expand(-1, -1, -1, max_n_nodes)
         modified_routes = bee_networks.gather(2, gather_idx).squeeze(2)
@@ -98,42 +95,22 @@ class ExecutablePlan:
             group_idxs.append(idxs)
             mutation_types[idxs] = slot
 
-        # remaining-network state: the heuristic rebuild (no construction model)
-        # and force-linked empty-route construction both need the routes NOT
-        # under mutation. Matches the legacy condition exactly.
+        # Remaining networks depend on operator needs, independently of models.
         remaining_state = None
-        if self.needs_remaining_state() or (empty_routes.any() and force_linking_unlinked):
+        if self.needs_remaining_state() or (empty_routes.any() and self.empty_routes.force_linking_unlinked):
             unsel_routes = get_unselected_routes(bee_networks, chosen_route_idxs)
-            remaining_state = env_state.clone()
+            remaining_state = self.remaining_template.clone()
             remaining_state.replace_routes(unsel_routes.flatten(0, 1))
 
         if empty_routes.any():
-            new_empty = get_new_route_variants(
-                modified_routes,
-                direct_sat_dmd,
-                shortest_paths,
-                force_linking_unlinked=force_linking_unlinked,
-                remaining_state=remaining_state,
-            )
+            new_empty = self.empty_routes.routes(modified_routes, remaining_state)
             modified_routes[empty_routes] = new_empty[empty_routes]
 
         ctx = MutationContext(
             bee_networks=bee_networks,
             chosen_route_idxs=chosen_route_idxs,
             modified_routes=modified_routes,
-            env_state=env_state,
-            seq_state=seq_state,
             remaining_state=remaining_state,
-            process_sequentially=process_neural_bees_sequentially,
-            direct_sat_dmd=direct_sat_dmd,
-            shorten_prob=shorten_prob,
-            street_node_neighbours=street_node_neighbours,
-            shortest_paths=shortest_paths,
-            force_linking_unlinked=force_linking_unlinked,
-            adj_condition_target=adj_condition_target,
-            adj_condition_weight=adj_condition_weight,
-            max_n_nodes=max_n_nodes,
-            cost=cost,
         )
 
         # Each slot is a disjoint block of bees; run in canonical order so the
@@ -163,7 +140,7 @@ class ExecutablePlan:
             raise ValueError("bee counts cannot be negative")
 
     @classmethod
-    def from_method(cls, method, policies,bindings):
+    def from_method(cls, method, policies, bindings):
         groups = []
         for name, spec in method.bees.items():
             op = OPERATOR_FACTORIES[spec.operator].from_spec(name, spec, policies, bindings)

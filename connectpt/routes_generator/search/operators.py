@@ -6,10 +6,11 @@ from ..common.tensors import get_update_at_mask
 from ..env.masks import ActionMask, check_extensions_add_connections
 from ..env.features import aggr_edges_over_sequences
 from ..policy.predict import predict
+from ..city.shortest_paths import reconstruct_all_paths
 
 
 def _predict_selected_routes(model, state, networks, chosen, *, cost, binding,
-                             greedy=False, max_steps=None, mask=None, ignore_max_route_len=False):
+                             max_steps=None, mask=None, ignore_max_route_len=False):
     """Predict on an owned B × bees batch; the caller's State stays untouched."""
     params = replace(binding.params, n_routes=state.n_routes_to_plan,
                      min_route_len=state.min_route_len,
@@ -17,7 +18,7 @@ def _predict_selected_routes(model, state, networks, chosen, *, cost, binding,
     reference = state.adjustment_seed if state.adjustment_seed.numel() else None
     prediction = predict(
         model, state.graph_data, state.cost_weights, cost, binding.factory, params,
-        'greedy' if greedy else 'sample', seed_networks=networks.flatten(0, 1),
+        'sample', seed_networks=networks.flatten(0, 1),
         reference_networks=reference, route_idx=chosen.flatten(), max_steps=max_steps, mask=mask,
     )
     routes = prediction.routes[torch.arange(chosen.numel(), device=chosen.device), chosen.flatten()]
@@ -36,50 +37,6 @@ def get_direct_sat_dmd(stop_dmd, shortest_paths, symmetric):
     direct_sat_dmd[:, -1] = 0
     direct_sat_dmd[:, :, -1] = 0
     return direct_sat_dmd
-
-
-def _index_single_bee(bee_networks, chosen_route_idxs, bee_idx):
-    bee_idx = bee_idx.reshape(1)
-    return (bee_networks.index_select(1, bee_idx), chosen_route_idxs.index_select(1, bee_idx))
-
-
-def _stack_bee_route_outputs(outputs, bee_networks):
-    if outputs:
-        return torch.stack(outputs, dim=1)
-    return bee_networks.new_full((bee_networks.shape[0], 0, bee_networks.shape[-1]), -1)
-
-
-def _gather_chosen_routes_from_networks(networks, chosen_route_idxs):
-    max_n_nodes = networks.shape[-1]
-    gather_idx = chosen_route_idxs[..., None, None].expand(-1, -1, -1, max_n_nodes)
-    return networks.gather(2, gather_idx).squeeze(2)
-
-
-def _run_rebuild_variants_for_bees(variant_fn, model, env_state, bee_networks, chosen_route_idxs, bee_idxs, *, cost,binding):
-    """Run a rebuild-style neural variant one bee at a time."""
-    outputs = []
-    for bee_idx in bee_idxs.unbind(0):
-        bee_slice, chosen_slice = _index_single_bee(bee_networks, chosen_route_idxs, bee_idx)
-        networks = variant_fn(model, env_state, bee_slice, chosen_slice, cost=cost,binding=binding)
-        outputs.append(networks[:, 0, -1])
-    return _stack_bee_route_outputs(outputs, bee_networks)
-
-
-def _run_selected_route_variants_for_bees(variant_fn, *variant_args, **variant_kwargs):
-    """Run one-step neural/edit variants one bee at a time.
-
-    The final three positional args are ``bee_networks``,
-    ``chosen_route_idxs``, and ``bee_idxs`` preceded by any model/env args
-    expected by ``variant_fn``.
-    """
-    *prefix_args, bee_networks, chosen_route_idxs, bee_idxs = variant_args
-    outputs = []
-    for bee_idx in bee_idxs.unbind(0):
-        bee_slice, chosen_slice = _index_single_bee(bee_networks, chosen_route_idxs, bee_idx)
-        networks = variant_fn(*prefix_args, bee_slice, chosen_slice, **variant_kwargs)
-        routes = _gather_chosen_routes_from_networks(networks, chosen_slice)
-        outputs.append(routes[:, 0])
-    return _stack_bee_route_outputs(outputs, bee_networks)
 
 
 def get_new_route_variants(
@@ -127,71 +84,7 @@ def get_new_route_variants(
     return new_routes
 
 
-def edit_route(
-    model,
-    env_state,
-    bee_networks,
-    chosen_route_idxs,
-    greedy=False,
-    ignore_max_route_len=False,
-    allow_extend=True,
-    allow_trim_start=True,
-    allow_trim_end=True,
-    allow_halt=True,
-    adj_condition_target=None,
-    adj_condition_weight=None,
-    *,
-    cost,
-    binding,
-):
-    """Apply one selected-route prediction per bee, with owned environment state."""
-    if not model.supports_trim_actions:
-        raise ValueError("edit_route requires a model with " "supports_trim_actions=True")
-
-    if bee_networks.ndim != 4:
-        raise ValueError('neural mutations require networks [B,bees,R,L]')
-    n_cond = model.n_adjustment_cond_feats
-    if n_cond > 0:
-        if adj_condition_target is None:
-            raise ValueError(
-                "edit model was trained with adjustment conditioning "
-                f"(n_adjustment_cond_feats={n_cond}) but no "
-                "adj_condition_target was provided"
-            )
-        cost = cost.with_params(
-            adjustment_degree_target=float(adj_condition_target),
-            adjustment_degree_weight=float(adj_condition_weight) if adj_condition_weight is not None else 0.,
-        )
-    new_routes = _predict_selected_routes(
-        model, env_state, bee_networks, chosen_route_idxs, cost=cost, binding=binding,
-        greedy=greedy, max_steps=1, ignore_max_route_len=ignore_max_route_len,
-        mask=ActionMask(allow_extend, allow_trim_start, allow_trim_end, allow_halt),
-    )
-    gather_idx = chosen_route_idxs[..., None, None].expand(-1, -1, -1, bee_networks.shape[-1])
-    result_networks = bee_networks.clone()
-    result_networks.scatter_(2, gather_idx, new_routes.unsqueeze(2))
-
-    return result_networks
-
-
-def rebuild_route(model, env_state, bee_networks, drop_route_idxs, *, cost,binding):
-    """Return the remaining routes followed by the predicted selected route."""
-    if bee_networks.ndim != 4:
-        raise ValueError('neural mutations require networks [B,bees,R,L]')
-    batch_size, n_bees, n_routes, max_n_nodes = bee_networks.shape
-    keep_mask = torch.ones(bee_networks.shape[:3], dtype=bool, device=bee_networks.device)
-    keep_mask.scatter_(2, drop_route_idxs[..., None], False)
-    flat_kept_routes = bee_networks[keep_mask]
-    # this works because we remove the same # of routes from each network
-    flatbee_kept_routes = flat_kept_routes.reshape(batch_size * n_bees, n_routes - 1, max_n_nodes)
-
-    selected = _predict_selected_routes(model, env_state, bee_networks, drop_route_idxs,
-                                        cost=cost, binding=binding)
-    return torch.cat((flatbee_kept_routes.reshape(batch_size, n_bees, n_routes - 1, max_n_nodes),
-                      selected[:, :, None]), dim=2)
-
-
-def get_bee_1_variants(
+def rebuild_from_shortest_paths(
     remaining_state, batch_bee_routes, direct_sat_dmd_mat, shortest_paths, force_linking_unlinked=False
 ):
     """
@@ -270,7 +163,7 @@ def get_bee_1_variants(
     return new_routes
 
 
-def get_bee_2_variants(batch_bee_routes, shorten_prob, are_neighbours):
+def shorten_or_extend_routes(batch_bee_routes, shorten_prob, are_neighbours):
     """
     batch_bee_routes: a batch_size x n_bees x n_nodes tensor of routes
     shorten_prob: a scalar probability of shortening each route
@@ -278,14 +171,10 @@ def get_bee_2_variants(batch_bee_routes, shorten_prob, are_neighbours):
         each node is a neighbour of each other node
 
     """
-    bee_dim = batch_bee_routes.ndim == 3
-    if bee_dim:
-        # flatten the batch and bee dimensions to ease what follows
-        flat_routes = batch_bee_routes.flatten(0, 1)
-        n_bees = batch_bee_routes.shape[1]
-    else:
-        flat_routes = batch_bee_routes
-        n_bees = 1
+    if batch_bee_routes.ndim != 3:
+        raise ValueError('heuristic edit requires routes [B,bees,L]')
+    flat_routes = batch_bee_routes.flatten(0, 1)
+    n_bees = batch_bee_routes.shape[1]
 
     # expand and reshape are_neighbours to match flat_routes
     are_neighbours = are_neighbours[:, None].expand(-1, n_bees, -1, -1)
@@ -363,37 +252,33 @@ def get_bee_2_variants(batch_bee_routes, shorten_prob, are_neighbours):
     assert ((out_lens - route_lens).abs() <= 1).all()
 
     # fold back into batch x bees
-    if bee_dim:
-        out_routes = out_routes.reshape(batch_bee_routes.shape)
-    return out_routes
+    return out_routes.reshape(batch_bee_routes.shape)
 
 
-@dataclass
+@dataclass(frozen=True)
 class MutationContext:
-    """Everything a mutation operator may need at one mod step."""
+    """Population and selected-route data for one mutation step."""
 
-    bee_networks: Any  # (batch, n_bees, n_routes, max_n_nodes)
-    chosen_route_idxs: Any  # (batch, n_bees)
-    modified_routes: Any  # (batch, n_bees, max_n_nodes), empties refilled
-    env_state: Any  # bee-expanded RouteGenBatchState
-    seq_state: Any  # single-bee state (sequential mode) or env_state
-    remaining_state: Any  # state without the chosen routes, or None
-    process_sequentially: bool
-    direct_sat_dmd: Any
-    shorten_prob: float
-    street_node_neighbours: Any
-    shortest_paths: Any
-    force_linking_unlinked: bool
-    adj_condition_target: Any
-    adj_condition_weight: Any
-    max_n_nodes: int
-    cost: Any
+    bee_networks: Any  # [B,bees,R,L]
+    chosen_route_idxs: Any  # [B,bees]
+    modified_routes: Any  # [B,bees,L], empty slots refilled
+    remaining_state: Any  # selected routes removed, or None
 
 
-def _gather_group_routes(all_networks, ctx: MutationContext, idxs):
-    """Legacy per-type gather: pick the group's slots' chosen routes."""
-    gather = ctx.chosen_route_idxs[:, idxs, None, None].expand(-1, -1, -1, ctx.max_n_nodes)
-    return all_networks[:, idxs].gather(2, gather).squeeze(2)
+class EmptyRouteInitializer:
+    """Static inputs for the common empty-slot refill before group execution."""
+
+    def __init__(self, state, cost, force_linking_unlinked):
+        self.shortest_paths, _ = reconstruct_all_paths(state.nexts)
+        demand = torch.nn.functional.pad(state.demand, (0, 1, 0, 1))
+        self.direct_sat_dmd = get_direct_sat_dmd(demand, self.shortest_paths, cost.symmetric_routes)
+        self.force_linking_unlinked = force_linking_unlinked
+
+    def routes(self, modified_routes, remaining_state):
+        return get_new_route_variants(
+            modified_routes, self.direct_sat_dmd, self.shortest_paths,
+            self.force_linking_unlinked, remaining_state,
+        )
 
 
 class HeuristicOperator:
@@ -407,26 +292,55 @@ class HeuristicOperator:
 
 
 class HeuristicRebuildOp(HeuristicOperator):
-    """Legacy type-1 heuristic: rebuild the chosen route from shortest paths."""
+    """Rebuild a selected route from a sampled shortest-path terminal pair."""
 
-    kind = "shortest_path_rebuild"
+    kind = 'shortest_path_rebuild'
     uses_remaining_state = True
 
     def __init__(self, *, name):
         self.name = name
 
+    def prepare(self, state, bee_state, cost, params):
+        self.inputs = EmptyRouteInitializer(state, cost, params.force_linking_unlinked)
+
     def mutate(self, ctx: MutationContext, idxs):
-        variants = get_bee_1_variants(
-            ctx.remaining_state, ctx.modified_routes, ctx.direct_sat_dmd, ctx.shortest_paths, ctx.force_linking_unlinked
+        variants = rebuild_from_shortest_paths(
+            ctx.remaining_state, ctx.modified_routes, self.inputs.direct_sat_dmd,
+            self.inputs.shortest_paths, self.inputs.force_linking_unlinked,
         )
         return variants[:, idxs]
 
 
-class NeuralRebuildOp:
-    """Legacy type-1 neural: full-route rebuild via the construction model."""
-
-    kind = "neural_rebuild"
+class NeuralOperator:
     uses_remaining_state = False
+
+    def prepare(self, state, bee_state, cost, params):
+        self.state = bee_state.clone()
+        self.seq_state = state.clone()
+        self.cost = cost
+        self.process_sequentially = params.process_neural_bees_sequentially
+        if self.model.feature_set.adjustment_features and cost.adjustment_degree_target is None:
+            raise ValueError('adjustment features require a cost adjustment target')
+
+    def mutate(self, ctx: MutationContext, idxs):
+        if self.process_sequentially:
+            outputs = []
+            for bee_idx in idxs.unbind(0):
+                index = bee_idx.reshape(1)
+                routes = self.predict_routes(
+                    self.seq_state, ctx.bee_networks.index_select(1, index),
+                    ctx.chosen_route_idxs.index_select(1, index),
+                )
+                outputs.append(routes[:, 0])
+            return torch.stack(outputs, dim=1)
+        # Preserve the original full-population inference and RNG order.
+        return self.predict_routes(self.state, ctx.bee_networks, ctx.chosen_route_idxs)[:, idxs]
+
+
+class NeuralRebuildOp(NeuralOperator):
+    """Rebuild the selected route through the construction environment."""
+
+    kind = 'neural_rebuild'
     model_role = 'construction'
 
     @classmethod
@@ -440,46 +354,37 @@ class NeuralRebuildOp:
             raise ValueError('full rebuild respects route bounds')
         return cls(model, name=name, binding=bindings[spec.model_ref])
 
-    def __init__(self, model, *, name,binding):
+    def __init__(self, model, *, name, binding):
         self.model = model
-        self.binding=binding
+        self.binding = binding
         self.name = name
 
-    def mutate(self, ctx: MutationContext, idxs):
-        if ctx.process_sequentially:
-            return _run_rebuild_variants_for_bees(
-                rebuild_route,
-                self.model,
-                ctx.seq_state,
-                ctx.bee_networks,
-                ctx.chosen_route_idxs,
-                idxs,
-                cost=ctx.cost,
-                binding=self.binding,
-            )
-        networks = rebuild_route(self.model, ctx.env_state, ctx.bee_networks, ctx.chosen_route_idxs,
-                                 cost=ctx.cost,binding=self.binding)
-        return networks[:, idxs, -1]
+    def predict_routes(self, state, networks, chosen):
+        return _predict_selected_routes(self.model, state, networks, chosen,
+                                        cost=self.cost, binding=self.binding)
 
 
 class ShortenOp(HeuristicOperator):
-    """Legacy type-2: heuristic shorten/lengthen of the chosen route."""
+    """Shorten or extend the selected route by one stop."""
 
-    kind = "local_edit"
+    kind = 'local_edit'
     uses_remaining_state = False
 
     def __init__(self, *, name):
         self.name = name
 
+    def prepare(self, state, bee_state, cost, params):
+        self.shorten_prob = params.shorten_prob
+        self.neighbours = state.street_adj.isfinite() & (state.street_adj > 0)
+
     def mutate(self, ctx: MutationContext, idxs):
-        new_routes = get_bee_2_variants(ctx.modified_routes[:, idxs], ctx.shorten_prob, ctx.street_node_neighbours)
-        assert ((new_routes > -1).sum(dim=-1) > 0).all()
-        return new_routes
+        routes = shorten_or_extend_routes(ctx.modified_routes[:, idxs], self.shorten_prob, self.neighbours)
+        assert ((routes > -1).sum(dim=-1) > 0).all()
+        return routes
 
 
-class EditOp:
-    kind = "neural_edit"
-    uses_remaining_state = False
+class EditOp(NeuralOperator):
+    kind = 'neural_edit'
     model_role = 'edit'
 
     @classmethod
@@ -494,37 +399,18 @@ class EditOp:
         return cls(model, name=name, binding=bindings[spec.model_ref],
                    allowed_actions=spec.allowed_actions, ignore_max_route_len=spec.ignore_max_route_len)
 
-    def __init__(self, model, *, name, allowed_actions, ignore_max_route_len,binding):
+    def __init__(self, model, *, name, allowed_actions, ignore_max_route_len, binding):
         self.model = model
-        self.binding=binding
+        self.binding = binding
         self.name = name
         self.mask = ActionMask.from_names(allowed_actions)
         self.ignore_max_route_len = ignore_max_route_len
 
-    def mutate(self, ctx, idxs):
-        kwargs = dict(
-            cost=ctx.cost,
-            binding=self.binding,
-            ignore_max_route_len=self.ignore_max_route_len,
-            allow_extend=self.mask.extend,
-            allow_trim_start=self.mask.trim_start,
-            allow_trim_end=self.mask.trim_end,
-            allow_halt=self.mask.halt,
-            adj_condition_target=ctx.adj_condition_target,
-            adj_condition_weight=ctx.adj_condition_weight,
+    def predict_routes(self, state, networks, chosen):
+        return _predict_selected_routes(
+            self.model, state, networks, chosen, cost=self.cost, binding=self.binding,
+            max_steps=1, mask=self.mask, ignore_max_route_len=self.ignore_max_route_len,
         )
-        if ctx.process_sequentially:
-            return _run_selected_route_variants_for_bees(
-                edit_route,
-                self.model,
-                ctx.seq_state,
-                ctx.bee_networks,
-                ctx.chosen_route_idxs,
-                idxs,
-                **kwargs,
-            )
-        networks = edit_route(self.model, ctx.env_state, ctx.bee_networks, ctx.chosen_route_idxs, **kwargs)
-        return _gather_group_routes(networks, ctx, idxs)
 
 
 OPERATOR_FACTORIES = {

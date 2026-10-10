@@ -3,11 +3,9 @@ import logging as log
 import torch
 from tqdm import tqdm
 from ..env.state import RouteGenBatchState
-from ..city.shortest_paths import reconstruct_all_paths
 from ..common.logging import log as log_metrics
 from ..objectives.metrics import evaluate_network
 from .records import MONITOR_FIELDS, SearchBestRecord, SearchRecord
-from .operators import get_direct_sat_dmd
 
 
 def _ensure_mutation_stats_bucket(mutation_counts_out, bucket_name, bee_names):
@@ -94,22 +92,19 @@ def _choose_route_indices(bee_networks, n_routes):
 class Colony:
     """Own the population, evaluation and ordered colony operations."""
 
-    def __init__(self, state, cost_obj, init_network, *, passes_per_it, mod_steps_per_pass,
-                 shorten_prob, n_iterations, plan, silent, force_linking_unlinked,
-                 logger_list, mutation_counts_out, process_neural_bees_sequentially):
+    def __init__(self, state, cost_obj, init_network, *, method, n_iterations, plan,
+                 silent, logger_list, mutation_counts_out):
         self.state = state
         self.cost_obj = cost_obj
         self.init_network = init_network
-        self.passes_per_it = passes_per_it
-        self.mod_steps_per_pass = mod_steps_per_pass
-        self.shorten_prob = shorten_prob
+        self.passes_per_it = method.passes_per_it
+        self.mod_steps_per_pass = method.mod_steps_per_pass
+        self.method = method
         self.n_iterations = n_iterations
         self.plan = plan
         self.silent = silent
-        self.force_linking_unlinked = force_linking_unlinked
         self.logger_list = logger_list
         self.mutation_counts_out = mutation_counts_out
-        self.process_neural_bees_sequentially = process_neural_bees_sequentially
         self.n_bees = plan.total_bees
         self.initialize()
 
@@ -119,23 +114,17 @@ class Colony:
         self.dev = self.state.device
         self.batch_idxs = torch.arange(self.batch_size, device=self.dev)
         self.max_n_nodes = self.state.max_n_nodes
-        self.shortest_paths, _ = reconstruct_all_paths(self.state.nexts)
-        self.demand = torch.nn.functional.pad(self.state.demand, (0, 1, 0, 1))
         self.n_routes = self.state.n_routes_to_plan
         self.best_networks = torch.full((self.batch_size, self.n_routes, self.max_n_nodes), -1, device=self.dev)
         n_init_routes = self.init_network.shape[1]
         self.best_networks[:, :n_init_routes, :self.init_network.shape[-1]] = self.init_network
         self.reference_networks = self.best_networks.clone()
         self.state.set_adjustment_seed(self.reference_networks)
-        self.direct_sat_dmd = get_direct_sat_dmd(self.demand, self.shortest_paths, self.cost_obj.symmetric_routes)
-        self.street_node_neighbours = self.state.street_adj.isfinite() & (self.state.street_adj > 0)
         self.bee_idxs = torch.arange(self.n_bees, device=self.dev)
         log.debug('starting BCO')
         exp_states = sum([[substate] * self.n_bees for substate in self.state.batch_to_list()], [])
         self.bee_states = RouteGenBatchState.batch_from_list(exp_states)
-        self.single_bee_states = None
-        if self.process_neural_bees_sequentially:
-            self.single_bee_states = RouteGenBatchState.batch_from_list(self.state.batch_to_list())
+        self.plan.prepare(self.state, self.bee_states, self.cost_obj, self.method)
         self.bee_networks = self.best_networks[:, None].repeat(1, self.n_bees, 1, 1)
         self.bee_evaluation = self.evaluate(self.bee_networks)
         self.bee_costs = self.bee_evaluation.cost.reshape(self.batch_size, self.n_bees).clone()
@@ -165,16 +154,7 @@ class Colony:
     def mutate(self):
         chosen_route_idxs = _choose_route_indices(self.bee_networks, self.n_routes)
         _record_attempted_mutations(self.mutation_counts_out, self.plan.summary())
-        return self.plan.get_mutants(
-            self.bee_networks, chosen_route_idxs,
-            direct_sat_dmd=self.direct_sat_dmd, shorten_prob=self.shorten_prob,
-            street_node_neighbours=self.street_node_neighbours, shortest_paths=self.shortest_paths,
-            force_linking_unlinked=self.force_linking_unlinked, env_state=self.bee_states,
-            cost=self.cost_obj, single_bee_env_state=self.single_bee_states,
-            adj_condition_target=self.cost_obj.adjustment_degree_target,
-            adj_condition_weight=self.cost_obj.adjustment_degree_weight,
-            process_neural_bees_sequentially=self.process_neural_bees_sequentially,
-        )
+        return self.plan.get_mutants(self.bee_networks, chosen_route_idxs)
 
     def accept(self, new_bee_networks, mutation_types):
         new_evaluation = self.evaluate(new_bee_networks)

@@ -151,7 +151,7 @@ class RouteGenBatchState:
                     extra_data.min_route_len = min_route_len[ii]
             else:
                 extra_data.min_route_len = torch.tensor(min_route_len, device=dev)
-            extra_data.min_route_len.squeeze_()
+            extra_data.min_route_len = extra_data.min_route_len.squeeze()
 
             if max_route_len is None:
                 max_route_len = dd.num_nodes
@@ -162,7 +162,7 @@ class RouteGenBatchState:
                     extra_data.max_route_len = max_route_len[ii]
             else:
                 extra_data.max_route_len = torch.tensor(max_route_len, device=dev)
-            extra_data.max_route_len.squeeze_()
+            extra_data.max_route_len = extra_data.max_route_len.squeeze()
 
             extra_data.n_nodes_in_scenario = torch.tensor(dd.num_nodes, device=dev)
             extra_data.current_routes = torch.full((max_n_nodes,), -1, device=dev)
