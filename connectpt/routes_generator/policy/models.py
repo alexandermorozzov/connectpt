@@ -25,7 +25,6 @@ from ..env.masks import (
     extension_mask, mask_action_family, path_mask, set_invalid_scores_to_fmin,
     trim_coverage_mask,
 )
-from ..env.state import RouteGenBatchState
 from .const import (
     ATTN_DEFAULT_DROPOUT, DEFAULT_NONLIN, DEFAULT_PREFERENCE_GOALS,
     FEAT_NORM_MOMENTUM, MLP_DEFAULT_DROPOUT,
@@ -404,7 +403,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
         assert self.only_routes_with_demand_are_valid is False, 'not supported'
         self.force_linking_unlinked = force_linking_unlinked
-        self.route_step_counts_log = []
+        self._route_step_counts = []
 
         # Gated adjustment conditioning: when > 0, get_global_state_features
         # appends this many extra features (target + normalized weight), so the
@@ -450,10 +449,15 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
     def clear_step_counts_log(self):
         """Clear the route step counts accumulated by rollout."""
-        self.route_step_counts_log = []
+        self._route_step_counts = []
 
-    def _log_step_counts(self, counts: list):
-        self.route_step_counts_log.extend(counts)
+    @property
+    def route_step_counts(self):
+        """Owned rollout statistics exposed as an immutable sequence."""
+        return tuple(self._route_step_counts)
+
+    def record_step_counts(self, counts: list):
+        self._route_step_counts.extend(counts)
 
     def act(self, obs, mask, greedy=False):
         if not isinstance(obs, Observation):
@@ -491,7 +495,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
         if precalc_data is None:
             node_descs, node_pad_mask, np_embeds, path_scores = \
-                self._encode_graph(state)
+                self.encode(state)
         else:
             node_descs, node_pad_mask, np_embeds, path_scores = precalc_data
 
@@ -633,7 +637,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
         return folded_idxs, logits, entropy, action_log_probs
 
-    def _encode_graph(self, state: RouteGenBatchState):
+    def encode(self, state: Observation):
+        """Encode an Observation for actor decisions and the shared critic."""
         if not isinstance(state, Observation):
             raise TypeError("policy execution requires an Observation")
         # assemble route data objects
@@ -690,7 +695,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
         return node_descs, node_pad_mask, np_embeds, path_scores
 
-    def get_critic_features(self, state: RouteGenBatchState):
+    def get_critic_features(self, state: Observation):
         """Pooled GNN node embeddings for a shared-encoder critic.
 
         Returns ``[batch, 2 * embed_dim + n_global_features]``:
@@ -704,7 +709,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         if not isinstance(state, Observation):
             raise TypeError("policy execution requires an Observation")
         with torch.no_grad():
-            node_descs, node_pad_mask, _, _ = self._encode_graph(state)
+            node_descs, node_pad_mask, _, _ = self.encode(state)
         node_descs = node_descs.detach()
 
         # Graph-level mean pool over valid (non-padding) nodes.
@@ -728,7 +733,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             preference_goals=self.preference_goals).to(node_descs.dtype)
         return torch.cat([graph_embed, route_embed, global_feats], dim=-1)
 
-    def _get_extension_scores(self, state: RouteGenBatchState, route_lens,
+    def _get_extension_scores(self, state: Observation, route_lens,
                               are_on_routes, all_paths, nodepair_embeds,
                               drive_times, path_scores, path_lens,
                               invalid_terms, before_or_after='after'):
@@ -869,7 +874,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
     #     return updated_path_scores
 
-    def _update_path_scores(self, state: RouteGenBatchState, base_path_scores,
+    def _update_path_scores(self, state: Observation, base_path_scores,
                             new_path_lens, new_drive_times, prev_len=None,
                             prev_drive_time=None, candidate_paths=None):
         """Update the path scores based on the new path lengths and drive times.
@@ -955,7 +960,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
 
         if precalc_data is None:
             node_descs, node_pad_mask, np_embeds, path_scores = \
-                self._encode_graph(state)
+                self.encode(state)
         else:
             node_descs, node_pad_mask, np_embeds, path_scores = precalc_data
 

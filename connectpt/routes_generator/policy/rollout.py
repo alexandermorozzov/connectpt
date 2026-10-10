@@ -71,7 +71,7 @@ def rollout(env, policy, greedy=False, max_steps=None, *, actions=None, record_s
     obs, mask = env.observe()
     encoding = None
     if env.single_route and policy.action_spec.role == "construction":
-        encoding = policy._encode_graph(obs)
+        encoding = policy.encode(obs)
     previous_finished = int(env.state.n_finished_routes[0].item())
     route_steps, current_steps, first_done = [], 0, False
     while not env.is_done().all():
@@ -115,5 +115,5 @@ def rollout(env, policy, greedy=False, max_steps=None, *, actions=None, record_s
                 current_steps = 0
                 previous_finished += 1
     if actions is None:
-        policy._log_step_counts(route_steps)
+        policy.record_step_counts(route_steps)
     return trajectory
