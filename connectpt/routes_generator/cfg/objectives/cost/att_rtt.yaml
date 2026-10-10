@@ -1,0 +1,31 @@
+# @package cost
+kwargs:
+  mean_stop_time_s: 0
+  avg_transfer_wait_time_s: 300
+  demand_time_weight: 0.5
+  route_time_weight: 0.5
+  median_connectivity_weight: 0.0
+  variable_weights: true
+  pp_fraction: 0.33
+  op_fraction: 0.33
+  mcw_fraction: 0.0
+  ignore_stops_oob: true
+  adjustment_degree_target: 0.2
+  adjustment_degree_objective: raw
+  objectives:
+  - ATT
+  - RTT
+  penalties:
+    constraints: 5.0
+    adjustment: 0.0
+    edit_step: 0.0
+    forced_halt: 0.0
+  monitor:
+  - ATT
+  - RTT
+  - WMC
+  - d0
+  - d1
+  - d2
+  - d_un
+  - n_disconnected

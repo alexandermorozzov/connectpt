@@ -1,0 +1,27 @@
+# @package _global_
+defaults:
+  - /policy/model_profile@models.construction: construction_v1
+  - _self_
+
+run:
+  label: NEA
+
+method:
+  passes_per_it: 5
+  mod_steps_per_pass: 2
+  shorten_prob: 0.2
+  force_linking_unlinked: false
+  process_neural_bees_sequentially: false
+  bees:
+    neural_rebuild:
+      count: 5
+      operator: neural_rebuild
+      model_ref: construction
+      allowed_actions: [extend, halt]
+      ignore_max_route_len: false
+    local_edit:
+      count: 5
+      operator: local_edit
+      model_ref: null
+      allowed_actions: []
+      ignore_max_route_len: false

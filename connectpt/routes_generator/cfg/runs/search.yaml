@@ -1,11 +1,11 @@
 # @package _global_
 defaults:
-  - /cost: rtt_wmc
+  - /objectives/cost: rtt_wmc
   - /experiment: standard
-  - /adjustment: cap
-  - /instance: mandl
-  - /method: nea_combined
-  - /sweep: single
+  - /objectives/adjustment: cap
+  - /city/instance: mandl
+  - /search/method: nea_combined
+  - /search/sweep: single
   - _self_
 
 run:

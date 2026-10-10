@@ -1,7 +1,7 @@
 """Run one config from ``cfg/runs/``: training.
 
     python scripts/run.py --config-name runs/train                    # edit training
-    python scripts/run.py --config-name runs/train_construction algorithm=d3po
+    python scripts/run.py --config-name runs/train_construction training/algorithm=d3po
     python scripts/run.py --config-name runs/train --dry-run
 
 ``--dry-run`` builds every object and checks the config, then stops. Positional

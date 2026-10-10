@@ -1,0 +1,30 @@
+# @package dataset
+kind: construction
+source: file
+path: datasets/construction/20_nodes/mixed
+legacy_limits:
+  n_routes: 10
+  min_route_len: 2
+  max_route_len: 12
+legacy_split:
+  strategy: ordered
+  train_fraction: 0.9
+  seed: 0
+  n_val_per_tier: 0
+validation_path: null
+test_path: datasets/construction/20_nodes/test
+source_params: null
+benchmark_city: null
+scale_dynamically: true
+train_pipeline:
+  space_scale: 0.6
+  demand_scale: 0.2
+  flip: true
+  rotate: 180
+  edit_features: false
+evaluation_pipeline:
+  space_scale: 0
+  demand_scale: 0
+  flip: false
+  rotate: 0
+  edit_features: false

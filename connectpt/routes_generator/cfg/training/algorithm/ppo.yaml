@@ -1,0 +1,28 @@
+# @package algorithm
+name: ppo
+gamma: 1.0
+epsilon: 0.2
+use_gae: true
+gae_lambda: 0.95
+n_epochs: 1
+minibatch_size: ${train_loop.batch_size}
+entropy_weight: 0.0
+normalize_advantages: true
+diversity_weight: 0.0
+diversity_alpha: 1.0
+preference_noise_sigma: 0.15
+max_grad_norm: 0.5
+critic:
+  learning_rate: 0.0005
+  decay: 0.01
+  shared: false
+  unbiased: ${model.route_generator.kwargs.feature_norm_unbiased}
+  normalize_returns: true
+  huber: true
+  huber_delta: 1.0
+  value_clip: 0.2
+  return_norm_momentum: 0.05
+  feature_norm_momentum: 0.001
+  n_layers: 3
+  width_multiplier: 2
+  dropout: 0.0

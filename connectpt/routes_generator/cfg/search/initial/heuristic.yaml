@@ -1,0 +1,3 @@
+# @package initial
+alpha: 0.5
+prioritize_direct_connections: true

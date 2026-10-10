@@ -8,7 +8,7 @@ from connectpt.routes_generator.run.const import CFG_DIR
 def test_overnight_preserves_measured_batch_and_independent_training_limits():
     for trainer, gamma in [("ppo", 1.0), ("d3po", 0.95)]:
         with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-            cfg = compose(config_name="runs/train_construction_overnight", overrides=[f"algorithm={trainer}"])
+            cfg = compose(config_name="runs/train_construction_overnight", overrides=[f"training/algorithm={trainer}"])
         assert cfg.train_loop.batch_size == cfg.algorithm.minibatch_size == 32
         assert cfg.train_loop.horizon == 64 and cfg.train_loop.cpu_threads == 2
         assert cfg.evaluation.graph_count == cfg.evaluation.test_graph_count == 64
@@ -35,7 +35,7 @@ def test_launcher_dry_run_validates_both_overnight_trainers(tmp_path):
                 "run.py",
                 "--config-name",
                 "runs/train_construction_overnight",
-                f"algorithm={trainer}",
+                f"training/algorithm={trainer}",
                 "--dry-run",
                 "--log",
                 str(log),
@@ -46,4 +46,4 @@ def test_launcher_dry_run_validates_both_overnight_trainers(tmp_path):
         )
         assert result.returncode == 0, result.stdout + result.stderr
         text = log.read_text(encoding="utf-8")
-        assert "dry-run OK" in text and f"algorithm={trainer}" in text
+        assert "dry-run OK" in text and f"training/algorithm={trainer}" in text

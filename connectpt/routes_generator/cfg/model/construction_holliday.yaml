@@ -1,7 +1,0 @@
-defaults:
-  - construction
-  - override /features@features: construction_holliday
-  - _self_
-route_generator:
-  kwargs:
-    feature_norm_unbiased: true

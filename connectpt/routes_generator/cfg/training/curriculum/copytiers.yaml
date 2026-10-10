@@ -1,0 +1,8 @@
+# @package curriculum
+enabled: true
+schedule:
+  - [0.15, [copy_full], full]
+  - [0.30, [copy_full, copy_boundary], "+boundary"]
+  - [0.55, [copy_full, copy_boundary, copy_mixed], "+mixed"]
+  - [0.75, [copy_full, copy_boundary, copy_mixed, covered_dup], "+covered"]
+  - [1.00, [copy_full, copy_boundary, copy_mixed, covered_dup, lc_clean], "+clean"]

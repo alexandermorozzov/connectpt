@@ -15,14 +15,14 @@ logger_list:
 - tensorboard
 - csv
 defaults:
-- /cost: rtt_wmc
-- /adjustment: cap
-- /dataset: lc_copytiers
+- /objectives/cost: rtt_wmc
+- /objectives/adjustment: cap
+- /training/dataset: lc_copytiers
 - /experiment: standard
-- /model: edit_trim_seeded
-- /algorithm: ppo
+- /policy/model: edit_trim_seeded
+- /training/algorithm: ppo
 - /env: edit
-- /curriculum: copytiers
+- /training/curriculum: copytiers
 - _self_
 optimizer:
   name: Adam

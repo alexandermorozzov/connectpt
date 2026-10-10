@@ -1,0 +1,30 @@
+# @package dataset
+kind: edit
+source: file
+path: datasets/lc_copytiers_n1000_n50_r12_len8_15_v1
+legacy_limits:
+  n_routes: 12
+  min_route_len: 8
+  max_route_len: 15
+legacy_split:
+  strategy: stratified
+  train_fraction: 0.9
+  seed: 0
+  n_val_per_tier: 4
+validation_path: null
+test_path: null
+source_params: null
+benchmark_city: null
+scale_dynamically: true
+train_pipeline:
+  space_scale: 0.05
+  demand_scale: 0.1
+  flip: false
+  rotate: 0
+  edit_features: true
+evaluation_pipeline:
+  space_scale: 0
+  demand_scale: 0
+  flip: false
+  rotate: 0
+  edit_features: true

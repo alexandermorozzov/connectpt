@@ -2,30 +2,24 @@
 
 Конфиг собирается Hydra из небольших пресетов. Точки входа — файлы в `runs/`.
 Они выбирают пресеты и задают только настройки прогона.
+Путь группы используется для выбора файла: `training/algorithm=d3po`.
+Поля собранного конфига сохраняют свои имена: `algorithm.gamma=0.95`.
 
 ```text
 cfg/
 ├── runs/            # search, train, train_construction, train_construction_overnight, generate_construction, generate_edit, init_routes
-├── instance/        # путь к бенчмарку и ограничения маршрутов
-├── method/          # методы поиска: ea, nea, nea_edit, nea_combined
-├── initial/         # настройки эвристических начальных сетей
-├── corruption/      # параметры порчи: тиры датасета и реалистичная начальная сеть
-├── cost/            # цель: rtt_wmc (поиск, edit), att_rtt (construction)
-├── adjustment/      # штраф за изменение сети: cap
-├── model/           # архитектура сети
-├── model_profile/   # архитектура, чекпоинт и пресет среды
-├── dataset/         # датасет и его разбиение
-├── dataset_build/   # параметры генерации датасета
-├── curriculum/      # расписание тиров edit-обучения
-├── algorithm/       # PPO / D3PO и параметры критика
-├── features/        # порядок и размерности признаков
+├── city/instance/   # бенчмарки и ограничения маршрутов
+├── network/corruption/ # параметры порчи
+├── objectives/      # cost/ и adjustment/
+├── policy/          # model/ с route_generator/; model_profile/
+├── training/        # algorithm/, dataset/, dataset_build/, curriculum/
+├── search/          # method/, initial/, sweep/
 ├── experiment/      # симметричность маршрутов и режим памяти
-├── sweep/           # точка поиска: α, число итераций
-└── env/             # construction / edit: награда и ограничения действий
+└── env/             # construction / edit; features/ с входами модели
 ```
 
-- `model/` отвечает, **какая архитектура** строится.
-- `model_profile/` отвечает, **какая версия** архитектуры используется, вместе
+- `policy/model/` отвечает, **какая архитектура** строится.
+- `policy/model_profile/` отвечает, **какая версия** архитектуры используется, вместе
   с чекпоинтом и пресетом среды для prediction / поиска.
 - Правила действий задаются в `env.params`: `force_linking_unlinked` и `max_act_len`
   общие; `max_route_edit_steps`, `max_trim_actions_per_route`, `force_nonhalt_first_step`,
@@ -50,12 +44,12 @@ cfg/
 python scripts/run_search.py --dry-run --methods ea
 python scripts/run_search.py --methods nea_edit --instances mandl
 python scripts/run.py --config-name runs/train --dry-run
-python scripts/run.py --config-name runs/train_construction algorithm=d3po --dry-run
+python scripts/run.py --config-name runs/train_construction training/algorithm=d3po --dry-run
 python scripts/generate_dataset.py --config-name runs/generate_edit --out datasets/lc_copytiers_manifest_v1 --dry-run
 ```
 
-Поиск и edit-обучение используют одну цель `cost=rtt_wmc`. Штраф за изменение
-сети задаёт `adjustment/cap.yaml`. Выключить штраф: `cost.kwargs.penalties.adjustment=0`
+Поиск и edit-обучение используют одну цель `objectives/cost=rtt_wmc`. Штраф за изменение
+сети задаёт `objectives/adjustment/cap.yaml`. Выключить штраф: `cost.kwargs.penalties.adjustment=0`
 (в поиске — `--adj-weight 0`). Режим «цель»: `cost.kwargs.adjustment_degree_objective=target`.
 Adjustment рассчитывается по LCS полных последовательностей маршрутов из статьи.
 При `cap` штраф равен `weight · max(adjustment − target, 0)`. Поле `cost` в таблицах
@@ -88,7 +82,7 @@ edit-валидации старого датасета. Для нового ф�
 Протокол и выбранные индексы графов записываются в `run.json`, собранные параметры
 — в `config.yaml`, значения метрик — в `history.csv` и TensorBoard.
 
-YAML содержит только значения. Комментарии в конфигах не пишутся.
+YAML содержит значения и директиву `# @package`, задающую место пресета в собранном конфиге.
 
 Датасеты:
 
@@ -118,10 +112,10 @@ YAML содержит только значения. Комментарии в �
 Профиль выбирается для роли метода через Hydra override:
 
 ```powershell
-python scripts/run.py --config-name runs/search method=nea_edit "model_profile@models.edit=edit_v1" run.cpu=true --dry-run
+python scripts/run.py --config-name runs/search search/method=nea_edit "policy/model_profile@models.edit=edit_v1" run.cpu=true --dry-run
 ```
 
-Профиль подключает архитектуру из `model/` через `defaults`; готовая архитектура
+Профиль подключает архитектуру из `policy/model/` через `defaults`; готовая архитектура
 находится в `model_profile.model` или `models.<роль>.model`. Поле `checkpoint_path`
 задаёт файл весов. Корень весов передаётся через `--weights-dir`; по умолчанию это
 `artifacts/model_weights/`. Для обучения construction доступны архитектуры

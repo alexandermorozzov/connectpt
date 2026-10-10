@@ -1,6 +1,0 @@
-name: mumford3
-path: datasets/instances/mumford3
-n_routes: 60
-min_route_len: 12
-max_route_len: 25
-crs: null

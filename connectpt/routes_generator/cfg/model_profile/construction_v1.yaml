@@ -1,5 +1,0 @@
-defaults:
-  - /model@model: construction
-  - /env@env: construction
-  - _self_
-checkpoint_path: inductive_random_graphs_weighted_connectivity.pt

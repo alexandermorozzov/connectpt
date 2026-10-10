@@ -1,0 +1,42 @@
+# @package corruption
+copy_full:
+  events: 3
+  max_multiplicity: 3
+  kinds:
+  - full_copy
+  covered: false
+  d_un_cap: null
+copy_boundary:
+  events: 4
+  max_multiplicity: 4
+  kinds:
+  - prefix_copy
+  - suffix_copy
+  covered: false
+  d_un_cap: null
+copy_mixed:
+  events: 6
+  max_multiplicity: 5
+  kinds:
+  - full_copy
+  - prefix_copy
+  - suffix_copy
+  - middle_copy
+  covered: false
+  d_un_cap: null
+covered_dup:
+  events: 6
+  max_multiplicity: 4
+  kinds:
+  - full_copy
+  - prefix_copy
+  - suffix_copy
+  - middle_copy
+  covered: true
+  d_un_cap: 10.0
+lc_clean:
+  events: 0
+  max_multiplicity: 1
+  kinds: []
+  covered: false
+  d_un_cap: null

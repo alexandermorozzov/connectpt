@@ -1,0 +1,7 @@
+# @package instance
+name: macsa_mandl_10
+path: datasets/instances/macsa_mandl_10
+n_routes: 10
+min_route_len: 5
+max_route_len: 8
+crs: null

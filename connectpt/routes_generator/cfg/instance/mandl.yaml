@@ -1,6 +1,0 @@
-name: mandl
-path: datasets/instances/mandl
-n_routes: 6
-min_route_len: 2
-max_route_len: 8
-crs: null

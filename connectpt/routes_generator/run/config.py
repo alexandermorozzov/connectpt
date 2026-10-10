@@ -100,7 +100,7 @@ def build_experiment(
     (parent config + groups). A passed value is merged into the composed cfg so
     the sweep/data/run block reflects it, without touching any file on disk.
 
-    A **method** selects the ``method=<x>`` Hydra group, which carries the
+    A **method** selects the ``search/method=<x>`` Hydra group, which carries the
     operators AND the models they need.
 
     ``alpha``/``adj_target`` set the one search point (the script loops over the grid).
@@ -113,9 +113,9 @@ def build_experiment(
     # group before merge); everything else is injected into the composed cfg.
     group_overrides = []
     if method is not None:
-        group_overrides.append(f"method={method}")
+        group_overrides.append(f"search/method={method}")
     if instance is not None:
-        group_overrides.append(f"instance={instance}")
+        group_overrides.append(f"city/instance={instance}")
     cfg = load_experiment(name, overrides=group_overrides)
     with open_dict(cfg):
         # -- output roots (weights read from, scratch written to) --

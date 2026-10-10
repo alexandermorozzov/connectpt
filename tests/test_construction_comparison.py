@@ -226,7 +226,7 @@ def test_construction_uses_legacy_data_setup_and_existing_updates(trainer, paret
         cfg = compose(
             config_name="runs/train_construction",
             overrides=[
-                f"algorithm={trainer}",
+                f"training/algorithm={trainer}",
                 "run.cpu=true",
                 "train_loop.batch_size=2",
                 "train_loop.n_iterations=2",
@@ -327,12 +327,12 @@ def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
 
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
         cfg = compose(config_name="runs/train_construction")
-        legacy = compose(config_name="runs/train_construction", overrides=["model=construction"])
+        legacy = compose(config_name="runs/train_construction", overrides=["policy/model=construction"])
     model = build_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, torch.device("cpu")))
     assert cfg.train_loop.batch_size == cfg.algorithm.minibatch_size == cfg.evaluation.graph_count == 64
     assert cfg.algorithm.gamma == 1.0 and cfg.env.params.diff_reward
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
-        d3po = compose(config_name="runs/train_construction", overrides=["algorithm=d3po"])
+        d3po = compose(config_name="runs/train_construction", overrides=["training/algorithm=d3po"])
     assert d3po.algorithm.gamma == 0.95 and d3po.env.params.diff_reward
     assert model.preference_goals == ("ATT", "RTT")
     assert model.edge_feat_dim == 13

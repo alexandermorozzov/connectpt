@@ -1,9 +1,9 @@
 # @package _global_
 defaults:
-  - /cost: rtt_wmc
-  - /adjustment: cap
+  - /objectives/cost: rtt_wmc
+  - /objectives/adjustment: cap
   - /experiment: standard
-  - /model_profile: construction_v1
-  - /initial: heuristic
-  - /corruption: realistic
+  - /policy/model_profile: construction_v1
+  - /search/initial: heuristic
+  - /network/corruption: realistic
   - _self_

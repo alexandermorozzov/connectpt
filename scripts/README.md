@@ -65,7 +65,7 @@ python scripts/run_search.py --dry-run --methods ea nea nea_edit nea_combined
 | `nea_edit` | замена кратчайшим путём | обученный trim / extend | edit |
 | `nea_combined` | нейросетевая перестройка | обученный trim / extend | construction + edit |
 
-Состав пчёл и модели метода — `cfg/method/<метод>.yaml`. Цель — `cfg/cost/rtt_wmc.yaml`.
+Состав пчёл и модели метода — `cfg/search/method/<метод>.yaml`. Цель — `cfg/objectives/cost/rtt_wmc.yaml`.
 Группы `method.bees` исполняются по порядку записи. `allowed_actions` задаёт
 всю маску нейронного edit-оператора. Общие настройки колонии также лежат в `method`.
 
@@ -200,9 +200,9 @@ models:
 Construction-политика строит сеть с нуля. Алгоритм задаёт группа `algorithm`:
 
 ```bash
-python scripts/run.py --config-name runs/train_construction algorithm=ppo
-python scripts/run.py --config-name runs/train_construction algorithm=d3po
-python scripts/run.py --config-name runs/train_construction algorithm=d3po algorithm.diversity_weight=0
+python scripts/run.py --config-name runs/train_construction training/algorithm=ppo
+python scripts/run.py --config-name runs/train_construction training/algorithm=d3po
+python scripts/run.py --config-name runs/train_construction training/algorithm=d3po algorithm.diversity_weight=0
 ```
 
 ### 5.1. Данные
@@ -241,9 +241,9 @@ python scripts/run.py --config-name runs/train_construction dataset.path=dataset
 - Предпочтения: α = 0 с вероятностью 0.33, α = 1 — 0.33, иначе α ~ U[0, 1].
   Веса держатся до смены graph batch во всех алгоритмах.
 - RTT считается в обе стороны.
-- Абляция без diversity: `algorithm=d3po algorithm.diversity_weight=0`.
+- Абляция без diversity: `training/algorithm=d3po algorithm.diversity_weight=0`.
   Diversity D3PO — полный categorical KL.
-- Старые веса с 14 edge-признаками грузятся только с `model=construction`.
+- Старые веса с 14 edge-признаками грузятся только с `policy/model=construction`.
 
 ### 5.3. Что пишется
 
@@ -283,7 +283,7 @@ EU — отрицательная стоимость: больше — лучш�
 ```powershell
 $cmp = 'artifacts/comparisons/construction_seed0'
 foreach ($a in 'ppo', 'd3po') {
-    .\scripts\launch.ps1 --wait run.py --config-name runs/train_construction algorithm=$a `
+    .\scripts\launch.ps1 --wait run.py --config-name runs/train_construction training/algorithm=$a `
         run.name=$a run.seed=0 --runs-dir $cmp/runs --weights-dir $cmp/weights
 }
 ```
@@ -302,8 +302,8 @@ foreach ($a in 'ppo', 'd3po') {
 
 ```powershell
 $cmp = 'artifacts/comparisons/construction_overnight_seed0'
-.\scripts\launch.ps1 run.py --config-name runs/train_construction_overnight algorithm=ppo run.name=ppo --runs-dir $cmp/runs --weights-dir $cmp/weights
-.\scripts\launch.ps1 run.py --config-name runs/train_construction_overnight algorithm=d3po run.name=d3po --runs-dir $cmp/runs --weights-dir $cmp/weights
+.\scripts\launch.ps1 run.py --config-name runs/train_construction_overnight training/algorithm=ppo run.name=ppo --runs-dir $cmp/runs --weights-dir $cmp/weights
+.\scripts\launch.ps1 run.py --config-name runs/train_construction_overnight training/algorithm=d3po run.name=d3po --runs-dir $cmp/runs --weights-dir $cmp/weights
 ```
 
 - Профиль — `cfg/runs/train_construction_overnight.yaml`: batch 32, horizon 64,
@@ -333,7 +333,7 @@ TensorBoard — один сервер на всё: `tensorboard --logdir artifac
 в фоне. Первый аргумент — скрипт, остальные уходят ему без изменений.
 
 ```powershell
-.\scripts\launch.ps1 run.py --config-name runs/train_construction algorithm=d3po
+.\scripts\launch.ps1 run.py --config-name runs/train_construction training/algorithm=d3po
 .\scripts\launch.ps1 run_search.py --methods ea nea --instances mandl --alpha 0 1
 .\scripts\launch.ps1 --wait run.py --config-name runs/train --dry-run
 ```

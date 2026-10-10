@@ -1,10 +1,10 @@
 # @package _global_
 defaults:
-  - /cost: rtt_wmc
-  - /adjustment: cap
+  - /objectives/cost: rtt_wmc
+  - /objectives/adjustment: cap
   - /experiment: standard
-  - /model_profile: construction_v1
-  - /dataset_build: copytiers
+  - /policy/model_profile: construction_v1
+  - /training/dataset_build: copytiers
   - _self_
 
 run:

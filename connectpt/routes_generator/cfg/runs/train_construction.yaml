@@ -15,13 +15,13 @@ logger_list:
 - tensorboard
 - csv
 defaults:
-- /cost: att_rtt
-- /dataset: construction
+- /objectives/cost: att_rtt
+- /training/dataset: construction
 - /experiment: standard
-- /model: construction_holliday
-- /algorithm: ppo
+- /policy/model: construction_holliday
+- /training/algorithm: ppo
 - /env: construction
-- /curriculum: construction
+- /training/curriculum: construction
 - _self_
 optimizer:
   name: Adam
