@@ -56,6 +56,10 @@ def test_diversity_squares_full_kl_and_is_independent_of_replayed_action(monkeyp
     class State:
         cost_weights = learning.preference_dict(preferences)
 
+        def clone(self):
+            import copy
+            return copy.deepcopy(self)
+
         def set_cost_weights(self, weights):
             self.cost_weights = weights
 
@@ -94,3 +98,50 @@ def test_diversity_squares_full_kl_and_is_independent_of_replayed_action(monkeyp
     loss.backward()
     assert p.grad.isfinite().all() and q.grad.isfinite().all()
     assert p.grad.abs().sum() > 0 and q.grad.abs().sum() > 0
+
+
+@pytest.mark.parametrize('failure', [False, True])
+def test_diversity_owns_neighbor_state_even_when_evaluation_changes_it(failure):
+    import copy
+    from types import SimpleNamespace
+
+    preferences = torch.tensor([[.2, .8, 0.]])
+
+    class State:
+        def __init__(self):
+            self.cost_weights = learning.preference_dict(preferences)
+            self.cache = torch.tensor([3.])
+
+        def clone(self):
+            return copy.deepcopy(self)
+
+        def set_cost_weights(self, weights):
+            self.cost_weights = weights
+
+    state = State()
+    original = state.cost_weights
+    saved = {key: value.clone() for key, value in original.items()}
+
+    class Model:
+        def evaluate(self, neighbor, mask, action):
+            assert neighbor is not state
+            neighbor.cache.add_(1)
+            neighbor.cost_weights['demand_time_weight'].fill_(.4)
+            if failure:
+                raise RuntimeError('injected neighbor failure')
+            return SimpleNamespace(log_probs=torch.tensor([[.4, .6]]).log())
+
+    cost = SimpleNamespace(get_preference_weights=lambda *args, **kwargs: preferences,
+                           enabled_component_mask=(True, True, False))
+    params = SimpleNamespace(diversity_weight=1., preference_noise_sigma=.15, diversity_alpha=.5)
+    algorithm = learning.D3PO(params, cost)
+    env = SimpleNamespace(observation=lambda owned_state: owned_state)
+    output = SimpleNamespace(log_probs=torch.tensor([[.8, .2]]).log(), action=object())
+    if failure:
+        with pytest.raises(RuntimeError, match='injected neighbor failure'):
+            algorithm.diversity(Model(), env, state, output, None)
+    else:
+        assert algorithm.diversity(Model(), env, state, output, None).loss.isfinite()
+    assert state.cost_weights is original
+    assert state.cache.item() == 3.
+    assert all(torch.equal(original[key], value) for key, value in saved.items())

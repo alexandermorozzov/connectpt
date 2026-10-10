@@ -25,6 +25,11 @@ class Algorithm(ABC):
     def __init__(self, params, cost):
         self.params, self.cost = params, cost
 
+    @property
+    @abstractmethod
+    def scalar_values(self):
+        """True for [B] values; False for [B,K], including a single goal."""
+
     @abstractmethod
     def potential(self, result):
         """Scalarize before differencing, preserving floating point order."""
@@ -43,8 +48,20 @@ class Algorithm(ABC):
         """Number of value predictions per state."""
 
     def returns(self, rewards, values, dones, final_values):
+        if dones.ndim != 2 or dones.dtype != torch.bool:
+            raise ValueError('terminal masks must be boolean [T,B]')
+        shape = tuple(dones.shape) + (() if self.scalar_values else (self.value_dim,))
+        if tuple(rewards.shape) != shape or tuple(values.shape) != shape or tuple(final_values.shape) != shape[1:]:
+            raise ValueError('rewards, values and bootstrap must match the algorithm value contract')
         p = self.params
         return returns_and_advantages(rewards, values, dones, final_values, p.gamma, p.use_gae, p.gae_lambda)
+
+    def bootstrap(self, values, unfinished):
+        """Retain horizon values; terminal episodes contribute zero bootstrap."""
+        shape = tuple(unfinished.shape) + (() if self.scalar_values else (self.value_dim,))
+        if unfinished.ndim != 1 or unfinished.dtype != torch.bool or tuple(values.shape) != shape:
+            raise ValueError('bootstrap requires [B] terminal mask and algorithm-shaped values')
+        return values * expand_mask(unfinished, values)
 
 
 @dataclass

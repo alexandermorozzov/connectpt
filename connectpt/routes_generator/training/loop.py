@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 
 from ..objectives.const import ACTION_PENALTIES
+from ..env.rewards import potential_reward
 from ..policy.rollout import rollout
 from ..policy.predict import predict
 from ..common.logging import log, flush
@@ -70,11 +71,8 @@ def collect(env, policy, algorithm, critic, data, horizon):
             outputs.append(out)
             done = trajectory.dones[0]
             current = algorithm.potential(env.result)
-            if env.params.diff_reward:
-                reward = (previous - current) * env.params.reward_scale
-            else:
-                ended = done & active
-                reward = -current * env.params.reward_scale * (ended[:, None] if current.ndim > 1 else ended)
+            reward = potential_reward(previous, current, active, done,
+                                      diff=env.params.diff_reward, scale=env.params.reward_scale)
             action_penalty = trajectory.rewards[0][1][:, len(env.result.penalty_names):]
             for index, name in enumerate(ACTION_PENALTIES):
                 weight = env.cost.penalty_weights[name]
@@ -101,10 +99,10 @@ def collect(env, policy, algorithm, critic, data, horizon):
                 terminal["alpha"].append(env.state.cost_weights["demand_time_weight"][ended])
             data.after_step(env, done)
         # Values are computed after collection; rollout has no critic dependency.
-        values = torch.stack([critic.from_state(state.to_device(device)) for state in states])
-        bootstrap = critic.from_state(env.state)
+        values = torch.stack([critic.predict(state.to_device(device)) for state in states])
+        bootstrap = critic.predict(env.state)
         mask = data.bootstrap_mask(env)
-        bootstrap = bootstrap * (mask[:, None] if bootstrap.ndim > 1 else mask)
+        bootstrap = algorithm.bootstrap(bootstrap, mask)
         rewards, dones = torch.stack(rewards), torch.stack(dones)
         returns, advantages = algorithm.returns(rewards, values, dones, bootstrap)
     batch = TrainingBatch(

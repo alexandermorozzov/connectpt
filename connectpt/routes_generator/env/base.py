@@ -8,6 +8,7 @@ from .actions import ActionSpec, RouteAction
 from .const import RouteActionKind
 from .features import FeatureParams, observe, select_features, NODE_COLUMNS
 from .masks import prepare_action_mask
+from .rewards import potential_reward
 from ..city.graph import STOP_KEY
 from ..objectives.const import ACTION_PENALTIES
 
@@ -139,14 +140,10 @@ class Env(ABC):
         self.steps += 1
         self.result = self.cost(self.state)
         done = self.is_done()
-        if self.params.diff_reward:
-            goals = previous.goals - self.result.goals
-            penalties = previous.penalties - self.result.penalties
-        else:
-            goals = -self.result.goals * done[:, None]
-            penalties = -self.result.penalties * done[:, None]
-        goals = goals * self.params.reward_scale * active[:, None]
-        penalties = penalties * self.params.reward_scale * active[:, None]
+        goals = potential_reward(previous.goals, self.result.goals, active, done,
+                                 diff=self.params.diff_reward, scale=self.params.reward_scale)
+        penalties = potential_reward(previous.penalties, self.result.penalties, active, done,
+                                     diff=self.params.diff_reward, scale=self.params.reward_scale)
         # Action penalties are episodic costs, not potential differences.
         actions = self.action_penalties(action, active, forced).to(penalties.dtype)
         penalties = torch.cat((penalties, torch.zeros_like(actions) - actions), dim=-1)

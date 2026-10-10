@@ -55,12 +55,9 @@ class D3PO(Algorithm):
             preferences, self.params.preference_noise_sigma, self.cost.enabled_component_mask
         )
         target = self.params.diversity_alpha * (preferences - neighbor).abs().sum(-1)
-        saved = {key: value.clone() for key, value in state.cost_weights.items()}
-        state.set_cost_weights(preference_dict(neighbor))
-        try:
-            obs = env.observation(state)
-            neighbor_output = policy.evaluate(obs, mask, output.action)
-        finally:
-            state.set_cost_weights(saved)
+        neighbor_state = state.clone()
+        neighbor_state.set_cost_weights(preference_dict(neighbor))
+        obs = env.observation(neighbor_state)
+        neighbor_output = policy.evaluate(obs, mask, output.action)
         kl = categorical_kl(output.log_probs, neighbor_output.log_probs)
         return Diversity((kl - target).pow(2).mean(), kl.mean(), target.mean())

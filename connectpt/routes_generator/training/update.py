@@ -50,16 +50,19 @@ def shape_groups(states, indices):
     groups = {}
     for index in indices.detach().cpu().tolist():
         state = states[index]
-        state.extra_data.shortest_path_sequences = torch.zeros(
-            (state.batch_size, 0, 0, 0), dtype=torch.long, device=state.device
-        )
         signature = tuple(
             (key, tuple(state.extra_data[key].shape[1:]))
             for key in sorted(state.extra_data.keys())
-            if torch.is_tensor(state.extra_data[key])
+            if key != 'shortest_path_sequences' and torch.is_tensor(state.extra_data[key])
         )
         groups.setdefault(signature, []).append(index)
     return [torch.tensor(group, device=indices.device) for group in groups.values()]
+
+
+def prepare_replay(states, indices, device):
+    """Own the selected snapshots and their lazy caches before any forward."""
+    selected = [states[index].snapshot_for_buffer(device) for index in indices.detach().cpu().tolist()]
+    return RouteGenBatchState.batch_from_list(selected)
 
 
 def replay_mask(masks, indices, batch_size, score, device):
@@ -89,9 +92,7 @@ def update(env, policy, algorithm, critic, optimizer, batch):
     initial_error = None
     for raw_indices in torch.split(order, states_per_minibatch):
         for indices in shape_groups(batch.states, raw_indices):
-            selected = [batch.states[index] for index in indices.detach().cpu().tolist()]
-            state = selected[0] if len(selected) == 1 else RouteGenBatchState.batch_from_list(selected)
-            state = state.to_device(device)
+            state = prepare_replay(batch.states, indices, device)
             score = batch.score[indices].flatten()
             if not score.any():
                 continue
@@ -103,7 +104,7 @@ def update(env, policy, algorithm, critic, optimizer, batch):
             advantages = batch.advantages[indices].flatten(0, 1)[score]
             preferences = batch.preferences[indices].flatten(0, 1)[score]
             mask = replay_mask(batch.masks, indices, batch_size, score, device)
-            critic.from_state(state)
+            critic.prepare_update(state)
             value_stats = critic.update(returns, old_values=returns - advantages)
             value_buffer.append(value_stats["values"])
             target_buffer.append(value_stats["targets"])

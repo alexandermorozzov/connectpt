@@ -98,6 +98,8 @@ class ValueHead:
         value estimates, raw units) enables PPO value-clipping when
         ``value_clip`` is set.
         """
+        if self._curr_estimate is None:
+            raise RuntimeError('prepare_update must precede a critic update')
         self.optim.zero_grad()
         pred = self._curr_estimate
         costs = costs.to(pred.dtype)
@@ -164,16 +166,16 @@ class ValueHead:
             return self.actor_model.get_critic_features(self.observation(state))
         return critic_features(state, self.feature_set)
 
-    def from_state(self, state):
+    def _forward(self, state):
         input_data = self._features_from_state(state)
         if self.model is None:
             self._build_model(input_data.shape[-1])
         pred = self.model(input_data)
         if self.scalar:
             pred = pred.squeeze(-1)
-        # ``_curr_estimate`` is what update() regresses: the normalized
-        # prediction when return-normalization is on, else the raw value.
-        self._curr_estimate = pred
+        return pred
+
+    def _baseline(self, pred):
         if self.normalize_returns:
             baseline = pred * self._ret_std + self._ret_mean
         else:
@@ -182,3 +184,12 @@ class ValueHead:
         assert baseline.isfinite().all()
 
         return baseline.detach()
+
+    def predict(self, state):
+        """Detached collection/bootstrap values; does not prepare an update."""
+        return self._baseline(self._forward(state))
+
+    def prepare_update(self, state):
+        """Retain one differentiable forward for the subsequent update."""
+        self._curr_estimate = self._forward(state)
+        return self._baseline(self._curr_estimate)
