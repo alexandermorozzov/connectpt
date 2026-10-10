@@ -1,7 +1,6 @@
 """Best network measurements and colony acceptance rate."""
 from dataclasses import dataclass
 from typing import ClassVar
-from .const import MONITOR_FIELDS
 
 
 @dataclass

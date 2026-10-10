@@ -13,10 +13,10 @@ def export_evaluation(result, *, index=None, reduction=None):
         raise ValueError("supported reduction is mean")
     metrics = evaluate_network(result)
     values = {
-        "ATT": metrics["ATT"], "RTT": metrics["RTT"], "WMC": metrics["median_connectivity_weighted"],
+        "ATT": metrics["ATT"], "RTT": metrics["RTT"], "WMC": metrics["WMC"],
         "cost": result.cost, "adj_vs_seed": result.adjustment,
         "rtt_cost": result.normalized["RTT"], "wmc_cost": result.normalized["WMC"],
-        **{name: metrics[key] for name, key in zip(("d0", "d1", "d2", "d_un"), ("$d_0$", "$d_1$", "$d_2$", "$d_{un}$"))},
+        **{name: metrics[name] for name in ("d0", "d1", "d2", "d_un")},
         "redun%": result.redundancy * 100,
     }
     return {name: float(value[index].detach().cpu()) if index is not None else float(value.mean().detach().cpu())

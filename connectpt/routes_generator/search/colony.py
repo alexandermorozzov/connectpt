@@ -4,8 +4,8 @@ import torch
 from tqdm import tqdm
 from ..env.state import RouteGenBatchState
 from ..common.logging import log as log_metrics
-from ..objectives.metrics import evaluate_network
-from .records import MONITOR_FIELDS, SearchBestRecord, SearchRecord
+from ..objectives.metrics import evaluate_network, monitor_metrics
+from .records import SearchBestRecord, SearchRecord
 
 
 def _ensure_mutation_stats_bucket(mutation_counts_out, bucket_name, bee_names):
@@ -146,8 +146,8 @@ class Colony:
             float(result.cost.mean()),
             {name: float(result.goals[:, i].mean()) for i, name in enumerate(result.goal_names)},
             {name: float(result.penalties[:, i].mean()) for i, name in enumerate(result.penalty_names)},
-            {MONITOR_FIELDS[name]: float(value.mean()) for name, value in metrics.items()
-             if name in MONITOR_FIELDS and MONITOR_FIELDS[name] in self.cost_obj.monitor},
+            {name: float(value.mean()) for name, value in
+             monitor_metrics(metrics, [name for name in metrics if name in self.cost_obj.monitor]).items()},
         )
         log_metrics(self.logger_list, record, step)
 

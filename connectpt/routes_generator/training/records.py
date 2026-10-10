@@ -1,6 +1,7 @@
 """Scalar records; logger derives all tags from phases and field names."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar
+from ..objectives.const import METRIC_TAG_ALIASES
 
 
 @dataclass
@@ -37,8 +38,8 @@ class DiagnosticRecord:
     return_target_mean: float
     step_reward: float
     cost: float | None = None
-    att_minutes: float | None = None
-    rtt_minutes: float | None = None
+    ATT: float | None = field(default=None, metadata={'tag': METRIC_TAG_ALIASES['ATT']})
+    RTT: float | None = field(default=None, metadata={'tag': METRIC_TAG_ALIASES['RTT']})
     feasible_fraction: float | None = None
     unserved_fraction: float | None = None
     completed_alpha_mean: float | None = None
@@ -53,8 +54,8 @@ class ParetoRecord:
     (``pareto/<mode>`` or ``eval/test/<checkpoint>/<mode>``)."""
 
     PHASE: ClassVar[str] = "pareto"
-    att_minutes: float | None = None
-    rtt_minutes: float | None = None
+    ATT: float | None = field(default=None, metadata={'tag': METRIC_TAG_ALIASES['ATT']})
+    RTT: float | None = field(default=None, metadata={'tag': METRIC_TAG_ALIASES['RTT']})
     feasible_fraction: float | None = None
     mean_unserved_fraction: float | None = None
     hv_penalized: float | None = None

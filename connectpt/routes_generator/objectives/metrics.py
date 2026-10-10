@@ -47,3 +47,8 @@ def evaluate_network(result):
             ),
         )
     )
+
+
+def monitor_metrics(metrics, names):
+    """Select configured canonical monitor IDs without recomputing physical values."""
+    return {name: metrics[name] for name in names}

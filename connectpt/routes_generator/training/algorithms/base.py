@@ -47,6 +47,11 @@ class Algorithm(ABC):
     def value_dim(self):
         """Number of value predictions per state."""
 
+    @property
+    def value_names(self):
+        """Stable head identifiers in the Evaluation's configured goal order."""
+        return ('cost',) if self.scalar_values else tuple(self.cost.objectives)
+
     def returns(self, rewards, values, dones, final_values):
         if dones.ndim != 2 or dones.dtype != torch.bool:
             raise ValueError('terminal masks must be boolean [T,B]')

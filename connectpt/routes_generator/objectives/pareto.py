@@ -62,8 +62,8 @@ def front_metrics(rows, reference, eu_preference_count):
         feasible_fraction=float(mask.mean()),
         mean_unserved_fraction=float(np.mean([r["unserved_fraction"] for r in rows])),
         hv_reference_coverage=float(np.all(pure < reference, axis=1)[mask].mean()) if mask.any() else None,
-        att_minutes=float(np.mean([r["att_minutes"] for r in rows])) if "att_minutes" in rows[0] else None,
-        rtt_minutes=float(np.mean([r["rtt_minutes"] for r in rows])) if "rtt_minutes" in rows[0] else None,
+        ATT=float(np.mean([r["ATT"] for r in rows])) if "ATT" in rows[0] else None,
+        RTT=float(np.mean([r["RTT"] for r in rows])) if "RTT" in rows[0] else None,
     )
     if all("network_signature" in r for r in rows):
         signatures = [tuple(tuple(route) for route in r["network_signature"]) for r in rows]

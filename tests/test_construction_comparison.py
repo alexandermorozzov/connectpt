@@ -340,8 +340,8 @@ def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     assert model.halt_scorer.n_extra_feats == 13
     assert model.halt_scorer.preference_goals == model.preference_goals
     critic_params = CriticParams(**dict(cfg.algorithm.critic))
-    scalar = ValueHead(1, model.feature_set, critic_params, torch.device("cpu"), scalar=True)
-    vector = ValueHead(2, model.feature_set, critic_params, torch.device("cpu"), scalar=False)
+    scalar = ValueHead(('cost',), model.feature_set, critic_params, torch.device("cpu"), scalar=True)
+    vector = ValueHead(('ATT', 'RTT'), model.feature_set, critic_params, torch.device("cpu"), scalar=False)
     assert scalar.input_dim == vector.input_dim == 21
     dataset = DynamicCityGraphDataset(9, 9, data_type="voronoi")
     graphs = [dataset.transform(dataset.generate_graph()) for _ in range(2)]
@@ -357,7 +357,7 @@ def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     assert torch.equal(vector._features_from_state(state)[:, 9], degree)
     from dataclasses import replace
     permuted = replace(model.feature_set, critic=tuple(reversed(model.feature_set.critic)))
-    reordered = ValueHead(2, permuted, critic_params, torch.device("cpu"), scalar=False)
+    reordered = ValueHead(('ATT', 'RTT'), permuted, critic_params, torch.device("cpu"), scalar=False)
     assert torch.equal(reordered._features_from_state(state), vector._features_from_state(state).flip(-1))
     legacy_model = build_policy(policy_profile(legacy.model, legacy.cost, legacy.experiment, torch.device("cpu")))
     assert legacy_model.edge_feat_dim == 14

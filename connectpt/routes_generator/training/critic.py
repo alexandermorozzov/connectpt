@@ -26,8 +26,11 @@ class CriticParams:
 class ValueHead:
     """Only the value head trains; shared actor features are detached."""
 
-    def __init__(self, k, features, params, device, *, scalar, actor_model=None, observation=None):
-        self.n_objectives = k
+    def __init__(self, value_names, features, params, device, *, scalar, actor_model=None, observation=None):
+        self.value_names = tuple(value_names)
+        if not self.value_names or len(set(self.value_names)) != len(self.value_names) or (scalar and self.value_names != ('cost',)):
+            raise ValueError('critic requires ordered unique head names; scalar head is cost')
+        self.n_objectives = len(self.value_names)
         self.scalar = scalar
         self.params = params
         self.learning_rate = params.learning_rate

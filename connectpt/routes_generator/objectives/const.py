@@ -14,14 +14,16 @@ METRIC_NAMES = (
     "cost",
     "ATT",
     "RTT",
-    "$d_0$",
-    "$d_1$",
-    "$d_2$",
-    "$d_{un}$",
-    "# disconnected node pairs",
-    "# stops out of bounds",
-    "median_connectivity_weighted",
+    "d0",
+    "d1",
+    "d2",
+    "d_un",
+    "n_disconnected",
+    "stops_oob",
+    "WMC",
 )
+
+METRIC_TAG_ALIASES = {"ATT": "att_minutes", "RTT": "rtt_minutes"}
 
 STATE_PENALTIES = ("constraints", "adjustment")
 

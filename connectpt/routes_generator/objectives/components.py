@@ -86,11 +86,6 @@ class PhysicalCost(torch.nn.Module):
     def constants(self):
         return CostConstants(self.symmetric_routes, self.mean_stop_time_s, self.avg_transfer_wait_time_s)
 
-    def get_metric_names(self):
-        from .metrics import METRIC_NAMES
-
-        return METRIC_NAMES
-
     def _compute_all_pairs_times_floyd(self, state):
         # state.transit_times is ALREADY the all-pairs shortest transit-time
         # matrix (tau_Rij, transfer penalties included) -- it is produced by a

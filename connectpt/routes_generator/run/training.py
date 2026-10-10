@@ -21,7 +21,7 @@ from ..training.params import CurriculumParams, LoopParams, OptimizerParams
 from ..training.records import DataCounts
 from ..training.validate import (
     EvaluationParams, EvaluationProfile,
-    evaluate_preferences, log_evaluation_metrics, log_pareto_metrics,
+    prepare_final_evaluation,
 )
 from .artifacts import ArtifactStore
 from .config import cost_params, policy_profile,sampler_params
@@ -177,7 +177,7 @@ class TrainingRun(ExperimentRun):
             data, val_cost, val_env, self.evaluation_profile, device,
         )
         critic = ValueHead(
-            self.algorithm.value_dim,
+            self.algorithm.value_names,
             self.policy.feature_set,
             self.critic_params,
             device,
@@ -209,51 +209,13 @@ class TrainingRun(ExperimentRun):
             {"iterations": result.iterations, "best_cost": result.best_cost}, "training_result.json"
         )
         if self.evaluation.final_test:
-            split_name = data.final_split
-            test_data, test_seeds, source_indices = data.final_evaluation()
-            indices = list(range(len(test_data)))
-            if self.evaluation.test_graph_count is not None:
-                generator = torch.Generator().manual_seed(self.evaluation.seed)
-                indices = (
-                    torch.randperm(len(test_data), generator=generator)[: self.evaluation.test_graph_count]
-                    .sort()
-                    .values.tolist()
-                )
-                test_data = [test_data[index] for index in indices]
-                if test_seeds is not None:
-                    test_seeds = test_seeds[indices]
-            test_protocol = self.metadata["evaluation_protocol"][split_name]
-            test_protocol.update(
-                split="independent test" if split_name == 'test' else "held-out validation",
-                indices=[source_indices[i] for i in indices],
-                graph_count=len(test_data),
-                outcomes_per_checkpoint={
-                    mode: len(test_data) * self.evaluation.preference_count * samples
-                    for mode, samples in test_protocol["samples_per_preference"].items()
-                },
+            test = prepare_final_evaluation(
+                data, self.evaluation_profile, self.metadata['evaluation_protocol'][data.final_split],
             )
+            self.metadata['evaluation_protocol'][test.split_name] = test.protocol
             self.write_metadata()
-            for label, actor in (("last", self.policy), ("best", result.best_policy)):
-                for mode in ("greedy", "stochastic"):
-                    rows = evaluate_preferences(
-                        actor,
-                        test_data,
-                        self.evaluation_profile,
-                        self.cost,
-                        device,
-                        mode=mode,
-                        seed_networks=test_seeds,
-                    )
-                    prefix = f"eval/{split_name}/{label}/{mode}"
-                    log_evaluation_metrics(rows, self.logger_list, result.iterations, prefix)
-                    if self.evaluation.pareto_enabled:
-                        log_pareto_metrics(
-                            rows,
-                            self.evaluation_profile,
-                            self.logger_list,
-                            result.iterations,
-                            prefix,
-                        )
+            test.run((('last', self.policy), ('best', result.best_policy)), self.cost, device,
+                     self.logger_list, result.iterations)
         if result.iterations < lp.n_iterations:
             self.stop_reason = "time_budget"
         return TrainingArtifact(self.run_params.name, self.run_dir, {}, self.checkpoint)

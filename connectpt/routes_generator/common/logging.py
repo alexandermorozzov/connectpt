@@ -22,7 +22,8 @@ def record_tags(record, prefix: str | None = None):
         value = getattr(record, f.name)
         if value is None:
             continue
-        tag = f"{prefix}/{f.name}"
+        name = f.metadata['tag'] if 'tag' in f.metadata else f.name
+        tag = f"{prefix}/{name}"
         if isinstance(value, dict):
             for key, item in value.items():
                 yield f"{tag}/{key}", float(item)

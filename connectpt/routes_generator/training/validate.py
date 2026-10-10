@@ -2,21 +2,20 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, replace
+import copy
+from dataclasses import dataclass
 
 import numpy as np
 import torch
-from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader
 
 from ..common.logging import flush, log
 from ..policy.predict import evaluate_policy
-from ..policy.rollout import bind_env
-from ..env.state import RouteGenBatchState
 from ..env.base import EnvParams,EnvironmentBinding
 from ..objectives.pareto import canonical_network, summarize_evaluation
-from ..objectives.metrics import evaluate_network
+from ..objectives.metrics import evaluate_network, monitor_metrics
 from .records import ParetoRecord, ValidationRecord
+from .split import evaluation_indices
 
 
 @dataclass(frozen=True)
@@ -51,16 +50,14 @@ class Validation:
         self.profile, self.device = profile, device
         self.last_monitor_step = None
 
-    def batches(self, progress):
+    def batches(self):
         raise NotImplementedError
 
     @torch.no_grad()
-    def run(self, policy, logger_list, step, progress):
-        self.progress = progress
+    def run(self, policy, logger_list, step):
         collected, results = [], []
-        for graphs, seeds, route_count in self.batches(progress):
+        for graphs, seeds, route_count in self.batches():
             self.env.set_route_count(route_count)
-            self.env.reset(graphs.to(self.device), self.cost.get_weights(), seeds, normalize=False)
             result, routes = evaluate_policy(
                 self.env,
                 policy,
@@ -86,72 +83,114 @@ class Validation:
                     name: float(torch.cat([r.penalties[:, i] for r in results]).mean())
                     for i, name in enumerate(results[0].penalty_names)
                 },
-                monitor={
-                    name: float(metrics[key].mean())
-                    for name, key in (
-                        ("ATT", "ATT"),
-                        ("RTT", "RTT"),
-                        ("WMC", "median_connectivity_weighted"),
-                        ("d0", "$d_0$"),
-                        ("d1", "$d_1$"),
-                        ("d2", "$d_2$"),
-                        ("d_un", "$d_{un}$"),
-                        ("n_disconnected", "# disconnected node pairs"),
-                    )
-                    if name in self.cost.monitor
-                },
+                monitor={name: float(value.mean()) for name, value in
+                         monitor_metrics(metrics, self.cost.monitor).items()},
                 feasible_fraction=float(torch.cat([~r.are_constraints_violated() for r in results]).float().mean()),
             ),
             step,
         )
         return float(metrics["cost"].mean())
 
-    def monitor(self, policy, logger_list, step, *, final=False):
+    def monitor_batches(self):
         raise NotImplementedError
+
+    def monitor(self, policy, logger_list, step, *, batches, final=False):
+        params = self.profile.evaluation
+        if params.pareto_enabled and step != self.last_monitor_step and (final or step % params.pareto_period == 0):
+            for graphs, seeds in batches:
+                evaluate_pareto(policy, graphs, self.profile, self.cost, self.device,
+                                logger_list, step, seed_networks=seeds)
+            self.last_monitor_step = step
 
 
 class ConstructionValidation(Validation):
-    def batches(self, progress):
+    def batches(self):
         for count in self.data.n_routes:
             for graphs in self.data.validation_loader:
                 yield graphs, None, count
 
-    def monitor(self, policy, logger_list, step, *, final=False):
-        params = self.profile.evaluation
-        if params.pareto_enabled and step != self.last_monitor_step and (final or step % params.pareto_period == 0):
-            evaluate_pareto(
-                policy,
-                self.data.validation_loader.dataset,
-                self.profile,
-                self.cost,
-                self.device,
-                logger_list,
-                step,
-            )
-            self.last_monitor_step = step
+    def monitor_batches(self):
+        yield self.data.validation_loader.dataset, None
 
 
 class EditValidation(Validation):
-    def batches(self, progress):
+    def batches(self):
         for chunk in self.data.monitor_indices.split(self.data.batch_size):
             graphs, seeds = self.data.module.make_batch(chunk)
             yield graphs, seeds, seeds.shape[1]
 
-    def monitor(self, policy, logger_list, step, *, final=False):
-        params = self.profile.evaluation
-        if params.pareto_enabled and step != self.last_monitor_step and (final or step % params.pareto_period == 0):
-            graphs, seeds = self.data.module.make_batch(self.data.monitor_indices)
-            evaluate_pareto(
-                policy,
-                graphs.to_data_list(),
-                self.profile,
-                self.cost,
-                self.device,
-                logger_list,
-                step,
-                seed_networks=seeds,
-            )
-            self.last_monitor_step = step
+    def monitor_batches(self):
+        graphs, seeds = self.data.module.make_batch(self.data.monitor_indices)
+        yield graphs.to_data_list(), seeds
+
+
+class ValidationTracker:
+    """One validation/monitor/best sequence before, after and at training end."""
+
+    def __init__(self, validation):
+        self.validation = validation
+        self.best_cost, self.best_policy = float('inf'), None
+        self.last_step, self.last_cost = None, None
+
+    def _best(self, policy, cost):
+        if cost < self.best_cost:
+            self.best_cost, self.best_policy = cost, copy.deepcopy(policy)
+
+    def run(self, policy, logger_list, step, *, freeze=False, final=False):
+        self.last_cost = self.validation.run(policy, logger_list, step)
+        self.last_step = step
+        if freeze:
+            policy.update_and_freeze_feature_norms()
+        self.validation.monitor(policy, logger_list, step,
+                                batches=self.validation.monitor_batches(), final=final)
+        self._best(policy, self.last_cost)
+
+    def finish(self, policy, logger_list, step):
+        if self.last_step != step:
+            self.run(policy, logger_list, step, final=True)
+        else:
+            self.validation.monitor(policy, logger_list, step,
+                                    batches=self.validation.monitor_batches(), final=True)
+            self._best(policy, self.last_cost)
+
+
+@dataclass(frozen=True)
+class FinalEvaluation:
+    """Prepared held-out graph subset, references and a fixed last/best protocol."""
+
+    data: object
+    seed_networks: object
+    split_name: str
+    profile: EvaluationProfile
+    protocol: dict
+
+    def run(self, policies, cost, device, logger_list, step):
+        for label, policy in policies:
+            for mode in ('greedy', 'stochastic'):
+                rows = evaluate_preferences(policy, self.data, self.profile, cost, device,
+                                            mode=mode, seed_networks=self.seed_networks)
+                prefix = f'eval/{self.split_name}/{label}/{mode}'
+                log_evaluation_metrics(rows, logger_list, step, prefix)
+                if self.profile.evaluation.pareto_enabled:
+                    log_pareto_metrics(rows, self.profile, logger_list, step, prefix)
+
+
+def prepare_final_evaluation(data, profile, protocol):
+    graphs, seeds, sources = data.final_evaluation()
+    indices = evaluation_indices(torch.arange(len(graphs)), profile.evaluation.test_graph_count,
+                                 profile.evaluation.seed).tolist()
+    selected = [graphs[index] for index in indices]
+    selected_seeds = None if seeds is None else seeds[indices]
+    prepared = copy.deepcopy(protocol)
+    prepared.update(
+        split='independent test' if data.final_split == 'test' else 'held-out validation',
+        indices=[sources[index] for index in indices], graph_count=len(selected),
+        outcomes_per_checkpoint={
+            mode: len(selected) * profile.evaluation.preference_count * samples
+            for mode, samples in prepared['samples_per_preference'].items()
+        },
+    )
+    return FinalEvaluation(selected, selected_seeds, data.final_split, profile, prepared)
 
 
 def evaluate_preferences(
@@ -198,16 +237,7 @@ def evaluate_preferences(
                     chunk = [data[i] for i in range(start, min(start + int(profile.batch_size), len(data)))]
                     loader = DataLoader(chunk, batch_size=int(profile.batch_size))
                     seeds = None if seed_networks is None else seed_networks[start : start + len(chunk)].to(device)
-                    template = RouteGenBatchState(
-                        Batch.from_data_list(chunk).to(device),
-                        fixed_cost.constants,
-                        int(profile.env.n_routes),
-                        int(profile.env.min_route_len),
-                        int(profile.env.max_route_len),
-                        preferences=fixed_cost.get_weights(),
-                    )
-                    env = bind_env(template, model, fixed_cost, normalize=False,
-                                   binding=EnvironmentBinding(profile.env_factory,profile.env))
+                    env = EnvironmentBinding(profile.env_factory, profile.env).create(model, fixed_cost)
                     result, routes = evaluate_policy(
                         env,
                         model,
@@ -231,8 +261,8 @@ def evaluate_preferences(
                                 graph=start + i,
                                 preference=float(preference),
                                 sample=sample,
-                                att_minutes=float(result.mean_demand_time[i] / 60),
-                                rtt_minutes=float(result.total_route_time[i] / 60),
+                                ATT=float(result.mean_demand_time[i] / 60),
+                                RTT=float(result.total_route_time[i] / 60),
                                 objective_0=float(pure[i, 0]),
                                 objective_1=float(pure[i, 1]),
                                 penalized_0=float(penalized[i, 0]),
@@ -240,15 +270,8 @@ def evaluate_preferences(
                                 scalar_cost=float(result.cost[i]),
                                 objective={name: float(result.goals[i, j]) for j, name in enumerate(cost.objectives)},
                                 penalty={name: float(result.penalties[i, j]) for j, name in enumerate(result.penalty_names)},
-                                monitor={
-                                    name: float(metrics[key][i])
-                                    for name, key in (
-                                        ("ATT", "ATT"), ("RTT", "RTT"), ("WMC", "median_connectivity_weighted"),
-                                        ("d0", "$d_0$"), ("d1", "$d_1$"), ("d2", "$d_2$"),
-                                        ("d_un", "$d_{un}$"), ("n_disconnected", "# disconnected node pairs"),
-                                    )
-                                    if name in cost.monitor
-                                },
+                                monitor={name: float(value[i]) for name, value in
+                                         monitor_metrics(metrics, cost.monitor).items()},
                                 feasible=bool(feasible[i]),
                                 unserved_fraction=float(result.unserved_demand[i] / result.total_demand[i]),
                                 network_signature=canonical_network(route_list, profile.symmetric_routes),

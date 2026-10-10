@@ -1,6 +1,5 @@
 """One training cycle for any environment and algorithm."""
 from dataclasses import dataclass
-import copy
 import time
 from pathlib import Path
 
@@ -10,17 +9,11 @@ from ..objectives.const import ACTION_PENALTIES
 from ..env.rewards import potential_reward
 from ..policy.rollout import rollout
 from ..policy.predict import predict
-from ..common.logging import log, flush
+from ..common.logging import flush
 from ..policy.checkpoints import save_model_weights
-from .records import (
-    ValueRecord,
-    DiagnosticRecord,
-    TrainRecord,
-    GoalTrainRecord,
-    RolloutRecord,
-    TimeRecord,
-)
+from .logging import log_values, log_iteration
 from .update import TrainingBatch, update
+from .validate import ValidationTracker
 
 
 @dataclass(frozen=True)
@@ -53,7 +46,7 @@ def collect(env, policy, algorithm, critic, data, horizon):
     states, outputs, masks, rewards, dones, scores, preferences = [], [], [], [], [], [], []
     objective_rewards, penalty_rewards = [], []
     terminal = {
-        key: [] for key in ("cost", "att_minutes", "rtt_minutes", "feasible_fraction", "unserved_fraction", "alpha")
+        key: [] for key in ("cost", "ATT", "RTT", "feasible_fraction", "unserved_fraction", "alpha")
     }
     completed_rewards, completed_lengths = [], []
     with torch.no_grad():
@@ -92,8 +85,8 @@ def collect(env, policy, algorithm, critic, data, horizon):
             if ended.any():
                 result = env.result
                 terminal["cost"].append(result.cost[ended])
-                terminal["att_minutes"].append(result.mean_demand_time[ended] / 60)
-                terminal["rtt_minutes"].append(result.total_route_time[ended] / 60)
+                terminal["ATT"].append(result.mean_demand_time[ended] / 60)
+                terminal["RTT"].append(result.total_route_time[ended] / 60)
                 terminal["feasible_fraction"].append((~result.are_constraints_violated())[ended].float())
                 terminal["unserved_fraction"].append((result.unserved_demand / result.total_demand)[ended])
                 terminal["alpha"].append(env.state.cost_weights["demand_time_weight"][ended])
@@ -143,145 +136,42 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget, 
         policy.update_and_freeze_feature_norms()
     policy.eval()
     data.initialize()
-    best_cost, best_policy = float("inf"), None
+    tracker = ValidationTracker(validation)
     started = time.monotonic()
     checkpoint_dir = budget.output_dir / f"{budget.run_name}_checkpoints"
     iterations = 0
-    last_validation_step = None
-    val_cost = None
     for iteration in range(budget.n_iterations):
         if iteration and budget.max_seconds is not None and time.monotonic() - started >= budget.max_seconds:
             break
         progress = iteration / budget.n_iterations
         if budget.validate_before_update and iteration % budget.val_period == 0:
             if iteration == 0 and budget.calibrate_before_validation:
-                validation.run(policy, (), iteration, progress)
+                validation.run(policy, (), iteration)
                 policy.update_and_freeze_feature_norms()
-            val_cost = validation.run(policy, logger_list, iteration, progress)
-            last_validation_step = iteration
-            if iteration == 0 and not budget.calibrate_before_validation:
-                policy.update_and_freeze_feature_norms()
-            validation.monitor(policy, logger_list, iteration)
-            if val_cost < best_cost:
-                best_cost, best_policy = val_cost, copy.deepcopy(policy)
+            tracker.run(policy, logger_list, iteration,
+                        freeze=iteration == 0 and not budget.calibrate_before_validation)
         env.prepare_iteration(iteration, budget.force_nonhalt_until)
         data.get(progress)
         batch, terminal, episode_rewards, episode_lengths = collect(
             env, policy, algorithm, critic, data, budget.horizon
         )
-        scalar_rewards = batch.rewards if batch.rewards.ndim == 2 else (batch.rewards * batch.preferences).sum(-1)
-        scalar_values = batch.values if batch.values.ndim == 2 else (batch.values * batch.preferences).sum(-1)
-        names = tuple(algorithm.cost.objectives)
-        log(
-            logger_list,
-            ValueRecord(
-                float(scalar_values.mean()),
-                {name: float(batch.values[..., i].mean()) for i, name in enumerate(names)}
-                if batch.values.ndim > 2
-                else {},
-            ),
-            iteration,
-        )
+        log_values(algorithm, batch, logger_list, iteration)
         stats = update(env, policy, algorithm, critic, optimizer, batch)
-        log(
-            logger_list,
-            TrainRecord(
-                -stats.policy_objective,
-                stats.value_loss,
-                -stats.entropy,
-                stats.clip_fraction,
-                stats.approx_kl,
-                stats.explained_variance,
-                stats.diversity_loss,
-                optimizer.param_groups[0]["lr"],
-                algorithm.params.epsilon,
-                (iteration + 1) * algorithm.params.n_epochs,
-                -stats.objective,
-                stats.diversity_kl,
-                stats.diversity_target,
-            ),
-            iteration,
-        )
-        log(
-            logger_list,
-            GoalTrainRecord(
-                dict(zip(names, stats.value_loss_by_objective)),
-                dict(zip(names, stats.explained_variance_by_objective)),
-                {name: float(batch.advantages[..., i].std()) for i, name in enumerate(names)}
-                if batch.advantages.ndim > 2
-                else {},
-            ),
-            iteration,
-        )
-        log(
-            logger_list,
-            RolloutRecord(
-                float(episode_rewards.mean()) if episode_rewards.numel() else float("nan"),
-                float(episode_lengths.float().mean()) if episode_lengths.numel() else float("nan"),
-                {name: float(batch.objective_rewards[..., i].mean()) for i, name in enumerate(names)},
-                {
-                    name: float(batch.penalty_rewards[..., i].mean())
-                    for i, name in enumerate((*env.result.penalty_names, *ACTION_PENALTIES))
-                },
-            ),
-            iteration,
-        )
-        elapsed = time.monotonic() - started
-        log(
-            logger_list,
-            TimeRecord(
-                (iteration + 1) * budget.horizon * data.batch_size / elapsed,
-                iteration + 1,
-                elapsed,
-                (iteration + 1) * budget.horizon * data.batch_size,
-            ),
-            iteration,
-        )
-        record = DiagnosticRecord(
-            initial_ratio_error=stats.initial_ratio_error,
-            graph_instances_loaded=data.graph_instances_loaded,
-            graph_batches_loaded=data.graph_batches_loaded,
-            completed_networks=int(batch.dones.sum()),
-            return_target_mean=float(batch.returns.mean()),
-            step_reward=float(scalar_rewards.mean()),
-        )
-        for key, values in terminal.items():
-            if key != "alpha":
-                setattr(record, key, float(torch.cat(values).mean()) if values else float("nan"))
-        alpha = torch.cat(terminal["alpha"]) if terminal["alpha"] else None
-        record.completed_alpha_mean = float(alpha.mean()) if alpha is not None else float("nan")
-        for name, condition in (
-            ("alpha_0", lambda a: a == 0),
-            ("alpha_1", lambda a: a == 1),
-            ("alpha_intermediate", lambda a: (a > 0) & (a < 1)),
-        ):
-            setattr(
-                record,
-                f"completed_{name}_fraction",
-                float(condition(alpha).float().mean()) if alpha is not None else float("nan"),
-            )
-        log(logger_list, record, iteration)
+        log_iteration(env, algorithm, batch, stats, logger_list, data, budget, iteration,
+                      started, episode_rewards, episode_lengths, terminal,
+                      learning_rate=optimizer.param_groups[0]['lr'])
         if iteration % budget.val_period == 0:
             save_model_weights(policy, checkpoint_dir / f"iter{iteration}.pt")
         iterations = iteration + 1
         if not budget.validate_before_update and (
             (iteration > 0 and iterations % budget.val_period == 0) or iterations == budget.n_iterations
         ):
-            val_cost = validation.run(policy, logger_list, iterations, progress)
-            last_validation_step = iterations
-            validation.monitor(policy, logger_list, iterations)
-            if val_cost < best_cost:
-                best_cost, best_policy = val_cost, copy.deepcopy(policy)
+            tracker.run(policy, logger_list, iterations)
         flush(logger_list)
-    final_cost = (
-        val_cost if last_validation_step == iterations else validation.run(policy, logger_list, iterations, 1.0)
-    )
-    validation.monitor(policy, logger_list, iterations, final=True)
-    if final_cost < best_cost:
-        best_cost, best_policy = final_cost, copy.deepcopy(policy)
+    tracker.finish(policy, logger_list, iterations)
     snapshot = {
         "state_dict": critic.model.state_dict(),
         "values": stats.values.detach().cpu(),
         "targets": stats.targets.detach().cpu(),
     }
-    return TrainingResult(best_policy, best_cost, iterations, snapshot)
+    return TrainingResult(tracker.best_policy, tracker.best_cost, iterations, snapshot)
