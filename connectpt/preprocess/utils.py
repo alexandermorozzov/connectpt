@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import geopandas as gpd
 import pandas as pd
@@ -12,6 +13,7 @@ from tqdm import tqdm
 import osmnx as ox
 from shapely import from_wkt, MultiPoint
 
+logger = logging.getLogger(__name__)
 
 
 def _close_gaps(gdf, tolerance) -> gpd.GeoSeries:
@@ -438,7 +440,7 @@ def _get_block_project_dict(dict_routes : dict,
             containing_poly = poly_gdf[poly_gdf.geometry.intersects(point_utm)]
             
             if containing_poly.empty:
-                print(f"Warning: No polygon found for stop '{stop_name}' on route {route}")
+                logger.warning("No polygon found for stop '%s' on route %s", stop_name, route)
                 continue
                 
             cluster_id = containing_poly.iloc[0]['cluster_id']
@@ -446,7 +448,7 @@ def _get_block_project_dict(dict_routes : dict,
             node_in_cluster = bg_nodes_gdf[bg_nodes_gdf['cluster_id'] == cluster_id]
             
             if node_in_cluster.empty:
-                print(f"Warning: No node found for cluster {cluster_id}, stop '{stop_name}'")
+                logger.warning("No node found for cluster %s, stop '%s'", cluster_id, stop_name)
                 continue
                 
             curr_list_stops.append(node_in_cluster['node_id'].iloc[0])

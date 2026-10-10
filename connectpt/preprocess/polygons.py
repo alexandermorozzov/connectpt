@@ -1,9 +1,11 @@
+import logging
 import geopandas as gpd
 from shapely.geometry import MultiPoint
-from shapely.ops import voronoi_diagram
-from shapely.ops import unary_union, voronoi_diagram 
+from shapely.ops import unary_union, voronoi_diagram
 
 from .utils import _remove_water_objects
+
+logger = logging.getLogger(__name__)
 
 def build_new_zones(
         points_gdf: gpd.GeoDataFrame,
@@ -18,7 +20,7 @@ def build_new_zones(
         
 ) -> gpd.GeoDataFrame:
     # multipoint
-    print("Preparing data...")
+    logger.info("Preparing data...")
     points_gdf_copy = points_gdf.copy().to_crs(utm_crs)
     points_multipoint = MultiPoint(points_gdf_copy.geometry.tolist())
     territory_copy = territory.copy().to_crs(utm_crs)
@@ -27,13 +29,13 @@ def build_new_zones(
     envelope = territory_copy.geometry.iloc[0].buffer(buffer)
 
     # build voronoi polygons
-    print("Building voronoi diagram...")
+    logger.info("Building voronoi diagram...")
     voronoi = voronoi_diagram(points_multipoint, envelope=envelope)
     voronoi_gdf = gpd.GeoDataFrame(geometry=[poly for poly in voronoi.geoms], crs=utm_crs)
 
     # water features
     if remove_water:
-        print("Removing water objects...")
+        logger.info("Removing water objects...")
         if water_gdf is None:
             raise ValueError("water_gdf must be provided if remove_water is True")
         
@@ -43,7 +45,7 @@ def build_new_zones(
     
     # clip by territory
     if clip_by_territory:
-        print("Clipping territory by defined are...")
+        logger.info("Clipping territory by defined area...")
         clipped_list = []
         for idx, row in voronoi_gdf.iterrows():
             if row.geometry is None:
@@ -56,7 +58,7 @@ def build_new_zones(
         voronoi_gdf = voronoi_gdf.explode(index_parts=False).reset_index(drop=True)
 
 
-    print("Comparing polygons and bus stops...")
+    logger.info("Comparing polygons and bus stops...")
     voronoi_gdf = (
         gpd.sjoin_nearest(voronoi_gdf, points_gdf_copy, how='left', distance_col='dist')
         .sort_values(['dist', 'index_right'])
@@ -67,7 +69,7 @@ def build_new_zones(
     # merge voronoi polygons to zones 
     merged_voronoi_list = []
     if merge_to_zones:
-        print("Merging voronoi polygons to zones...")
+        logger.info("Merging voronoi polygons to zones...")
         for cluster_id, group in voronoi_gdf.groupby('cluster_id'):
             merged_polygon = unary_union(group.geometry.tolist()) 
             clusters_gdf_slice_cluster_id = clusters_gdf[clusters_gdf.cluster_id == cluster_id]
@@ -81,5 +83,5 @@ def build_new_zones(
             }) 
     
         voronoi_gdf = gpd.GeoDataFrame(merged_voronoi_list, crs=voronoi_gdf.crs)
-    print("Done!")
+    logger.info("Done!")
     return voronoi_gdf

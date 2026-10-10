@@ -1,7 +1,7 @@
+import logging
 import geopandas as gpd
 import networkx as nx
 import osmnx as ox
-import geopandas as gpd
 from shapely.geometry import Point, LineString
 
 from .utils import (
@@ -16,6 +16,7 @@ from .utils import (
 
 from .lines import get_drive_graph_iduedu, get_bus_graph_iduedu
 
+logger = logging.getLogger(__name__)
 
 def _prepare_data_for_block_graph(
     poly_gdf : gpd.GeoDataFrame, 
@@ -43,34 +44,34 @@ def make_block_graph(polygons_gdf : gpd.GeoDataFrame,
                      road_edges_gdf : gpd.GeoDataFrame = None, 
                      territory : gpd.GeoDataFrame = None) -> nx.Graph:
     
-    print("Preparing data for block graph making...")
+    logger.info("Preparing data for block graph making...")
     poly_gdf, roads, point_gdf = _prepare_data_for_block_graph(polygons_gdf, utm_crs, road_edges_gdf, territory)
 
     G = nx.Graph()
     G.graph['crs'] = utm_crs
 
-    print("Adding nodes to block graph...")
+    logger.info("Adding nodes to block graph...")
     _add_nodes_block_graph(G, point_gdf)
     
-    print("Finding touching neighbors polygons...")
+    logger.info("Finding touching neighbors polygons...")
     neighbors = _find_touching_neighbors(poly_gdf)
     
-    print("Finding road connections...")
+    logger.info("Finding road connections...")
     road_connections = _find_road_connections(roads,
                                               poly_gdf,
                                               point_gdf)
     
-    print("Uniting all connections..")
+    logger.info("Uniting all connections...")
     all_connections = _get_all_connections(neighbors, road_connections)
     
-    print("Adding edges to block graph...")
+    logger.info("Adding edges to block graph...")
     _add_edges_block_graph(
         G,
         all_connections,
         roads, 
         point_gdf
     )    
-    print("Done!")
+    logger.info("Done!")
     return G
 
  
@@ -82,7 +83,7 @@ def block_graph_to_gdfs(block_graph):
         elif 'x' in data and 'y' in data:
             geometry = Point(data['x'], data['y'])
         else:
-            print(f"Warning: Node {node} has no geometry or coordinates")
+            logger.warning("Node %s has no geometry or coordinates", node)
             continue
             
         nodes_data.append({
@@ -103,7 +104,7 @@ def block_graph_to_gdfs(block_graph):
             if 'x' in u_data and 'y' in u_data and 'x' in v_data and 'y' in v_data:
                 geometry = LineString([(u_data['x'], u_data['y']), (v_data['x'], v_data['y'])])
             else:
-                print(f"Warning: Edge ({u}, {v}) has no geometry")
+                logger.warning("Edge (%s, %s) has no geometry", u, v)
                 continue
         else:
             geometry = data['geometry']
@@ -193,7 +194,7 @@ def pt_graph_project_by_stops_name(
         drive_edges_gdf : gpd.GeoDataFrame =None,
         territory : gpd.GeoDataFrame = None):
     
-    print("Preparing data for pt_graph...")
+    logger.info("Preparing data for pt_graph...")
     block_graph_copy, bg_nodes_gdf, drive_edges_gdf, tr_edges_gdf, poly_gdf = _prepare_data_for_pt_graph(block_graph,
                                                                                utm_crs,
                                                                                polygons_gdf,
@@ -208,10 +209,10 @@ def pt_graph_project_by_stops_name(
     pt_graph.add_nodes_from(block_graph_copy.nodes(data=True))
     pt_graph.graph['crs'] = utm_crs
 
-    print("Comparing stops and zones...")
+    logger.info("Comparing stops and zones...")
     block_project_dict = _get_block_project_dict(dict_routes, poly_gdf, bg_nodes_gdf, utm_crs)
 
-    print("Projecting pt routes and building pt graph...")
+    logger.info("Projecting pt routes and building pt graph...")
     block_graph_copy, pt_graph = _build_pt_graph(block_project_dict,
                                                  block_graph_copy,
                                                  pt_graph,
@@ -219,7 +220,7 @@ def pt_graph_project_by_stops_name(
                                                  tr_edges_gdf,
                                                  drive_edges_gdf)
 
-    print("Done!")
+    logger.info("Done!")
     return block_graph_copy, block_project_dict, pt_graph
 
 

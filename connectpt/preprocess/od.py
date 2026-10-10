@@ -1,3 +1,4 @@
+import logging
 from typing import Union
 import networkx
 import numpy as np
@@ -13,6 +14,7 @@ from iduedu import get_adj_matrix_gdf_to_gdf
 
 from .utils import _remove_water_objects
 
+logger = logging.getLogger(__name__)
 
 def get_OD(blocks: gpd.GeoDataFrame, stops: gpd.GeoDataFrame, walk_graph: networkx.Graph, crs: int):
     """Compute an origin-destination (OD) matrix between transport stops using a gravity-based model.
@@ -214,14 +216,14 @@ def reform_od_matrix(
         remove_water : bool = False
 ) -> np.ndarray:
 
-    print("Checking and preparing data...")
+    logger.info("Checking and preparing data...")
     initial_zones_gdf_utm, new_zones_gdf_utm, new_zones_tree = _check_prepare_data_for_reform_matrix(initial_matrix,
                                                                                      initial_zones_gdf,
                                                                                      new_zones_gdf,
                                                                                      utm_crs,
                                                                                      water_gdf,
                                                                                      remove_water)
-    print("Calculatind intersections for zones...")
+    logger.info("Calculating intersections for zones...")
     init_to_new_cache = _calculate_inters_ratio_zones(initial_zones_gdf_utm, new_zones_tree, new_zones_gdf_utm)
 
     new_len = len(new_zones_gdf_utm)
@@ -252,5 +254,5 @@ def reform_od_matrix(
 
             new_matrix[np.ix_(row_idx, col_idx)] += np.outer(row_flows, col_ratios)
 
-    print("Done!")
+    logger.info("Done!")
     return new_matrix
