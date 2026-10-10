@@ -58,7 +58,7 @@ class Validation:
         self.progress = progress
         collected, results = [], []
         for graphs, seeds, route_count in self.batches(progress):
-            self.env.params = replace(self.env.params, n_routes=route_count)
+            self.env.set_route_count(route_count)
             self.env.reset(graphs.to(self.device), self.cost.get_weights(), seeds, normalize=False)
             result, routes = evaluate_policy(
                 self.env,
@@ -205,8 +205,7 @@ def evaluate_preferences(
                         int(profile.env.max_route_len),
                         preferences=fixed_cost.get_weights(),
                     )
-                    env = bind_env(template, model, fixed_cost, normalize=False)
-                    env.params = profile.env
+                    env = bind_env(template, model, fixed_cost, normalize=False,params=profile.env)
                     result, routes = evaluate_policy(
                         env,
                         model,

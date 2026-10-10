@@ -7,6 +7,7 @@ from ..city.const import STOP_KEY
 from ..network.routes import to_routes
 from .curriculum import prepare_curriculum
 from .dataset import Dataset, load_dataset
+from .episodes import EpisodeSource
 from .params import DatasetInputParams
 from .pipeline import GraphPipeline
 from .split import evaluation_indices
@@ -25,7 +26,6 @@ class EditDataset:
         final_module = module
         final_indices = dataset.split.test if len(dataset.split.test) else dataset.split.validation
         final_split = 'test' if len(dataset.split.test) else 'final_validation'
-        test_ids = tuple(dataset.params.source_ids[int(i)] for i in dataset.split.test)
         if self.params.test_path is not None:
             if len(dataset.split.test):
                 raise ValueError('choose either manifest test or a separate test_path')
@@ -35,16 +35,11 @@ class EditDataset:
                 raise ValueError('edit source city leaks into independent test')
             final_module = SeedDataModule(independent,device,self.train_pipeline,self.evaluation_pipeline)
             final_indices = torch.arange(len(independent.graphs))
-            final_split, test_ids = 'test', independent.params.source_ids
+            final_split = 'test'
         stages = prepare_curriculum(dataset.split.train,dataset.params.tiers,curriculum)
         monitor = evaluation_indices(dataset.split.monitor,evaluation.graph_count,evaluation.seed)
         data = EditData(module,stages,dataset.split.train,dataset.split.validation,monitor,batch_size,
                         final_module,final_indices,final_split)
-        data.training_count, data.validation_count = len(dataset.split.train),len(monitor)
-        sources=dataset.params.source_ids
-        data.training_source_ids=tuple(sources[int(i)] for i in dataset.split.train)
-        data.validation_source_ids=tuple(sources[int(i)] for i in dataset.split.validation)
-        data.test_source_ids=test_ids
         return data,cost
 
 
@@ -65,9 +60,10 @@ class SeedDataModule:
         return graphs,routes
 
 
-class EditData:
+class EditData(EpisodeSource):
     def __init__(self, module, curriculum, train_indices, val_indices, monitor_indices, batch_size,
                  final_module, final_indices, final_split):
+        super().__init__()
         self.module, self.curriculum = module, curriculum
         self.train_indices, self.val_indices = train_indices, val_indices
         self.all_val_indices = val_indices
@@ -81,7 +77,26 @@ class EditData:
         self.graphs = self.working = self.reference = self.preferences = None
         self.fresh = True
         self.graph_instances_loaded = self.graph_batches_loaded = 0
-        self.episode_rewards = self.episode_lengths = None
+
+    @property
+    def training_count(self):
+        return len(self.train_indices)
+
+    @property
+    def validation_count(self):
+        return len(self.monitor_indices)
+
+    @property
+    def training_source_ids(self):
+        return tuple(self.module.dataset.params.source_ids[int(i)] for i in self.train_indices)
+
+    @property
+    def validation_source_ids(self):
+        return tuple(self.module.dataset.params.source_ids[int(i)] for i in self.all_val_indices)
+
+    @property
+    def test_source_ids(self):
+        return tuple(self.final_module.dataset.params.source_ids[int(i)] for i in self.final_indices) if self.final_split=='test' else ()
 
     def initialize(self):
         self.indices = self.train_indices
@@ -125,8 +140,7 @@ class EditData:
         route_idx = self.route_cursor
         self.route_cursor = (route_idx + 1) % self.working.shape[1]
         env.reset(self.graphs, self.preferences, self.working, route_idx=route_idx, reference_networks=self.reference)
-        self.episode_rewards = torch.zeros(self.graphs.num_graphs, device=self.device)
-        self.episode_lengths = torch.zeros(self.graphs.num_graphs, dtype=torch.long, device=self.device)
+        self.start_episode(self.graphs.num_graphs,self.device)
         self.fresh = False
 
     def after_step(self, env, done):

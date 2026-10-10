@@ -25,11 +25,12 @@ def bind_env(
     max_trim_actions=None,
     force_nonhalt_first_step=False,
     mask=None,
+    params=None,
 ):
     """Bind a pre-existing state at integration boundaries."""
     role = policy.action_spec.role
     trim = role == "edit"
-    params = EnvParams(
+    params = params if params is not None else EnvParams(
         state.n_routes_to_plan,
         state.min_route_len,
         state.max_route_len,
@@ -43,8 +44,7 @@ def bind_env(
         policy.allow_trim_below_min if trim else False,
         policy.forbid_halt_when_overlong if trim else False,
     )
-    env = ENVS[role](cost, policy.feature_set, params, policy.action_spec, node_normalizer=policy.node_norm)
-    env.mask_override = mask
+    env = ENVS[role](cost, policy.feature_set, params, policy.action_spec, node_normalizer=policy.node_norm,mask=mask)
     env.bind(state, normalize=normalize, single_route=single_route)
     return env
 

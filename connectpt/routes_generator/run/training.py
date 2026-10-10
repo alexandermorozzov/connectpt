@@ -195,7 +195,7 @@ class TrainingRun(ExperimentRun):
             self.policy.action_spec,
             node_normalizer=self.policy.node_norm,
         )
-        data.validation = {"construction": ConstructionValidation, "edit": EditValidation}[self.env_name](
+        validation = {"construction": ConstructionValidation, "edit": EditValidation}[self.env_name](
             data, val_cost, val_env, self.evaluation_profile, device,
         )
         critic = ValueHead(
@@ -221,7 +221,8 @@ class TrainingRun(ExperimentRun):
             self.run_dir,
             self.run_params.name,
         )
-        result = train(self.env, self.policy, self.algorithm, critic, optimizer, self.logger_list, data, budget)
+        result = train(self.env, self.policy, self.algorithm, critic, optimizer, self.logger_list, data, budget,
+                       validation=validation)
         checkpoint_config = OmegaConf.to_container(self.cfg, resolve=True)
         save_model_weights(self.policy, self.checkpoint, checkpoint_config)
         save_model_weights(result.best_policy, self.best_checkpoint, checkpoint_config)

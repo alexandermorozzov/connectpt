@@ -37,6 +37,16 @@ class ConstructionEnv(Env):
     def updated_network(self):
         return self.state.adjustment_routes()
 
+    def reset_completed(self, done, preferences=None):
+        """Restart completed construction networks and refresh their evaluation."""
+        self.state.reset_dones()
+        if preferences is not None:
+            merged = {key:value.clone() for key,value in self.state.cost_weights.items()}
+            for key,value in preferences.items():
+                merged[key][done] = value
+            self.state.set_cost_weights(merged)
+        self.result = self.cost(self.state)
+
     def action_mask(self, state):
         return self.mask_override if self.mask_override is not None else ActionMask(extend=True, trim_start=False, trim_end=False, halt=True)
 

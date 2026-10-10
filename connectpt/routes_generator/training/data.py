@@ -8,6 +8,7 @@ from torch_geometric.loader import DataLoader
 from ..city.synthetic import load_graph_collection
 from .const import DatasetKind, DataSourceKind, DATASET_MANIFEST
 from .dataset import load_dataset
+from .episodes import EpisodeSource
 from .params import DatasetInputParams
 from .pipeline import GraphPipeline, GraphView, OnlineGraphs
 from .split import graph_source_id, evaluation_indices
@@ -86,32 +87,47 @@ class ConstructionDataset:
             validation_batch_size = min(validation_batch_size, len(validation))
         counts = env_params.n_routes
         counts = (counts,) if isinstance(counts, int) else tuple(counts)
-        data = ConstructionData(train_loader, DataLoader(validation,batch_size=validation_batch_size),device,
-                                n_routes=counts,resample_preferences_on_terminal=resample_preferences)
-        data.validation_indices = indices
-        data.validation_batch_size = validation_batch_size
-        data.training_count = len(train) if source != DataSourceKind.DYNAMIC else None
-        data.validation_count = len(validation)
-        data.test_graphs = test_graphs
-        data.full_validation = full_validation
-        data.final_split = 'test' if test_graphs is not None else 'final_validation'
-        data.training_source_ids, data.validation_source_ids, data.test_source_ids = train_ids, validation_ids, test_ids
-        return data
+        return ConstructionData(
+            train_loader, DataLoader(validation,batch_size=validation_batch_size),device,
+            n_routes=counts,resample_preferences_on_terminal=resample_preferences,
+            validation_indices=indices,validation_batch_size=validation_batch_size,
+            test_graphs=test_graphs,full_validation=full_validation,
+            training_source_ids=train_ids,validation_source_ids=validation_ids,test_source_ids=test_ids,
+            online=source==DataSourceKind.DYNAMIC,
+        )
 
 
-class ConstructionData:
-    def __init__(self, train_loader, validation_loader, device, *, n_routes, resample_preferences_on_terminal):
+class ConstructionData(EpisodeSource):
+    def __init__(self, train_loader, validation_loader, device, *, n_routes, resample_preferences_on_terminal,
+                 validation_indices, validation_batch_size, test_graphs, full_validation,
+                 training_source_ids, validation_source_ids, test_source_ids, online):
+        super().__init__()
         self.train_loader = train_loader
         self.validation_loader = validation_loader
         self.device = device
         self.n_routes = tuple(n_routes)
         self.resample_preferences = resample_preferences_on_terminal
+        self.validation_indices, self.validation_batch_size = validation_indices, validation_batch_size
+        self.test_graphs, self.full_validation = test_graphs, full_validation
+        self.training_source_ids, self.validation_source_ids, self.test_source_ids = training_source_ids, validation_source_ids, test_source_ids
+        self.online = online
         self.batch_size = train_loader.batch_size
         self.generator = None
         self.finished = None
         self.route_count = None
         self.graph_instances_loaded = self.graph_batches_loaded = 0
-        self.episode_rewards = self.episode_lengths = None
+
+    @property
+    def training_count(self):
+        return None if self.online else len(self.train_loader.dataset)
+
+    @property
+    def validation_count(self):
+        return len(self.validation_loader.dataset)
+
+    @property
+    def final_split(self):
+        return 'test' if self.test_graphs is not None else 'final_validation'
 
     def initialize(self):
         self.generator = iter(self.train_loader)
@@ -135,27 +151,20 @@ class ConstructionData:
             graphs = graphs.to(self.device)
             self.graph_instances_loaded += graphs.num_graphs
             self.graph_batches_loaded += 1
-            from dataclasses import replace
-
-            env.params = replace(env.params, n_routes=self.route_count)
+            env.set_route_count(self.route_count)
             env.reset(graphs, env.cost.sample_variable_weights(graphs.num_graphs, self.device))
             self.finished = env.is_done().clone()
-            self.episode_rewards = torch.zeros(graphs.num_graphs, device=self.device)
-            self.episode_lengths = torch.zeros(graphs.num_graphs, dtype=torch.long, device=self.device)
+            self.start_episode(graphs.num_graphs,self.device)
 
     def prepare_step(self, env):
         pass
 
     def after_step(self, env, done):
         self.finished |= done
-        env.state.reset_dones()
+        sampled = None
         if self.resample_preferences and done.any():
             sampled = env.cost.sample_variable_weights(int(done.sum()), self.device)
-            merged = {key: value.clone() for key, value in env.state.cost_weights.items()}
-            for key, value in sampled.items():
-                merged[key][done] = value
-            env.state.set_cost_weights(merged)
-        env.result = env.cost(env.state)
+        env.reset_completed(done, sampled)
 
     def bootstrap_mask(self, env):
         return torch.ones(env.state.batch_size, dtype=torch.bool, device=self.device)

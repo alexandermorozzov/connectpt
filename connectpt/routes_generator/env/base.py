@@ -1,6 +1,6 @@
 """Environment contract: shared episode mechanics, task rules in the subclasses."""
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -83,6 +83,13 @@ class Env(ABC):
 
     def is_done(self):
         return self.ended if self.single_route else self.state.is_done()
+
+    def set_route_count(self, count):
+        """Configure the next reset; existing State keeps its own episode limits."""
+        self.params = replace(self.params, n_routes=count)
+
+    def set_force_nonhalt_first_step(self, enabled):
+        self.params = replace(self.params, force_nonhalt_first_step=enabled)
 
     def observe(self, state=None):
         state = self.state if state is None else state

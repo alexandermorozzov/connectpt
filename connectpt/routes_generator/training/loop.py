@@ -1,5 +1,5 @@
 """One training cycle for any environment and algorithm."""
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import copy
 import time
 from pathlib import Path
@@ -46,18 +46,6 @@ class TrainingResult:
     critic_snapshot: dict
 
 
-def episode_statistics(rewards, dones, reward_sums, lengths):
-    completed_rewards, completed_lengths = [], []
-    for step_rewards, step_dones in zip(rewards, dones):
-        reward_sums.add_(step_rewards)
-        lengths.add_(1)
-        completed_rewards.append(reward_sums[step_dones].clone())
-        completed_lengths.append(lengths[step_dones].clone())
-        reward_sums[step_dones] = 0
-        lengths[step_dones] = 0
-    return torch.cat(completed_rewards), torch.cat(completed_lengths)
-
-
 def collect(env, policy, algorithm, critic, data, horizon):
     device = next(policy.parameters()).device
     data.start(env)
@@ -100,10 +88,7 @@ def collect(env, policy, algorithm, critic, data, horizon):
             preferences.append(pref / pref.sum(-1, keepdim=True).clamp_min(1e-8))
             scalar_reward = reward if reward.ndim == 1 else (reward * preferences[-1]).sum(-1)
             ended = done & active
-            data.episode_lengths -= (~active).long()
-            episode_reward, episode_length = episode_statistics(
-                scalar_reward[None], ended[None], data.episode_rewards, data.episode_lengths
-            )
+            episode_reward, episode_length = data.record_step(scalar_reward,ended,active)
             completed_rewards.append(episode_reward)
             completed_lengths.append(episode_length)
             if ended.any():
@@ -141,7 +126,7 @@ def collect(env, policy, algorithm, critic, data, horizon):
     return batch, terminal, torch.cat(completed_rewards), torch.cat(completed_lengths)
 
 
-def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget):
+def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget, *, validation):
     if budget.n_iterations < 1 or budget.horizon < 1 or budget.val_period < 1:
         raise ValueError("training budgets must be positive")
     if budget.max_rollout_samples is not None and data.batch_size * budget.horizon > budget.max_rollout_samples:
@@ -172,19 +157,19 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget):
         progress = iteration / budget.n_iterations
         if budget.validate_before_update and iteration % budget.val_period == 0:
             if iteration == 0 and budget.calibrate_before_validation:
-                data.validation.run(policy, (), iteration, progress)
+                validation.run(policy, (), iteration, progress)
                 policy.update_and_freeze_feature_norms()
-            val_cost = data.validation.run(policy, logger_list, iteration, progress)
+            val_cost = validation.run(policy, logger_list, iteration, progress)
             last_validation_step = iteration
             if iteration == 0 and not budget.calibrate_before_validation:
                 policy.update_and_freeze_feature_norms()
-            data.validation.monitor(policy, logger_list, iteration)
+            validation.monitor(policy, logger_list, iteration)
             if val_cost < best_cost:
                 best_cost, best_policy = val_cost, copy.deepcopy(policy)
         force_first = env.params.force_nonhalt_first_step
         if budget.force_nonhalt_until is not None:
             force_first = force_first and iteration < budget.force_nonhalt_until
-        env.params = replace(env.params, force_nonhalt_first_step=force_first)
+        env.set_force_nonhalt_first_step(force_first)
         data.get(progress)
         batch, terminal, episode_rewards, episode_lengths = collect(
             env, policy, algorithm, critic, data, budget.horizon
@@ -287,16 +272,16 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget):
         if not budget.validate_before_update and (
             (iteration > 0 and iterations % budget.val_period == 0) or iterations == budget.n_iterations
         ):
-            val_cost = data.validation.run(policy, logger_list, iterations, progress)
+            val_cost = validation.run(policy, logger_list, iterations, progress)
             last_validation_step = iterations
-            data.validation.monitor(policy, logger_list, iterations)
+            validation.monitor(policy, logger_list, iterations)
             if val_cost < best_cost:
                 best_cost, best_policy = val_cost, copy.deepcopy(policy)
         flush(logger_list)
     final_cost = (
-        val_cost if last_validation_step == iterations else data.validation.run(policy, logger_list, iterations, 1.0)
+        val_cost if last_validation_step == iterations else validation.run(policy, logger_list, iterations, 1.0)
     )
-    data.validation.monitor(policy, logger_list, iterations, final=True)
+    validation.monitor(policy, logger_list, iterations, final=True)
     if final_cost < best_cost:
         best_cost, best_policy = final_cost, copy.deepcopy(policy)
     snapshot = {
