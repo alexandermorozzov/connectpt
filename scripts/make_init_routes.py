@@ -35,7 +35,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--instances", nargs="*", default=INSTANCES)
     parser.add_argument("--generator", choices=["lc", "john", "nikolic"], default="lc")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--instances-dir", default=None, help="default: datasets/instances")
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--clean", action="store_true", help="construction sample only, without the realistic tier")
@@ -44,8 +44,9 @@ def main() -> None:
     root = resolve_under_root(args.instances_dir) if args.instances_dir else INSTANCES_DIR
     device = resolve_device(cpu=args.cpu)
     cfg = load_experiment("init_routes")
+    network_seed = cfg.run.seed if args.seed is None else args.seed
     cost = build_cost(
-        cost_params(cfg.cost), symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
+        cost_params(cfg.cost), symmetric_routes=cfg.common.symmetric_routes, low_memory_mode=cfg.cost.low_memory_mode
     )
     initial = params(InitialParams, cfg.initial)
     corruption = RealisticParams.from_values(OmegaConf.to_container(cfg.corruption, resolve=True))
@@ -54,12 +55,12 @@ def main() -> None:
         d = root / name
         instance = load_instance(d, require_routes=False)
         spec = instance.spec
-        seed_everything(args.seed)
+        seed_everything(network_seed)
         policy, binding, instance_cost = None, None, cost
         if args.generator == "lc":
-            seed_everything(cfg.experiment.seed)
+            seed_everything(cfg.run.seed)
             policy = build_policy(policy_profile(
-                cfg.model_profile.model, cfg.cost, cfg.experiment, device,
+                cfg.model_profile.model, cfg.cost, cfg.common, device,
                 checkpoint_path=resolve_weights_path(cfg.model_profile.checkpoint_path, MODEL_WEIGHTS_DIR),
             ))
             from connectpt.routes_generator.run.tasks import TASKS
@@ -76,14 +77,14 @@ def main() -> None:
             corruption=corruption,
             policy=policy,
             binding=binding,
-            seed=args.seed,
+            seed=network_seed,
             clean=args.clean,
             device=device,
         )
         tier = "construction only" if args.clean else "+ realistic tier"
         generator_label = "learned construction" if args.generator == "lc" else args.generator
         description = f"{generator_label} {tier}" if args.generator == "lc" else generator_label
-        n = write_routes_txt(d / "Routes.txt", routes, f"{name} initial network -- {description}, seed {args.seed}")
+        n = write_routes_txt(d / "Routes.txt", routes, f"{name} initial network -- {description}, seed {network_seed}")
         print(f"{name}: {n} routes -> {d / 'Routes.txt'}")
 
 

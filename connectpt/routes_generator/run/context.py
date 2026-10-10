@@ -69,11 +69,11 @@ class RunContext:
 
     run_name: str
     output_dir: Path
-    seed: int | None = 0
+    seed: int | None
     device: torch.device = field(default_factory=lambda: resolve_device())
 
     @classmethod
-    def create(cls, run_name: str, output_dir, *, seed: int | None = 0,
+    def create(cls, run_name: str, output_dir, *, seed: int | None,
                cpu: bool = False) -> "RunContext":
         seed_everything(seed)
         ctx = cls(run_name=run_name, output_dir=resolve_under_root(output_dir), seed=seed,

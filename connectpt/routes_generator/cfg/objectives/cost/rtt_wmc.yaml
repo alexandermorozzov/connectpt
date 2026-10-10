@@ -1,14 +1,14 @@
 # @package cost
+defaults:
+- /objectives/preferences@_global_.preferences: rtt_wmc
+- _self_
+low_memory_mode: false
 kwargs:
   mean_stop_time_s: 0
   avg_transfer_wait_time_s: 300
   demand_time_weight: 0.0
   route_time_weight: 0.5
   median_connectivity_weight: 0.5
-  variable_weights: true
-  pp_fraction: 0.0
-  op_fraction: 0.3
-  mcw_fraction: 0.3
   ignore_stops_oob: true
   objectives:
   - RTT

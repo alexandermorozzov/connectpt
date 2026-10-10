@@ -2,22 +2,20 @@
 run:
   type: training
   name: construction_${algorithm.name}_seed${run.seed}
-  seed: 0
   cpu: false
 paths:
   output_dir: artifacts/runs/${run.name}
   weights_dir: artifacts/model_weights
   checkpoint_path: construction/${run.name}/last.pt
   init_checkpoint_path: null
-experiment:
-  logdir: null
 logger_list:
 - tensorboard
 - csv
 defaults:
 - /objectives/cost: att_rtt
 - /training/dataset: construction
-- /experiment: standard
+- /common: standard
+- /run: standard
 - /policy/model: construction_holliday
 - /training/algorithm: ppo
 - /env: construction

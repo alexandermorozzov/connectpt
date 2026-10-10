@@ -174,10 +174,10 @@ def prepare_dataset(cfg, output, *, force=False, dry_run=False, convert_from=Non
         if any(t not in tiers for t in config.tiers):
             raise ValueError('edit generation references an absent corruption tier')
         seed_everything(config.policy_seed)
-        policy = build_policy(policy_profile(cfg.model_profile.model,cfg.cost,cfg.experiment,device,checkpoint_path=checkpoint))
+        policy = build_policy(policy_profile(cfg.model_profile.model,cfg.cost,cfg.common,device,checkpoint_path=checkpoint))
         prepared = PreparedPolicy.capture(policy,config.policy_seed)
-        cost = build_cost(cost_params(cfg.cost),symmetric_routes=cfg.experiment.symmetric_routes,
-                          low_memory_mode=cfg.experiment.low_memory_mode)
+        cost = build_cost(cost_params(cfg.cost),symmetric_routes=cfg.common.symmetric_routes,
+                          low_memory_mode=cfg.cost.low_memory_mode)
         binding=TASKS[cfg.model_profile.env.name].binding(
             policy,limits,OmegaConf.to_container(cfg.model_profile.env.params,resolve=True))
         edit = EditGeneration(prepared,cost,binding.factory,binding.params,device,

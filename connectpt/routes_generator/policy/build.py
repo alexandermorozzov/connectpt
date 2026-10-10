@@ -81,7 +81,6 @@ class PolicyProfile:
     model: ModelParams
     constants: CostConstants
     objectives: tuple[str, ...]
-    low_memory_mode: bool
     checkpoint_path: Path | None
     device: torch.device
 
@@ -104,7 +103,6 @@ def build_policy(profile: PolicyProfile):
         backbone_net=backbone,
         mean_stop_time_s=profile.constants.mean_stop_time_s,
         symmetric_routes=profile.constants.symmetric_routes,
-        low_memory_mode=profile.low_memory_mode,
         feature_set=params.features,
         **asdict(params.common),
         **asdict(params.decoder),

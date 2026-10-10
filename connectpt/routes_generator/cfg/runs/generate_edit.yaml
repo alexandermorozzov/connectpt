@@ -1,15 +1,13 @@
 # @package _global_
 defaults:
-  - /objectives/cost: rtt_wmc
-  - /objectives/adjustment: cap
-  - /experiment: standard
-  - /policy/model_profile: construction_v1
-  - /training/dataset_build: copytiers
-  - _self_
-
+- /objectives/cost: rtt_wmc
+- /objectives/adjustment: cap
+- /common: standard
+- /run: standard
+- /policy/model_profile: construction_v1
+- /training/dataset_build: copytiers
+- _self_
 run:
-  seed: 0
   cpu: false
-
 paths:
   weights_dir: artifacts/model_weights

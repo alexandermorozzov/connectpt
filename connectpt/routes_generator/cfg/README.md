@@ -10,11 +10,12 @@ cfg/
 ├── runs/            # search, train, train_construction, train_construction_overnight, generate_construction, generate_edit, init_routes
 ├── city/instance/   # бенчмарки и ограничения маршрутов
 ├── network/corruption/ # параметры порчи
-├── objectives/      # cost/ и adjustment/
+├── objectives/      # cost/, adjustment/, preferences/
 ├── policy/          # model/ с route_generator/; model_profile/
 ├── training/        # algorithm/, dataset/, dataset_build/, curriculum/
 ├── search/          # method/, initial/, sweep/
-├── experiment/      # симметричность маршрутов и режим памяти
+├── common/          # общая симметричность маршрутов
+├── run/             # seed запуска
 └── env/             # construction / edit; features/ с входами модели
 ```
 
@@ -37,6 +38,11 @@ cfg/
 - `algorithm` задаёт GAE, clip, entropy, diversity и критик. `train_loop` задаёт
   batch, horizon, число итераций, валидацию и бюджет времени. `optimizer` задаёт
   параметры оптимизатора. Обе среды используют один цикл обучения.
+- `common.symmetric_routes` задаёт симметричность для State, cost и модели.
+  `cost.low_memory_mode` выбирает режим памяти расчёта cost.
+- `preferences` задаёт sampler весов: `variable_weights`, `pp_fraction`,
+  `op_fraction`, `mcw_fraction`. Порядок целей и фиксированные веса берутся
+  из `cost.kwargs` через интерполяции.
 
 Примеры:
 
@@ -59,6 +65,9 @@ Adjustment рассчитывается по LCS полных последова
 
 `run.type`: `search`, `training`.
 Seed запуска задаётся через `run.seed`, выбор CPU — через `run.cpu=true`.
+Seeds разбиения, оценки, подготовки модели датасета и порчи задаются отдельно:
+`dataset.legacy_split.seed`, `evaluation.seed`, `dataset_build.policy_seed`,
+`dataset_build.corruption_seed`.
 `features` задаёт имена и порядок входных признаков модели.
 
 Логирование содержит только скаляры: `rollout`, `train`, `eval`, `pareto`, `search`,

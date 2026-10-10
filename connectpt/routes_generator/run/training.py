@@ -53,13 +53,13 @@ class TrainingRun(ExperimentRun):
             torch.set_num_threads(self.loop_params.cpu_threads)
         checkpoint_path = (resolve_weights_path(self.paths.init_checkpoint_path, self.paths.weights_dir)
                            if self.paths.init_checkpoint_path else None)
-        self.policy = build_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, device,
+        self.policy = build_policy(policy_profile(cfg.model, cfg.cost, cfg.common, device,
                                                   checkpoint_path=checkpoint_path))
         self.env_name = cfg.env.name
         self.task=TASKS[self.env_name]
         self.task.validate_policy(self.policy)
         self.cost = build_cost(
-            cost_params(cfg.cost), symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
+            cost_params(cfg.cost), symmetric_routes=cfg.common.symmetric_routes, low_memory_mode=cfg.cost.low_memory_mode
         ).to(device)
         self.data_input = prepare_data_input(cfg.dataset, self.task.kind)
         self.binding=self.task.binding(self.policy,self.data_input.params.limits,
@@ -74,9 +74,9 @@ class TrainingRun(ExperimentRun):
         self.evaluation = params(EvaluationParams, cfg.evaluation)
         self.batch_size = self.loop_params.batch_size_cuda if device.type == "cuda" else self.loop_params.batch_size
         self.evaluation_profile = EvaluationProfile(
-            self.evaluation, self.env_params, self.batch_size, cfg.experiment.symmetric_routes,self.task.env_factory
+            self.evaluation, self.env_params, self.batch_size, cfg.common.symmetric_routes,self.task.env_factory
         )
-        self.sampler=PreferenceSampler(sampler_params(cfg.cost))
+        self.sampler=PreferenceSampler(sampler_params(cfg.preferences))
         self.dataset=self.task.source(self.data_input,self.sampler)
         self.curriculum = params(CurriculumParams, cfg.curriculum)
         self.checkpoint = resolve_weights_path(self.paths.checkpoint_path, self.paths.weights_dir)

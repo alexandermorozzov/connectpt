@@ -1,7 +1,0 @@
-seed: 0
-symmetric_routes: True
-low_memory_mode: false
-
-
-defaults:
-  - _self_

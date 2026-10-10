@@ -252,8 +252,7 @@ class RouteGeneratorBase(nn.Module):
                  embed_dim, n_nodepair_layers, nonlin_type=DEFAULT_NONLIN,
                  dropout=MLP_DEFAULT_DROPOUT, symmetric_routes=True,
                  temperature=1, fixed_frequency_Hz=0.00074,
-                 only_routes_with_demand_are_valid=False,
-                 low_memory_mode=False, feature_set=None):
+                 only_routes_with_demand_are_valid=False, feature_set=None):
         """nonlin_type: a nonlin, or the string name of a nonlin, like 'ReLU'
             or 'LeakyReLU' or 'Tanh'"""
         super().__init__()
@@ -278,7 +277,6 @@ class RouteGeneratorBase(nn.Module):
         self.fixed_freq = fixed_frequency_Hz
         self.only_routes_with_demand_are_valid = \
             only_routes_with_demand_are_valid
-        self.low_memory_mode = low_memory_mode
 
         self.edge_feat_dim = backbone_net.in_edge_dim
         if self.edge_feat_dim is None:

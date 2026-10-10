@@ -1,14 +1,14 @@
 # @package cost
+defaults:
+- /objectives/preferences@_global_.preferences: att_rtt
+- _self_
+low_memory_mode: false
 kwargs:
   mean_stop_time_s: 0
   avg_transfer_wait_time_s: 300
   demand_time_weight: 0.5
   route_time_weight: 0.5
   median_connectivity_weight: 0.0
-  variable_weights: true
-  pp_fraction: 0.33
-  op_fraction: 0.33
-  mcw_fraction: 0.0
   ignore_stops_oob: true
   adjustment_degree_target: 0.2
   adjustment_degree_objective: raw

@@ -1,8 +1,7 @@
 # @package _global_
 defaults:
-  - /training/dataset_build: construction
-  - _self_
-
+- /run: standard
+- /training/dataset_build: construction
+- _self_
 run:
-  seed: 0
   cpu: false

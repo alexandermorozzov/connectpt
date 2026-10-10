@@ -33,29 +33,24 @@ def load_experiment(name: str, *, overrides=None):
 def cost_params(cost_cfg) -> CostParams:
     """Decode the cost group into library parameters at the run boundary."""
 
-    values=OmegaConf.to_container(cost_cfg.kwargs,resolve=True)
-    for key in ('variable_weights','pp_fraction','op_fraction','mcw_fraction'):
-        values.pop(key)
-    return CostParams(**values)
+    return CostParams(**OmegaConf.to_container(cost_cfg.kwargs, resolve=True))
 
 
-def sampler_params(cost_cfg):
-    """Decode sampling settings separately; YAML ownership moves with the cfg layout."""
-    values=OmegaConf.to_container(cost_cfg.kwargs,resolve=True)
-    return PreferenceSamplerParams(tuple(values['objectives']),values['demand_time_weight'],
-        values['route_time_weight'],values['median_connectivity_weight'],values['variable_weights'],
-        values['pp_fraction'],values['op_fraction'],values['mcw_fraction'])
+def sampler_params(preferences_cfg):
+    """Decode the sampler's own preset at the run boundary."""
+    values = OmegaConf.to_container(preferences_cfg, resolve=True)
+    values['objectives'] = tuple(values['objectives'])
+    return PreferenceSamplerParams(**values)
 
 
-def policy_profile(model_cfg, cost_cfg, experiment, device, *, checkpoint_path=None):
+def policy_profile(model_cfg, cost_cfg, common, device, *, checkpoint_path=None):
     """Resolve config groups at the Run.setup boundary."""
 
     values = OmegaConf.to_container(cost_cfg.kwargs, resolve=True)
     return PolicyProfile(
         ModelParams.from_values(OmegaConf.to_container(model_cfg, resolve=True)),
-        CostConstants(experiment.symmetric_routes, values["mean_stop_time_s"], values["avg_transfer_wait_time_s"]),
+        CostConstants(common.symmetric_routes, values["mean_stop_time_s"], values["avg_transfer_wait_time_s"]),
         tuple(values["objectives"]),
-        experiment.low_memory_mode,
         checkpoint_path,
         device,
     )

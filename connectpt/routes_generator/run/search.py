@@ -48,7 +48,7 @@ class SearchRun(ExperimentRun):
 
         # cost: the /cost group this run composed (single source).
         self.cost_obj = build_cost(
-            cost_params(cfg.cost), symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
+            cost_params(cfg.cost), symmetric_routes=cfg.common.symmetric_routes, low_memory_mode=cfg.cost.low_memory_mode
         )
         self.cost_obj.to(device)
 
@@ -63,7 +63,7 @@ class SearchRun(ExperimentRun):
                 policy_profile(
                     m_cfg.model,
                     cfg.cost,
-                    cfg.experiment,
+                    cfg.common,
                     device,
                     checkpoint_path=resolve_weights_path(m_cfg.checkpoint_path, self.paths.weights_dir),
                 )

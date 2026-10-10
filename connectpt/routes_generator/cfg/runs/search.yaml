@@ -1,31 +1,36 @@
 # @package _global_
 defaults:
-  - /objectives/cost: rtt_wmc
-  - /experiment: standard
-  - /objectives/adjustment: cap
-  - /city/instance: mandl
-  - /search/method: nea_combined
-  - /search/sweep: single
-  - _self_
-
+- /objectives/cost: rtt_wmc
+- /common: standard
+- /run: standard
+- /objectives/adjustment: cap
+- /city/instance: mandl
+- /search/method: nea_combined
+- /search/sweep: single
+- _self_
 run:
   type: search
   name: search
-  seed: 0
   cpu: false
   silent: true
-
 paths:
   weights_dir: artifacts/model_weights
   runs_dir: artifacts/runs
   output_dir: ${paths.runs_dir}/${run.name}
-
 cost:
   kwargs:
     ignore_stops_oob: false
-
 models: {}
-
-metrics: [RTT, WMC, ATT, adj_vs_seed, d0, d1, d2, d_un, cost]
-
-logger_list: [tensorboard, csv]
+metrics:
+- RTT
+- WMC
+- ATT
+- adj_vs_seed
+- d0
+- d1
+- d2
+- d_un
+- cost
+logger_list:
+- tensorboard
+- csv

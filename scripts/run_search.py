@@ -17,7 +17,7 @@ from datetime import datetime
 import pandas as pd
 
 from connectpt.routes_generator.run.factory import make_run
-from connectpt.routes_generator.run.config import build_experiment
+from connectpt.routes_generator.run.config import build_experiment, load_experiment
 from connectpt.routes_generator.run.const import LOGS_DIR, RESULTS_DIR
 from connectpt.routes_generator.run.context import resolve_under_root
 from connectpt.routes_generator.run.evaluation import evaluate_initial, export_evaluation
@@ -33,7 +33,7 @@ def main() -> None:
     parser.add_argument("--methods", nargs="*", default=["nea_combined"], choices=METHODS)
     parser.add_argument("--instances", nargs="*", default=["mandl"])
     parser.add_argument("--alpha", nargs="*", type=float, default=[0.5])
-    parser.add_argument("--seeds", nargs="*", type=int, default=[0])
+    parser.add_argument("--seeds", nargs="*", type=int, default=None)
     parser.add_argument("--iters", type=int, default=None)
     parser.add_argument("--adj-weight", type=float, default=None)
     parser.add_argument("--adj-target", nargs="*", type=float, default=[None])
@@ -47,6 +47,8 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="compose and validate the selected run without search")
     parser.add_argument("--no-initial", action="store_true")
     args = parser.parse_args()
+    if args.seeds is None:
+        args.seeds = [int(load_experiment(args.config).run.seed)]
 
     out_dir = resolve_under_root(args.out_dir) if args.out_dir else RESULTS_DIR / args.config
     log_dir = resolve_under_root(args.log_dir) if args.log_dir else LOGS_DIR

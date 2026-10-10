@@ -1,0 +1,9 @@
+# @package preferences
+objectives: ${cost.kwargs.objectives}
+demand_time_weight: ${cost.kwargs.demand_time_weight}
+route_time_weight: ${cost.kwargs.route_time_weight}
+median_connectivity_weight: ${cost.kwargs.median_connectivity_weight}
+variable_weights: true
+pp_fraction: 0.0
+op_fraction: 0.3
+mcw_fraction: 0.3

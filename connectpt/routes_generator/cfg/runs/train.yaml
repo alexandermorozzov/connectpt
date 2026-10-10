@@ -2,15 +2,12 @@
 run:
   type: training
   name: edit_training_v1
-  seed: 0
   cpu: false
 paths:
   weights_dir: artifacts/model_weights
   output_dir: artifacts/runs/edit_training_v1
   checkpoint_path: improvement/edit_training_v1.pt
   init_checkpoint_path: null
-experiment:
-  logdir: null
 logger_list:
 - tensorboard
 - csv
@@ -18,7 +15,8 @@ defaults:
 - /objectives/cost: rtt_wmc
 - /objectives/adjustment: cap
 - /training/dataset: lc_copytiers
-- /experiment: standard
+- /common: standard
+- /run: standard
 - /policy/model: edit_trim_seeded
 - /training/algorithm: ppo
 - /env: edit
