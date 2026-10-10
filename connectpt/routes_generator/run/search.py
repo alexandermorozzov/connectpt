@@ -71,7 +71,8 @@ class SearchRun(ExperimentRun):
             if model.action_spec.role != role:
                 raise ValueError(f"profile for {role} has actions {model.action_spec}")
             self.models[role] = model
-            self.bindings[role]=TASKS[role].rollout_binding(model,self.instance)
+            self.bindings[role]=TASKS[m_cfg.env.name].binding(
+                model,self.instance,OmegaConf.to_container(m_cfg.env.params,resolve=True))
 
         self.policies = self.models
         self.method = MethodParams.from_values(OmegaConf.to_container(cfg.method, resolve=True))

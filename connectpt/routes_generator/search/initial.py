@@ -249,7 +249,8 @@ def nikolic_init(state: RouteGenBatchState):
 
 
 def build_init_routes(
-    spec, tensors, *, generator: str, cost, initial, corruption, policy=None, seed: int, clean: bool, device
+    spec, tensors, *, generator: str, cost, initial, corruption, policy=None, binding=None,
+    seed: int, clean: bool, device
 ) -> torch.Tensor:
     """Build an initial network with ``INITIALIZERS[generator]``. The ``lc`` network
     also gets the realistic corruption tier unless ``clean``.
@@ -261,7 +262,12 @@ def build_init_routes(
 
     from ..network.corruption import corrupt, realistic_tier, CorruptionCity, CorruptionLimits
 
-    routes = INITIALIZERS[generator](spec, tensors, device=device, cost=cost, initial=initial, policy=policy)
+    parameters = dict(device=device, cost=cost, initial=initial)
+    if generator == 'lc':
+        if policy is None or binding is None:
+            raise ValueError('learned construction requires a policy and environment binding')
+        parameters.update(policy=policy, binding=binding)
+    routes = INITIALIZERS[generator](spec, tensors, **parameters)
     routes = to_routes(routes, n_routes=spec["n_routes"], width=spec["max_route_len"])[0]
     if generator == "lc" and not clean:
         rng = random.Random(seed)
@@ -276,18 +282,13 @@ def build_init_routes(
     return routes[None] if routes.ndim == 2 else routes
 
 
-def learned_initial(spec, tensors, *, device, cost, initial, policy) -> torch.Tensor:
+def learned_initial(spec, tensors, *, device, cost, initial, policy, binding) -> torch.Tensor:
     from torch_geometric.loader import DataLoader
     from ..city.graph import to_batch
-    from ..env.base import EnvParams
-    from ..env.construction import ConstructionEnv
     from ..policy.predict import predict
 
     data = next(iter(DataLoader(to_batch(tensors).to_data_list(), batch_size=1))).to(device)
-    limits = EnvParams(spec["n_routes"], spec["min_route_len"], spec["max_route_len"],
-                       True, 1.0, policy.force_linking_unlinked, policy.max_act_len,
-                       None, None, False, False, False)
-    return predict(policy, data, cost.get_weights(), cost, ConstructionEnv, limits, "sample").routes
+    return predict(policy, data, cost.get_weights(), cost, binding.factory, binding.params, "sample").routes
 
 
 def _heuristic_construct(spec, tensors, *, device, generator, cost, initial):
@@ -309,11 +310,11 @@ def _heuristic_construct(spec, tensors, *, device, generator, cost, initial):
     return routes.to(device)
 
 
-def _john_construct(spec, tensors, *, device, cost, initial, policy):
+def _john_construct(spec, tensors, *, device, cost, initial):
     return _heuristic_construct(spec, tensors, device=device, generator="john", cost=cost, initial=initial)
 
 
-def _nikolic_construct(spec, tensors, *, device, cost, initial, policy):
+def _nikolic_construct(spec, tensors, *, device, cost, initial):
     return _heuristic_construct(spec, tensors, device=device, generator="nikolic", cost=cost, initial=initial)
 
 

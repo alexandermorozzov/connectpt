@@ -1,9 +1,10 @@
 """Single-route editing with network slots and explicit episode limits."""
 import torch
+from dataclasses import replace
 
 from .actions import ActionSpec, RouteAction
 from .const import RouteActionKind
-from .base import Env
+from .base import Env, EditEnvParams
 from .masks import ActionMask
 from .state import RouteGenBatchState
 from ..city.graph import to_batch
@@ -14,6 +15,17 @@ from ..objectives.penalties import edit_step_penalty, forced_halt_penalty
 
 class EditEnv(Env):
     action_spec = ActionSpec("edit")
+    params_type = EditEnvParams
+
+    @property
+    def allow_trim_below_min(self):
+        return self.params.allow_trim_below_min
+
+    def prepare_iteration(self, iteration, force_nonhalt_until):
+        enabled = self.params.force_nonhalt_first_step
+        if force_nonhalt_until is not None:
+            enabled = enabled and iteration < force_nonhalt_until
+        self.params = replace(self.params, force_nonhalt_first_step=enabled)
 
     def reset(self, graphs, preferences, seed_networks=None, *, route_idx=0, normalize=True, reference_networks=None):
         if seed_networks is None:

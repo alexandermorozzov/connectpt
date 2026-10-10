@@ -18,7 +18,6 @@ from ..env.const import RouteActionKind
 from ..env.features import (
     Observation, aggr_edges_over_sequences, dims as feature_dims,
     extend_features, finite_time_features, global_state_features, halt_features, pair_features,
-    trim_candidate_features,
 )
 from ..env.masks import (
     TORCH_FMIN, TORCH_FMAX, apply_halt_mask,
@@ -356,8 +355,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
     action_spec = ActionSpec("construction")
     def __init__(self, *args, n_pathscorer_layers=3, pathscorer_hidden_dim=16,
                  halt_scorer_type='endpoints', n_halt_layers=3, n_halt_heads=4,
-                 force_linking_unlinked=False, logit_clip=None,
-                 serial_halting=True, max_act_len=None,
+                 logit_clip=None, serial_halting=True,
                  use_redundancy_features=False, feature_norm_unbiased=False,
                  halt_scorer: RouteScorer | None = None, **kwargs):
         """Generates routes by combining shortest paths.
@@ -373,8 +371,6 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             halting score.
         n_halt_heads -- number of heads in the network that computes the
             halting score, if it has heads.
-        force_linking_unlinked -- if True, then the model is forced to extend
-            routes in ways that link unlinked node pairs.
         logit_clip -- if not None, then the logits of path extensions are
             clipped to this value.
         serial_halting -- if True, the halt score is used to make a binary
@@ -392,8 +388,6 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             raise ValueError(
                 "Redundancy-aware path combining expects a backbone with "
                 f"in_edge_dim=18, got {self.edge_feat_dim}")
-        # only paths shorter than this can be added to a route
-        self.max_act_len = max_act_len
         self.nodepair_scorer = get_mlp(self.n_nodepair_layers,
                                        self.embed_dim,
                                        self.nonlin_type, self.dropout,
@@ -401,7 +395,6 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
                                        out_dim=1)
 
         assert self.only_routes_with_demand_are_valid is False, 'not supported'
-        self.force_linking_unlinked = force_linking_unlinked
         self._route_step_counts = []
 
         # Gated adjustment conditioning: when > 0, get_global_state_features
@@ -900,14 +893,8 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
 
 
     def __init__(self, *args, n_trim_scorer_layers=3,
-                 trim_scorer_hidden_dim=16,
-                 forbid_halt_when_overlong=False,
-                 allow_trim_below_min=False, **kwargs):
+                 trim_scorer_hidden_dim=16, **kwargs):
         super().__init__(*args, **kwargs)
-        # When True, trim candidates may shorten a route below min_route_len
-        # (down to an absolute floor of 2 stops). halt stays masked while the
-        # route is below min, so the agent must extend back up before halting.
-        self.allow_trim_below_min = allow_trim_below_min
         self.trim_base_feat_dim = 6
         self.trim_overlap_feat_dim = 8
         self.trim_redundancy_feat_dim = \
@@ -921,7 +908,6 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             self.trim_redundancy_feat_dim +
             self.trim_global_feat_dim
         )
-        self.forbid_halt_when_overlong = forbid_halt_when_overlong
         trim_scorer_indim = self.full_nodepair_dim + self.trim_action_feat_dim
         self.trim_scorer = nn.Sequential(
             FeatureNorm(trim_scorer_indim),
@@ -1184,11 +1170,8 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                 f"{self.trim_global_feat_dim} global features, got "
                 f"{global_features.shape[-1]}"
             )
-        candidate_features, candidate_valid, from_nodes, to_nodes = \
-            trim_candidate_features(
-                state, global_features, nodepair_embeds.dtype, trim_start,
-                use_redundancy=self.use_redundancy_features,
-                allow_below_min=self.allow_trim_below_min)
+        candidate_features, _, from_nodes, to_nodes = state.trim_start if trim_start else state.trim_end
+        candidate_features = candidate_features.to(dtype=nodepair_embeds.dtype)
         candidate_valid = valid
         scores = torch.full((batch_size, route_capacity), TORCH_FMIN,
                             device=state.device, dtype=nodepair_embeds.dtype)

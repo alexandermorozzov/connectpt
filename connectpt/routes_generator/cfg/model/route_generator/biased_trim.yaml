@@ -1,13 +1,11 @@
 type: TrimPathCombiningRouteGenerator
 kwargs:
   n_halt_heads: 4
-  max_act_len: null
   feature_norm_unbiased: false
   use_redundancy_features: true
   temperature: 1
   fixed_frequency_Hz: 0.00074
   only_routes_with_demand_are_valid: false
-  force_linking_unlinked: false
   logit_clip: null
   n_nodepair_layers: 3
   n_pathscorer_layers: 3
@@ -17,5 +15,3 @@ kwargs:
   n_halt_layers: 3
   halt_scorer_type: endpoints
   serial_halting: true
-  forbid_halt_when_overlong: false
-  allow_trim_below_min: false

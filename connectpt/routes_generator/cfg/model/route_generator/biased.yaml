@@ -1,13 +1,11 @@
 type: PathCombiningRouteGenerator
 kwargs:
   n_halt_heads: 4
-  max_act_len: null
   feature_norm_unbiased: false
   use_redundancy_features: false
   temperature: 1
   fixed_frequency_Hz: 0.00074
   only_routes_with_demand_are_valid: false
-  force_linking_unlinked: false
   logit_clip: null
   n_nodepair_layers: 3
   n_pathscorer_layers: 3

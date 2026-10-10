@@ -166,10 +166,7 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget, 
             validation.monitor(policy, logger_list, iteration)
             if val_cost < best_cost:
                 best_cost, best_policy = val_cost, copy.deepcopy(policy)
-        force_first = env.params.force_nonhalt_first_step
-        if budget.force_nonhalt_until is not None:
-            force_first = force_first and iteration < budget.force_nonhalt_until
-        env.set_force_nonhalt_first_step(force_first)
+        env.prepare_iteration(iteration, budget.force_nonhalt_until)
         data.get(progress)
         batch, terminal, episode_rewards, episode_lengths = collect(
             env, policy, algorithm, critic, data, budget.horizon

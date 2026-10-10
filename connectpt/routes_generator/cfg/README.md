@@ -13,7 +13,7 @@ cfg/
 ├── cost/            # цель: rtt_wmc (поиск, edit), att_rtt (construction)
 ├── adjustment/      # штраф за изменение сети: cap
 ├── model/           # архитектура сети
-├── model_profile/   # версия модели: архитектура + чекпоинт
+├── model_profile/   # архитектура, чекпоинт и пресет среды
 ├── dataset/         # датасет и его разбиение
 ├── dataset_build/   # параметры генерации датасета
 ├── curriculum/      # расписание тиров edit-обучения
@@ -26,7 +26,12 @@ cfg/
 
 - `model/` отвечает, **какая архитектура** строится.
 - `model_profile/` отвечает, **какая версия** архитектуры используется, вместе
-  с чекпоинтом.
+  с чекпоинтом и пресетом среды для prediction / поиска.
+- Правила действий задаются в `env.params`: `force_linking_unlinked` и `max_act_len`
+  общие; `max_route_edit_steps`, `max_trim_actions_per_route`, `force_nonhalt_first_step`,
+  `allow_trim_below_min` и `forbid_halt_when_overlong` относятся к edit.
+  При обучении override имеет вид `env.params.max_route_edit_steps=20`, при поиске —
+  `models.edit.env.params.max_route_edit_steps=20`.
 - Метод выбирает профили по роли: `construction` или `edit`.
 - `method.bees` содержит число пчёл, оператор, профиль и полную маску действий.
   Группы выполняются в порядке записи. Одинаковые операторы не сливаются.

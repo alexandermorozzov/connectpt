@@ -178,7 +178,8 @@ def prepare_dataset(cfg, output, *, force=False, dry_run=False, convert_from=Non
         prepared = PreparedPolicy.capture(policy,config.policy_seed)
         cost = build_cost(cost_params(cfg.cost),symmetric_routes=cfg.experiment.symmetric_routes,
                           low_memory_mode=cfg.experiment.low_memory_mode)
-        binding=TASKS['construction'].rollout_binding(policy,limits)
+        binding=TASKS[cfg.model_profile.env.name].binding(
+            policy,limits,OmegaConf.to_container(cfg.model_profile.env.params,resolve=True))
         edit = EditGeneration(prepared,cost,binding.factory,binding.params,device,
                               config.batch_size_cuda if device.type=='cuda' else config.batch_size_cpu,
                               config.lc_n_samples,tuple(tuple(c) for c in config.lc_combos),tuple(config.tiers),

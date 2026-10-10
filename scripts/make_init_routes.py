@@ -55,13 +55,18 @@ def main() -> None:
         instance = load_instance(d, require_routes=False)
         spec = instance.spec
         seed_everything(args.seed)
-        policy, instance_cost = None, cost
+        policy, binding, instance_cost = None, None, cost
         if args.generator == "lc":
             seed_everything(cfg.experiment.seed)
             policy = build_policy(policy_profile(
                 cfg.model_profile.model, cfg.cost, cfg.experiment, device,
                 checkpoint_path=resolve_weights_path(cfg.model_profile.checkpoint_path, MODEL_WEIGHTS_DIR),
             ))
+            from connectpt.routes_generator.run.tasks import TASKS
+            from connectpt.routes_generator.training.dataset import DatasetLimits
+            limits = DatasetLimits(spec['n_routes'], spec['min_route_len'], spec['max_route_len'])
+            binding = TASKS[cfg.model_profile.env.name].binding(
+                policy, limits, OmegaConf.to_container(cfg.model_profile.env.params, resolve=True))
         routes = build_init_routes(
             spec,
             instance.tensors,
@@ -70,6 +75,7 @@ def main() -> None:
             initial=initial,
             corruption=corruption,
             policy=policy,
+            binding=binding,
             seed=args.seed,
             clean=args.clean,
             device=device,

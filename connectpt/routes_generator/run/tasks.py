@@ -1,7 +1,7 @@
 """Task assembly at the configuration boundary."""
-from dataclasses import asdict,dataclass
+from dataclasses import dataclass
 
-from ..env.base import EnvParams,EnvironmentBinding
+from ..env.base import EnvParams, EditEnvParams, EnvironmentBinding
 from ..env.construction import ConstructionEnv
 from ..env.edit import EditEnv
 from ..training.const import DatasetKind
@@ -27,34 +27,22 @@ class Task:
     env_factory: object
     source_factory: object
     validation_factory: object
-    decoder_fields: tuple[str,...]
+    params_type: type[EnvParams]
     requires_seed: bool
 
     def validate_policy(self,policy):
         if policy.action_spec.role!=self.kind.value:
             raise ValueError(f'task {self.kind.value} requires compatible policy actions')
 
-    def training_binding(self,policy,limits,values):
+    def binding(self,policy,limits,values):
         self.validate_policy(policy)
         values=dict(values)
-        for key,value in asdict(limits).items():
+        physical = dict(n_routes=limits.n_routes, min_route_len=limits.min_route_len, max_route_len=limits.max_route_len)
+        for key,value in physical.items():
             if key in values and values[key]!=value:
                 raise ValueError(f'env.{key} conflicts with dataset limits')
             values[key]=value
-        params=EnvParams(**values)
-        for field in self.decoder_fields:
-            if getattr(params,field)!=getattr(policy,field):
-                raise ValueError(f'env.{field} conflicts with policy decoder rules')
-        return EnvironmentBinding(self.env_factory,params)
-
-    def rollout_binding(self,policy,limits,*,max_route_edit_steps=None,max_trim_actions=None,
-                        force_nonhalt_first_step=False):
-        self.validate_policy(policy)
-        params=EnvParams(limits.n_routes,limits.min_route_len,limits.max_route_len,True,1.0,
-                         policy.force_linking_unlinked,policy.max_act_len,max_route_edit_steps,
-                         max_trim_actions,force_nonhalt_first_step,
-                         policy.allow_trim_below_min if self.requires_seed else False,
-                         policy.forbid_halt_when_overlong if self.requires_seed else False)
+        params=self.params_type(**values)
         return EnvironmentBinding(self.env_factory,params)
 
     def source(self,prepared,sampler):
@@ -65,7 +53,7 @@ class Task:
 
 TASKS={
     'construction':Task(DatasetKind.CONSTRUCTION,ConstructionEnv,construction_source,ConstructionValidation,
-                        ('force_linking_unlinked','max_act_len'),False),
+                        EnvParams,False),
     'edit':Task(DatasetKind.EDIT,EditEnv,edit_source,EditValidation,
-                ('force_linking_unlinked','max_act_len','allow_trim_below_min','forbid_halt_when_overlong'),True),
+                EditEnvParams,True),
 }

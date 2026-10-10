@@ -21,6 +21,10 @@ class EnvParams:
     reward_scale: float
     force_linking_unlinked: bool
     max_act_len: int | None
+
+
+@dataclass(frozen=True)
+class EditEnvParams(EnvParams):
     max_route_edit_steps: int | None
     max_trim_actions_per_route: int | None
     force_nonhalt_first_step: bool
@@ -55,9 +59,12 @@ class Env(ABC):
     """``reset``, ``step``, ``observe``. A subclass sets ``action_spec`` and the task rules."""
 
     action_spec: ActionSpec
+    params_type = EnvParams
 
     def __init__(self, cost, features: FeatureParams, params: EnvParams, policy_spec: ActionSpec, *, node_normalizer, mask=None):
         self.action_spec.validate(policy_spec)
+        if type(params) is not self.params_type:
+            raise TypeError(f'{self.action_spec.role} requires {self.params_type.__name__}')
         self.cost = cost
         self.feature_set = features
         self.params = params
@@ -104,13 +111,17 @@ class Env(ABC):
         """Configure the next reset; existing State keeps its own episode limits."""
         self.params = replace(self.params, n_routes=count)
 
-    def set_force_nonhalt_first_step(self, enabled):
-        self.params = replace(self.params, force_nonhalt_first_step=enabled)
+    def prepare_iteration(self, iteration, force_nonhalt_until):
+        """Construction has no edit first-step restriction."""
+
+    @property
+    def allow_trim_below_min(self):
+        return False
 
     def observation(self, state=None):
         """Compute features without consulting the current episode's action limits."""
         state = self.state if state is None else state
-        return observe(state, self.feature_set, allow_below_min=self.params.allow_trim_below_min)
+        return observe(state, self.feature_set, allow_below_min=self.allow_trim_below_min)
 
     def observe(self, state=None):
         state = self.state if state is None else state

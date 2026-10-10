@@ -1,6 +1,5 @@
 """Internal network sampling for the public predict interface."""
 import torch
-from dataclasses import replace
 
 from ..env.state import RouteGenBatchState
 from ..network.routes import to_routes
@@ -34,7 +33,7 @@ def _finish(env, policy, greedy, revisit, env_factory):
                 raise NotImplementedError("revisiting requires equal route counts across a batch")
             env.state.set_current_routes(route)
             route_env = env_factory(env.cost, policy.feature_set,
-                                    replace(env.params, max_trim_actions_per_route=1), policy.action_spec,
+                                    env.params, policy.action_spec,
                                     node_normalizer=policy.node_norm, mask=env.mask_override)
             route_env.bind(env.state, single_route=True)
             rollout(route_env, policy, greedy, record_states=False)

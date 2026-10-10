@@ -51,7 +51,12 @@ model:
   route_generator:
     kwargs:
       serial_halting: true
-      allow_trim_below_min: true
+env:
+  params:
+    max_route_edit_steps: 30
+    max_trim_actions_per_route: 1
+    force_nonhalt_first_step: true
+    allow_trim_below_min: true
 evaluation:
   validation_mode: greedy
   graph_count: null

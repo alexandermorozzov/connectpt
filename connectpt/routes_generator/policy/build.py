@@ -26,9 +26,7 @@ class DecoderParams:
     n_halt_heads: int
     halt_scorer_type: str
     serial_halting: bool
-    force_linking_unlinked: bool
     logit_clip: float | None
-    max_act_len: int | None
     feature_norm_unbiased: bool
     use_redundancy_features: bool
     temperature: float
@@ -40,8 +38,6 @@ class DecoderParams:
 class TrimDecoderParams(DecoderParams):
     n_trim_scorer_layers: int
     trim_scorer_hidden_dim: int
-    forbid_halt_when_overlong: bool
-    allow_trim_below_min: bool
 
 
 @dataclass(frozen=True)

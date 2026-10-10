@@ -161,7 +161,8 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
     normalize_nodes(state, model.node_norm, model.feature_set)
     from connectpt.routes_generator.run.tasks import TASKS
     limits = SimpleNamespace(n_routes=3, min_route_len=2, max_route_len=8)
-    env = TASKS['construction'].rollout_binding(model, limits).bind(state, model, cost, normalize=False)
+    env = TASKS['construction'].binding(model, limits,
+        OmegaConf.to_container(cfg.env.params, resolve=True)).bind(state, model, cost, normalize=False)
     phases = set()
     with torch.no_grad():
         for _ in range(30):

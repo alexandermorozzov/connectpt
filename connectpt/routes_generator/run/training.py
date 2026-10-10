@@ -62,7 +62,7 @@ class TrainingRun(ExperimentRun):
             cost_params(cfg.cost), symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
         ).to(device)
         self.data_input = prepare_data_input(cfg.dataset, self.task.kind)
-        self.binding=self.task.training_binding(self.policy,self.data_input.params.limits,
+        self.binding=self.task.binding(self.policy,self.data_input.params.limits,
                                                OmegaConf.to_container(cfg.env.params,resolve=True))
         self.env_params=self.binding.params
         self.env=self.binding.create(self.policy,self.cost)
