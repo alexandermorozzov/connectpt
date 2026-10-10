@@ -183,7 +183,7 @@ class TrainingRun(ExperimentRun):
             device,
             scalar=self.algorithm.scalar_values,
             actor_model=self.policy if self.critic_params.shared else None,
-            observe=self.env.observe if self.critic_params.shared else None,
+            observation=self.env.observation if self.critic_params.shared else None,
         )
         budget = Budget(
             lp.n_iterations,

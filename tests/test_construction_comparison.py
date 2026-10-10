@@ -29,13 +29,12 @@ from connectpt.routes_generator.training.algorithms.base import (
 from connectpt.routes_generator.objectives.pareto import hypervolume_2d, nondominated
 
 
-def evaluate_action(policy, state, indices, kinds=None, mask=None):
+def evaluate_action(policy, observation, mask, indices, kinds=None):
     from connectpt.routes_generator.env.actions import RouteAction
     from connectpt.routes_generator.env.const import RouteActionKind
     if kinds is None:
         kinds = torch.where(indices[:, 0] < 0, RouteActionKind.HALT, RouteActionKind.EXTEND)
-    return policy.evaluate(observe(state, policy.feature_set), ActionMask() if mask is None else mask,
-        RouteAction(kinds, indices))
+    return policy.evaluate(observation, mask, RouteAction(kinds, indices))
 
 
 def preference_dict(weights):
@@ -160,14 +159,18 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
     from connectpt.routes_generator.env.base import normalize_nodes
 
     normalize_nodes(state, model.node_norm, model.feature_set)
+    from connectpt.routes_generator.run.tasks import TASKS
+    limits = SimpleNamespace(n_routes=3, min_route_len=2, max_route_len=8)
+    env = TASKS['construction'].rollout_binding(model, limits).bind(state, model, cost, normalize=False)
     phases = set()
     with torch.no_grad():
         for _ in range(30):
             phases.update(state.current_route_n_stops.tolist())
             active = ~state.is_done()
-            out = model.act(observe(state, model.feature_set), ActionMask())
+            observation, mask = env.observe()
+            out = model.act(observation, mask)
             actions, logp, entropy = out.action.indices, out.logp, out.entropy
-            replay_out = evaluate_action(model, state, actions)
+            replay_out = evaluate_action(model, observation, mask, actions)
             replay, distribution = replay_out.logp, replay_out.log_probs
             assert torch.allclose((replay - logp).exp(), torch.ones_like(logp), atol=1e-6)
             selected = actions[:, 0] * state.max_n_nodes + actions[:, 1]
@@ -180,8 +183,7 @@ def test_replayed_action_and_existing_d3po_diversity_restore_state():
             values.pop("critic")
             algorithm = D3PO(AlgorithmParams(**values), cost)
             algorithm.params = __import__("dataclasses").replace(algorithm.params, diversity_weight=0.01)
-            env = SimpleNamespace(observe=lambda s: (observe(s, model.feature_set), None))
-            loss = algorithm.diversity(model, env, state, replay_out, ActionMask()).loss
+            loss = algorithm.diversity(model, env, state, replay_out, mask).loss
             assert loss.isfinite() and loss >= 0
             assert all(torch.equal(state.cost_weights[k], v) for k, v in original.items())
             assert entropy.isfinite().all()

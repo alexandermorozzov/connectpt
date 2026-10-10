@@ -61,7 +61,7 @@ def test_diversity_squares_full_kl_and_is_independent_of_replayed_action(monkeyp
 
     from types import SimpleNamespace
 
-    env = SimpleNamespace(observe=lambda state: (state, None))
+    env = SimpleNamespace(observation=lambda state: state)
 
     class Model:
         feature_set = None

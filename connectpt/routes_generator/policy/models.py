@@ -21,9 +21,8 @@ from ..env.features import (
     trim_candidate_features,
 )
 from ..env.masks import (
-    TORCH_FMIN, TORCH_FMAX, construction_halt_scores, edit_halt_scores,
-    extension_mask, mask_action_family, path_mask, set_invalid_scores_to_fmin,
-    trim_coverage_mask,
+    TORCH_FMIN, TORCH_FMAX, apply_halt_mask,
+    mask_action_family, set_invalid_scores_to_fmin,
 )
 from .const import (
     ATTN_DEFAULT_DROPOUT, DEFAULT_NONLIN, DEFAULT_PREFERENCE_GOALS,
@@ -499,47 +498,39 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         else:
             node_descs, node_pad_mask, np_embeds, path_scores = precalc_data
 
-        path_seqs = state.get_shortest_path_sequences()
+        path_seqs = state.paths
         batch_size = state.batch_size
 
         # don't choose segments greater than the max route length
-        path_lens, current_route_lens, paths_are_invalid = path_mask(
-            state, path_seqs, self.max_act_len, self.force_linking_unlinked)
+        candidates = mask.require_candidates()
+        path_lens = (path_seqs > -1).sum(dim=-1)
+        current_route_lens = state.current_route_n_stops
+        paths_are_invalid = ~candidates.path_valid
         path_scores = set_invalid_scores_to_fmin(path_scores,
                                                       ~paths_are_invalid)
-        no_valid_options = paths_are_invalid.all(-1).all(-1)
-        old_route_is_done = state.is_done() | no_valid_options
 
         # determine if we're extending a route or starting a new one
         # for starting, we ignore the halt choice
-        starting = ~state.is_done() & (current_route_lens == 0)
+        starting = ~state.done & (current_route_lens == 0)
 
         # update scores and get validity for extensions to non-empty routes
         padding = (0,1, 0,1, 0,0)
         drive_times = torch.nn.functional.pad(state.drive_times, padding)
         padding = (0, 0) + padding
         np_embeds = torch.nn.functional.pad(np_embeds, padding)
-        are_on_routes = torch.zeros((batch_size, state.max_n_nodes + 1),
-                                    device=state.device).bool()
-        batch_idxs = state.batch_indices
-        are_on_routes[batch_idxs[:, None], state.current_routes] = True
-        # make padding column False
-        are_on_routes[:, -1] = False
-        getext_args = (state, current_route_lens, are_on_routes, path_seqs,
-                       np_embeds, drive_times, path_scores, path_lens,
-                       paths_are_invalid)
+        getext_args = (state, current_route_lens, path_seqs,
+                       np_embeds, drive_times, path_scores, path_lens)
         prev_scores, prev_valid = self._get_extension_scores(*getext_args,
-            before_or_after='before')
+            before_or_after='before', valid=candidates.before_valid)
         next_scores, next_valid = self._get_extension_scores(*getext_args,
-            before_or_after='after')
+            before_or_after='after', valid=candidates.after_valid)
 
         # compute the scores for halting
         halt_scores = self.halt_scorer(state, node_descs, state.current_routes,
                                        state.current_route_time, node_pad_mask)
         ext_valid = prev_valid | next_valid
-        halt_scores = construction_halt_scores(
-            state, halt_scores, current_route_lens, old_route_is_done,
-            starting, ext_valid, self.force_linking_unlinked, mask.halt)
+        halt_scores = apply_halt_mask(halt_scores, candidates)
+        old_route_is_done = candidates.old_route_is_done
 
         ext_scores = prev_scores * prev_valid + next_scores * next_valid + \
             TORCH_FMIN * ~ext_valid
@@ -550,7 +541,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         # action: a sampled halt still needs every extension in its KL.
         continuing = (~starting & ~old_route_is_done)[:, None, None]
         all_scores = torch.where(continuing, ext_scores, start_scores)
-        all_valid = torch.where(continuing, ext_valid, ~paths_are_invalid)
+        all_valid = candidates.extend_valid
+        all_scores, all_valid = mask_action_family(all_scores, all_valid, mask.extend)
         action_log_probs = _joint_route_action_log_probs(
             all_scores.flatten(1), all_valid.flatten(1), halt_scores,
             self.serial_halting, self.temperature, old_route_is_done)
@@ -580,6 +572,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         extending = ~starting & ~route_is_done
         xtnding_exp = extending[:, None, None]
         ppe_scores = start_scores * ~xtnding_exp + ext_scores * xtnding_exp
+        ppe_scores, _ = mask_action_family(ppe_scores, all_valid, mask.extend)
 
         # select an option
         flat_path_scores = ppe_scores.reshape(batch_size, -1)
@@ -662,7 +655,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
             edge_feats_flat = edge_feats_square[isedge_mask]
             input_batch.edge_attr = edge_feats_flat
 
-        path_seqs = state.get_shortest_path_sequences()
+        path_seqs = state.paths
 
         # run GNN forward
         if self.backbone_net.gives_edge_features:
@@ -734,9 +727,8 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         return torch.cat([graph_embed, route_embed, global_feats], dim=-1)
 
     def _get_extension_scores(self, state: Observation, route_lens,
-                              are_on_routes, all_paths, nodepair_embeds,
-                              drive_times, path_scores, path_lens,
-                              invalid_terms, before_or_after='after'):
+                              all_paths, nodepair_embeds, drive_times,
+                              path_scores, path_lens, before_or_after='after', *, valid):
         log.debug("get extension scores")
         assert before_or_after in ['before', 'after']
         lens_wo_term = route_lens - 1
@@ -813,8 +805,6 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
         # apply final transformer of lengths
         new_path_lens = path_lens[batch_idxs, terminal_nodes]
-        # The shortest path contains the shared route endpoint.
-        new_lens = new_path_lens + route_lens[:, None] - 1
         # max over the stops already on the route, and drop the dummy row
         added_drive_times = times_from_end[..., :-1]
 
@@ -825,21 +815,13 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
 
         assert ext_scores.isfinite().all()
 
-        invalid = extension_mask(state, are_on_routes, extension_paths,
-                                 raw_extension_paths, path_lens, terminal_nodes,
-                                 new_lens, self.force_linking_unlinked)
-
         out_scores = torch.zeros_like(path_scores)
         out_scores[batch_idxs, terminal_nodes] = ext_scores
-        out_valids = torch.zeros_like(path_scores, dtype=bool)
-        out_valids[batch_idxs, terminal_nodes] = ~invalid
 
         if before_or_after == 'before':
             # swap from- and to-node axes back
             out_scores = out_scores.transpose(-2, -1)
-            out_valids = out_valids.transpose(-2, -1)
-
-        out_valids &= ~invalid_terms
+        out_valids = valid
         out_scores = get_update_at_mask(out_scores, ~out_valids, TORCH_FMIN)
 
         log.debug("extension scores gotten")
@@ -965,31 +947,27 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             node_descs, node_pad_mask, np_embeds, path_scores = precalc_data
 
         batch_size = state.batch_size
-        path_seqs = state.get_shortest_path_sequences()
-        path_lens, current_route_lens, paths_are_invalid = path_mask(
-            state, path_seqs, self.max_act_len, self.force_linking_unlinked)
+        path_seqs = state.paths
+        candidates = mask.require_candidates()
+        path_lens = (path_seqs > -1).sum(dim=-1)
+        current_route_lens = state.current_route_n_stops
+        paths_are_invalid = ~candidates.path_valid
         path_scores = set_invalid_scores_to_fmin(path_scores,
                                                       ~paths_are_invalid)
         trim_np_embeds = np_embeds
 
-        starting = ~state.is_done() & (current_route_lens == 0)
+        starting = ~state.done & (current_route_lens == 0)
 
         padding = (0, 1, 0, 1, 0, 0)
         drive_times = torch.nn.functional.pad(state.drive_times, padding)
         padding = (0, 0) + padding
         np_embeds = torch.nn.functional.pad(np_embeds, padding)
-        are_on_routes = torch.zeros((batch_size, state.max_n_nodes + 1),
-                                    device=state.device).bool()
-        batch_idxs = state.batch_indices
-        are_on_routes[batch_idxs[:, None], state.current_routes] = True
-        are_on_routes[:, -1] = False
-        getext_args = (state, current_route_lens, are_on_routes, path_seqs,
-                       np_embeds, drive_times, path_scores, path_lens,
-                       paths_are_invalid)
+        getext_args = (state, current_route_lens, path_seqs,
+                       np_embeds, drive_times, path_scores, path_lens)
         prev_scores, prev_valid = self._get_extension_scores(
-            *getext_args, before_or_after='before')
+            *getext_args, before_or_after='before', valid=candidates.before_valid)
         next_scores, next_valid = self._get_extension_scores(
-            *getext_args, before_or_after='after')
+            *getext_args, before_or_after='after', valid=candidates.after_valid)
 
         ext_valid = prev_valid | next_valid
         ext_scores = prev_scores * prev_valid + next_scores * next_valid + \
@@ -999,17 +977,18 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                                                 candidate_paths=path_seqs)
 
         trim_start_scores, trim_start_valid = self._get_trim_action_scores(
-            state, trim_np_embeds, trim_start=True)
+            state, trim_np_embeds, trim_start=True, valid=candidates.trim_start_raw)
         trim_end_scores, trim_end_valid = self._get_trim_action_scores(
-            state, trim_np_embeds, trim_start=False)
+            state, trim_np_embeds, trim_start=False, valid=candidates.trim_end_raw)
 
-        trim_start_scores, trim_start_valid, trim_end_scores, trim_end_valid = trim_coverage_mask(
-            state, trim_start_scores, trim_start_valid, trim_end_scores, trim_end_valid,
-            self.force_linking_unlinked)
+        trim_start_valid = candidates.trim_start_coverage
+        trim_end_valid = candidates.trim_end_coverage
+        trim_start_scores = torch.where(trim_start_valid, trim_start_scores,
+                                       torch.full_like(trim_start_scores, TORCH_FMIN))
+        trim_end_scores = torch.where(trim_end_valid, trim_end_scores,
+                                     torch.full_like(trim_end_scores, TORCH_FMIN))
 
-        no_route_action_yet = torch.zeros((batch_size,), dtype=torch.bool,
-                                          device=state.device)
-        route_is_done = state.is_done()
+        route_is_done = state.done
         chose_halt = route_is_done.clone()
         corh_logit = torch.zeros((batch_size,), device=state.device)
         corh_ent = torch.zeros((batch_size,), device=state.device)
@@ -1017,15 +996,14 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         extending = ~starting & ~route_is_done
         xtnding_exp = extending[:, None, None]
         ppe_scores = start_scores * ~xtnding_exp + ext_scores * xtnding_exp
-        ppe_valid = (~paths_are_invalid) * ~xtnding_exp + ext_valid * xtnding_exp
-        ppe_valid = ppe_valid.bool()
+        ppe_valid = candidates.extend_valid
 
         flat_extend_scores = ppe_scores.reshape(batch_size, -1)
         flat_extend_valid = ppe_valid.reshape(batch_size, -1)
         flat_trim_start_scores = trim_start_scores.reshape(batch_size, -1)
-        flat_trim_start_valid = trim_start_valid.reshape(batch_size, -1)
+        flat_trim_start_valid = candidates.trim_start_valid
         flat_trim_end_scores = trim_end_scores.reshape(batch_size, -1)
-        flat_trim_end_valid = trim_end_valid.reshape(batch_size, -1)
+        flat_trim_end_valid = candidates.trim_end_valid
 
         flat_extend_scores, flat_extend_valid = \
             mask_action_family(
@@ -1048,14 +1026,11 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
             flat_trim_start_valid,
             flat_trim_end_valid,
         ), dim=-1)
-        no_route_action_yet = ~flat_route_valid.any(-1)
 
         halt_scores = self.halt_scorer(state, node_descs, state.current_routes,
                                        state.current_route_time, node_pad_mask)
-        halt_scores, old_route_is_done = edit_halt_scores(
-            state, halt_scores, current_route_lens, no_route_action_yet,
-            trim_start_valid, trim_end_valid, self.force_linking_unlinked,
-            self.forbid_halt_when_overlong, mask.halt)
+        halt_scores = apply_halt_mask(halt_scores, candidates)
+        old_route_is_done = candidates.old_route_is_done
 
         action_log_probs = _joint_route_action_log_probs(
             flat_route_scores, flat_route_valid, halt_scores,
@@ -1185,7 +1160,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
         return action_kinds, folded_idxs
 
     def _get_trim_action_scores(self, state, nodepair_embeds,
-                                trim_start=True):
+                                trim_start=True, *, valid):
         """Positional trim scores: one candidate per route position.
 
         Returns ``scores`` and ``valid`` of shape ``[batch, route_capacity]``.
@@ -1215,7 +1190,7 @@ class TrimPathCombiningRouteGenerator(PathCombiningRouteGenerator):
                 state, global_features, nodepair_embeds.dtype, trim_start,
                 use_redundancy=self.use_redundancy_features,
                 allow_below_min=self.allow_trim_below_min)
-        candidate_valid = candidate_valid & (from_nodes >= 0) & (to_nodes >= 0)
+        candidate_valid = valid
         scores = torch.full((batch_size, route_capacity), TORCH_FMIN,
                             device=state.device, dtype=nodepair_embeds.dtype)
         if candidate_valid.any():

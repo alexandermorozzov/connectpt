@@ -7,6 +7,7 @@ import torch
 from .actions import ActionSpec, RouteAction
 from .const import RouteActionKind
 from .features import FeatureParams, observe, select_features, NODE_COLUMNS
+from .masks import prepare_action_mask
 from ..city.graph import STOP_KEY
 from ..objectives.const import ACTION_PENALTIES
 
@@ -108,10 +109,15 @@ class Env(ABC):
     def set_force_nonhalt_first_step(self, enabled):
         self.params = replace(self.params, force_nonhalt_first_step=enabled)
 
+    def observation(self, state=None):
+        """Compute features without consulting the current episode's action limits."""
+        state = self.state if state is None else state
+        return observe(state, self.feature_set, allow_below_min=self.params.allow_trim_below_min)
+
     def observe(self, state=None):
         state = self.state if state is None else state
-        obs = observe(state, self.feature_set, allow_below_min=self.params.allow_trim_below_min)
-        return obs, self.action_mask(state)
+        obs = self.observation(state)
+        return obs, prepare_action_mask(obs, self.params, self.action_spec.role, self.action_mask(state))
 
     def step(self, action: RouteAction):
         active = ~self.is_done()

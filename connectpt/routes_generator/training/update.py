@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from ..env.actions import RouteAction
-from ..env.masks import ActionMask
+from ..env.masks import ActionMask, CandidateMasks
 from ..env.state import RouteGenBatchState
 from .algorithms.base import normalize_advantages
 
@@ -63,14 +63,19 @@ def shape_groups(states, indices):
 
 
 def replay_mask(masks, indices, batch_size, score, device):
+    selected = indices.detach().cpu().tolist()
     values = {}
     for field in fields(ActionMask):
+        if field.name == 'candidates':
+            continue
         parts = []
-        for index in indices.detach().cpu().tolist():
+        for index in selected:
             value = getattr(masks[index], field.name)
             value = torch.as_tensor(value, device=device, dtype=torch.bool)
             parts.append(value.expand(batch_size))
         values[field.name] = torch.cat(parts)[score]
+    candidates = CandidateMasks.concatenate([masks[i].require_candidates() for i in selected], device)
+    values['candidates'] = candidates.index_select(torch.where(score)[0])
     return ActionMask(**values)
 
 
@@ -103,7 +108,7 @@ def update(env, policy, algorithm, critic, optimizer, batch):
             value_buffer.append(value_stats["values"])
             target_buffer.append(value_stats["targets"])
             per_goal_mse.append(value_stats["per_obj_mse"].detach())
-            obs, _ = env.observe(state)
+            obs = env.observation(state)
             output = policy.evaluate(obs, mask, action)
             if p.normalize_advantages:
                 advantages = normalize_advantages(advantages, per_objective=advantages.ndim > 1)

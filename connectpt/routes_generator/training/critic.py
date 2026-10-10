@@ -26,7 +26,7 @@ class CriticParams:
 class ValueHead:
     """Only the value head trains; shared actor features are detached."""
 
-    def __init__(self, k, features, params, device, *, scalar, actor_model=None, observe=None):
+    def __init__(self, k, features, params, device, *, scalar, actor_model=None, observation=None):
         self.n_objectives = k
         self.scalar = scalar
         self.params = params
@@ -41,7 +41,7 @@ class ValueHead:
         self.loss_fn = torch.nn.MSELoss()
         self.actor_model = actor_model
         # A shared critic reads the environment's observation of a State.
-        self.observe = observe
+        self.observation = observation
         self._shared_critic = actor_model is not None
         self.normalize_returns = params.normalize_returns
         self.huber = params.huber
@@ -161,7 +161,7 @@ class ValueHead:
 
     def _features_from_state(self, state):
         if self._shared_critic:
-            return self.actor_model.get_critic_features(self.observe(state)[0])
+            return self.actor_model.get_critic_features(self.observation(state))
         return critic_features(state, self.feature_set)
 
     def from_state(self, state):

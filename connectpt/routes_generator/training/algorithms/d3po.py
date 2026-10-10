@@ -58,7 +58,7 @@ class D3PO(Algorithm):
         saved = {key: value.clone() for key, value in state.cost_weights.items()}
         state.set_cost_weights(preference_dict(neighbor))
         try:
-            obs, _ = env.observe(state)
+            obs = env.observation(state)
             neighbor_output = policy.evaluate(obs, mask, output.action)
         finally:
             state.set_cost_weights(saved)
