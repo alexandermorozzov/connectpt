@@ -6,8 +6,6 @@ from omegaconf import OmegaConf
 from ..city.graph import to_batch
 from ..city.synthetic import DynamicCityGraphDataset, SyntheticParams
 from ..common.random import seed_everything
-from ..env.base import EnvParams
-from ..env.construction import ConstructionEnv
 from ..network.corruption import CopyTierParams, copy_tier
 from ..objectives.cost import build_cost
 from ..policy.build import build_policy
@@ -15,7 +13,7 @@ from ..training.const import DatasetKind, DataSourceKind, DATASET_MANIFEST
 from ..training.dataset import (DatasetLimits, GenerationParams, EditGeneration, PreparedPolicy, read_manifest,
                                 generate_dataset, save_dataset, dataset_fingerprint, existing_dataset,
                                 file_identity, convert_dataset)
-from ..training.params import DatasetInputParams
+from ..training.params import DatasetInputParams, PreparedDataInput
 from ..training.pipeline import GraphPipeline, PipelineParams
 from ..training.split import SplitParams, prepare_split
 from .context import resolve_under_root, resolve_device, resolve_weights_path
@@ -23,6 +21,7 @@ from .config import cost_params, policy_profile
 from .const import ROOT_DIR, MODEL_WEIGHTS_DIR
 from .instances import load_instance
 from .runs import current_commit
+from .tasks import TASKS
 
 
 @dataclass(frozen=True)
@@ -39,15 +38,6 @@ class DatasetConfig:
     scale_dynamically: bool
     train_pipeline: dict
     evaluation_pipeline: dict
-
-
-@dataclass(frozen=True)
-class PreparedDataInput:
-    params: DatasetInputParams
-    train_pipeline: GraphPipeline
-    evaluation_pipeline: GraphPipeline
-    online_source: object | None
-    benchmark: object | None
 
 
 def prepare_data_input(node, task: DatasetKind):
@@ -188,9 +178,8 @@ def prepare_dataset(cfg, output, *, force=False, dry_run=False, convert_from=Non
         prepared = PreparedPolicy.capture(policy,config.policy_seed)
         cost = build_cost(cost_params(cfg.cost),symmetric_routes=cfg.experiment.symmetric_routes,
                           low_memory_mode=cfg.experiment.low_memory_mode)
-        env_params = EnvParams(limits.n_routes,limits.min_route_len,limits.max_route_len,True,1.,
-                               policy.force_linking_unlinked,policy.max_act_len,None,None,False,False,False)
-        edit = EditGeneration(prepared,cost,ConstructionEnv,env_params,device,
+        binding=TASKS['construction'].rollout_binding(policy,limits)
+        edit = EditGeneration(prepared,cost,binding.factory,binding.params,device,
                               config.batch_size_cuda if device.type=='cuda' else config.batch_size_cpu,
                               config.lc_n_samples,tuple(tuple(c) for c in config.lc_combos),tuple(config.tiers),
                               {t:copy_tier(tiers[t]) for t in config.tiers},

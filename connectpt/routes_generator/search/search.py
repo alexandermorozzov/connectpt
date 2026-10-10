@@ -12,7 +12,6 @@ from ..objectives.metrics import Metrics, evaluate_network
 from ..objectives.evaluate import Evaluation
 from ..common.random import seed_everything
 from .colony import run_colony
-from .plan import ExecutablePlan
 
 
 @dataclass
@@ -26,7 +25,7 @@ class SearchResult:
 def run_search(
     instance,
     method,
-    policies,
+    plan,
     alpha,
     adjustment,
     seed,
@@ -38,7 +37,6 @@ def run_search(
     logger_list=(),
     mutation_counts_out=None,
 ):
-    plan = ExecutablePlan.from_method(method, policies)
     overrides = dict(adjustment)
     if alpha is not None:
         overrides.update(route_time_weight=float(alpha), median_connectivity_weight=float(1 - alpha))

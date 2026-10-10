@@ -43,7 +43,12 @@ def preference_dict(weights):
 
 
 def test_episode_statistics_keep_partial_episodes_and_separate_terminals():
-    from connectpt.routes_generator.training.loop import episode_statistics as _collect_episode_statistics
+    from connectpt.routes_generator.training.episodes import EpisodeStatistics
+
+    def _collect_episode_statistics(rewards,dones,totals,lengths):
+        stats=EpisodeStatistics(totals,lengths)
+        completed=[stats.record(reward,done,torch.ones_like(done)) for reward,done in zip(rewards,dones)]
+        return tuple(torch.cat(items) for items in zip(*completed))
 
     totals = torch.zeros(2)
     lengths = torch.zeros(2, dtype=torch.long)
@@ -424,6 +429,7 @@ def test_fixed_preference_evaluation_does_not_consume_training_rng():
     from connectpt.routes_generator.training.validate import evaluate_preferences, EvaluationProfile, EvaluationParams
     from connectpt.routes_generator.env.base import EnvParams
     from connectpt.routes_generator.run.schemas import params
+    from connectpt.routes_generator.run.tasks import TASKS
 
     torch.set_num_threads(2)
     with initialize_config_dir(config_dir=str(CFG_DIR), version_base=None):
@@ -449,6 +455,7 @@ def test_fixed_preference_evaluation_does_not_consume_training_rng():
                       **OmegaConf.to_container(cfg.dataset.legacy_limits, resolve=True)),
         cfg.train_loop.batch_size,
         cfg.experiment.symmetric_routes,
+        TASKS["construction"].env_factory,
     )
     rows = evaluate_preferences(
         model, graphs, profile, cost, torch.device("cpu"), mode="stochastic"

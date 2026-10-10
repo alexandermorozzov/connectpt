@@ -177,7 +177,7 @@ class ExecutablePlan:
             raise ValueError("edit bees require a policy with trim actions")
 
     @classmethod
-    def from_method(cls, method, policies):
+    def from_method(cls, method, policies,bindings):
         factories = {
             "shortest_path_rebuild": HeuristicRebuildOp,
             "local_edit": ShortenOp,
@@ -198,7 +198,7 @@ class ExecutablePlan:
                         raise ValueError("rebuild requires construction extend/halt actions")
                     if spec.ignore_max_route_len:
                         raise ValueError("full rebuild respects route bounds")
-                    op = factory(model, name=name)
+                    op = factory(model, name=name,binding=bindings[spec.model_ref])
                 elif spec.operator == "neural_edit":
                     valid = {"extend", "trim_start", "trim_end", "halt"}
                     if (
@@ -209,6 +209,7 @@ class ExecutablePlan:
                         raise ValueError("edit bee has an incompatible policy or action mask")
                     op = factory(
                         model,
+                        binding=bindings[spec.model_ref],
                         name=name,
                         allowed_actions=spec.allowed_actions,
                         ignore_max_route_len=spec.ignore_max_route_len,

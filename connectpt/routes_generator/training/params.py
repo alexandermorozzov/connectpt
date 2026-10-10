@@ -4,6 +4,7 @@ from pathlib import Path
 from .const import DatasetKind, DataSourceKind
 from .dataset import DatasetLimits
 from .split import SplitParams
+from .pipeline import GraphPipeline
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,15 @@ class DatasetInputParams:
     legacy_split: SplitParams
     validation_path: Path | None
     test_path: Path | None
+
+
+@dataclass(frozen=True)
+class PreparedDataInput:
+    params: DatasetInputParams
+    train_pipeline: GraphPipeline
+    evaluation_pipeline: GraphPipeline
+    online_source: object | None
+    benchmark: object | None
 
 
 @dataclass(frozen=True)

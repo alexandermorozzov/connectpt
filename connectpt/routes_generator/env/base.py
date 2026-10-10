@@ -27,6 +27,23 @@ class EnvParams:
     forbid_halt_when_overlong: bool
 
 
+@dataclass(frozen=True)
+class EnvironmentBinding:
+    factory: object
+    params: EnvParams
+
+    def create(self, policy, cost, *, mask=None):
+        return self.factory(cost, policy.feature_set, self.params, policy.action_spec,
+                            node_normalizer=policy.node_norm, mask=mask)
+
+    def bind(self, state, policy, cost, *, normalize=True, single_route=False, mask=None):
+        params=replace(self.params,n_routes=state.n_routes_to_plan,
+                       min_route_len=state.min_route_len,max_route_len=state.max_route_len)
+        env=EnvironmentBinding(self.factory,params).create(policy,cost,mask=mask)
+        env.bind(state,normalize=normalize,single_route=single_route)
+        return env
+
+
 def normalize_nodes(state, normalizer, feature_set):
     """Normalize once at reset; the neural layer retains its checkpoint keys."""
     nodes = select_features(state.graph_data[STOP_KEY].x, NODE_COLUMNS, feature_set.node)

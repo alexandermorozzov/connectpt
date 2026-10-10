@@ -41,12 +41,12 @@ def _gather_chosen_routes_from_networks(networks, chosen_route_idxs):
     return networks.gather(2, gather_idx).squeeze(2)
 
 
-def _run_rebuild_variants_for_bees(variant_fn, model, env_state, bee_networks, chosen_route_idxs, bee_idxs, *, cost):
+def _run_rebuild_variants_for_bees(variant_fn, model, env_state, bee_networks, chosen_route_idxs, bee_idxs, *, cost,binding):
     """Run a rebuild-style neural variant one bee at a time."""
     outputs = []
     for bee_idx in bee_idxs.unbind(0):
         bee_slice, chosen_slice = _index_single_bee(bee_networks, chosen_route_idxs, bee_idx)
-        networks = variant_fn(model, env_state, bee_slice, chosen_slice, cost=cost)
+        networks = variant_fn(model, env_state, bee_slice, chosen_slice, cost=cost,binding=binding)
         outputs.append(networks[:, 0, -1])
     return _stack_bee_route_outputs(outputs, bee_networks)
 
@@ -128,6 +128,7 @@ def edit_route(
     adj_condition_weight=None,
     *,
     cost,
+    binding,
 ):
     """Apply one edit step (extend / trim_start / trim_end / halt) per bee.
 
@@ -192,6 +193,7 @@ def edit_route(
             env_state,
             model,
             cost,
+            binding=binding,
             normalize=False,
             mask=ActionMask(extend=allow_extend, trim_start=allow_trim_start, trim_end=allow_trim_end, halt=allow_halt),
         )
@@ -222,7 +224,7 @@ def edit_route(
     return result_networks
 
 
-def rebuild_route(model, env_state, bee_networks, drop_route_idxs, greedy=False, *, cost):
+def rebuild_route(model, env_state, bee_networks, drop_route_idxs, greedy=False, *, cost,binding):
     bee_dim = bee_networks.ndim == 4
     if not bee_dim:
         # there is no bee dimension, so add one
@@ -242,7 +244,7 @@ def rebuild_route(model, env_state, bee_networks, drop_route_idxs, greedy=False,
 
     # plan a new route with the model
     env_state.replace_routes(flatbee_kept_routes)
-    rollout(bind_env(env_state, model, cost), model, greedy=False, record_states=False)
+    rollout(bind_env(env_state, model, cost,binding=binding), model, greedy=False, record_states=False)
     routes = to_routes(env_state.routes).to(bee_networks.device)
     if bee_dim:
         routes = routes.reshape(batch_size, n_bees, n_routes, -1)
@@ -478,8 +480,9 @@ class NeuralRebuildOp:
     kind = "neural_rebuild"
     uses_remaining_state = False
 
-    def __init__(self, model, *, name):
+    def __init__(self, model, *, name,binding):
         self.model = model
+        self.binding=binding
         self.name = name
 
     def mutate(self, ctx: MutationContext, idxs):
@@ -492,8 +495,10 @@ class NeuralRebuildOp:
                 ctx.chosen_route_idxs,
                 idxs,
                 cost=ctx.cost,
+                binding=self.binding,
             )
-        networks = rebuild_route(self.model, ctx.env_state, ctx.bee_networks, ctx.chosen_route_idxs, cost=ctx.cost)
+        networks = rebuild_route(self.model, ctx.env_state, ctx.bee_networks, ctx.chosen_route_idxs,
+                                 cost=ctx.cost,binding=self.binding)
         return networks[:, idxs, -1]
 
 
@@ -516,8 +521,9 @@ class EditOp:
     kind = "neural_edit"
     uses_remaining_state = False
 
-    def __init__(self, model, *, name, allowed_actions, ignore_max_route_len):
+    def __init__(self, model, *, name, allowed_actions, ignore_max_route_len,binding):
         self.model = model
+        self.binding=binding
         self.name = name
         self.mask = ActionMask.from_names(allowed_actions)
         self.ignore_max_route_len = ignore_max_route_len
@@ -525,6 +531,7 @@ class EditOp:
     def mutate(self, ctx, idxs):
         kwargs = dict(
             cost=ctx.cost,
+            binding=self.binding,
             ignore_max_route_len=self.ignore_max_route_len,
             allow_extend=self.mask.extend,
             allow_trim_start=self.mask.trim_start,

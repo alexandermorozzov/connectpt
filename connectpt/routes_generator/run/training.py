@@ -8,24 +8,18 @@ import torch
 from omegaconf import OmegaConf
 
 from ..common.logging import log
-from ..env.actions import ActionSpec
-from ..env.base import EnvParams
 from ..objectives.cost import build_cost
 from ..policy.build import build_policy
 from ..policy.checkpoints import save_model_weights
-from ..policy.rollout import ENVS
 from ..training.algorithms.base import AlgorithmParams
 from ..training.algorithms.d3po import D3PO
 from ..training.algorithms.ppo import PPO
 from ..training.critic import CriticParams, ValueHead
-from ..training.data import ConstructionDataset
-from ..training.edit_dataset import EditDataset
 from ..training.loop import Budget, train
 from ..training.params import CurriculumParams, LoopParams, OptimizerParams
-from ..training.const import DatasetKind
 from ..training.records import DataCounts
 from ..training.validate import (
-    ConstructionValidation, EditValidation, EvaluationParams, EvaluationProfile,
+    EvaluationParams, EvaluationProfile,
     evaluate_preferences, log_evaluation_metrics, log_pareto_metrics,
 )
 from .artifacts import ArtifactStore
@@ -34,6 +28,7 @@ from .context import RunContext, resolve_weights_path
 from .dataset import prepare_data_input
 from .runs import ExperimentRun, RunArtifact
 from .schemas import TrainingPaths, TrainingRunParams, params
+from .tasks import TASKS
 
 
 @dataclass
@@ -60,25 +55,16 @@ class TrainingRun(ExperimentRun):
         self.policy = build_policy(policy_profile(cfg.model, cfg.cost, cfg.experiment, device,
                                                   checkpoint_path=checkpoint_path))
         self.env_name = cfg.env.name
-        ActionSpec(self.env_name).validate(self.policy.action_spec)
+        self.task=TASKS[self.env_name]
+        self.task.validate_policy(self.policy)
         self.cost = build_cost(
             cost_params(cfg.cost), symmetric_routes=cfg.experiment.symmetric_routes, low_memory_mode=cfg.experiment.low_memory_mode
         ).to(device)
-        self.data_input = prepare_data_input(cfg.dataset, DatasetKind(self.env_name))
-        limits = self.data_input.params.limits
-        env_values = OmegaConf.to_container(cfg.env.params, resolve=True)
-        for key, value in asdict(limits).items():
-            if key in env_values and env_values[key] != value:
-                raise ValueError(f'env.{key} conflicts with dataset limits')
-            env_values[key] = value
-        self.env_params = EnvParams(**env_values)
-        self.env = ENVS[self.env_name](
-            self.cost,
-            self.policy.feature_set,
-            self.env_params,
-            self.policy.action_spec,
-            node_normalizer=self.policy.node_norm,
-        )
+        self.data_input = prepare_data_input(cfg.dataset, self.task.kind)
+        self.binding=self.task.training_binding(self.policy,self.data_input.params.limits,
+                                               OmegaConf.to_container(cfg.env.params,resolve=True))
+        self.env_params=self.binding.params
+        self.env=self.binding.create(self.policy,self.cost)
         algorithm_values = OmegaConf.to_container(cfg.algorithm, resolve=True)
         self.critic_params = CriticParams(**algorithm_values.pop("critic"))
         algorithm_params = AlgorithmParams(**algorithm_values)
@@ -87,13 +73,9 @@ class TrainingRun(ExperimentRun):
         self.evaluation = params(EvaluationParams, cfg.evaluation)
         self.batch_size = self.loop_params.batch_size_cuda if device.type == "cuda" else self.loop_params.batch_size
         self.evaluation_profile = EvaluationProfile(
-            self.evaluation, self.env_params, self.batch_size, cfg.experiment.symmetric_routes
+            self.evaluation, self.env_params, self.batch_size, cfg.experiment.symmetric_routes,self.task.env_factory
         )
-        prepared = self.data_input
-        self.dataset = (EditDataset(prepared.params, prepared.train_pipeline, prepared.evaluation_pipeline)
-                        if self.env_name == 'edit' else
-                        ConstructionDataset(prepared.params, prepared.train_pipeline, prepared.evaluation_pipeline,
-                                            prepared.online_source, prepared.benchmark))
+        self.dataset=self.task.source(self.data_input)
         self.curriculum = params(CurriculumParams, cfg.curriculum)
         self.checkpoint = resolve_weights_path(self.paths.checkpoint_path, self.paths.weights_dir)
         self.best_checkpoint = self.checkpoint.with_name(
@@ -188,14 +170,8 @@ class TrainingRun(ExperimentRun):
             DataCounts(training_graphs=data.training_count, validation_graphs=data.validation_count),
             0,
         )
-        val_env = ENVS[self.env_name](
-            val_cost,
-            self.policy.feature_set,
-            self.env_params,
-            self.policy.action_spec,
-            node_normalizer=self.policy.node_norm,
-        )
-        validation = {"construction": ConstructionValidation, "edit": EditValidation}[self.env_name](
+        val_env=self.binding.create(self.policy,val_cost)
+        validation = self.task.validation_factory(
             data, val_cost, val_env, self.evaluation_profile, device,
         )
         critic = ValueHead(

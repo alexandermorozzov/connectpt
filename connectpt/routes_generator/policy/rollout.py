@@ -1,17 +1,11 @@
 """The shared policy-to-environment loop."""
-from dataclasses import dataclass, replace
+from dataclasses import dataclass,replace
 
 import torch
 
 from ..env.actions import RouteAction
 from ..env.const import RouteActionKind
-from ..env.base import EnvParams
-from ..env.construction import ConstructionEnv
-from ..env.edit import EditEnv
 from .output import PolicyOut
-
-
-ENVS = {"construction": ConstructionEnv, "edit": EditEnv}
 
 
 def bind_env(
@@ -19,34 +13,13 @@ def bind_env(
     policy,
     cost,
     *,
+    binding,
     normalize=True,
     single_route=False,
-    max_route_edit_steps=None,
-    max_trim_actions=None,
-    force_nonhalt_first_step=False,
     mask=None,
-    params=None,
 ):
     """Bind a pre-existing state at integration boundaries."""
-    role = policy.action_spec.role
-    trim = role == "edit"
-    params = params if params is not None else EnvParams(
-        state.n_routes_to_plan,
-        state.min_route_len,
-        state.max_route_len,
-        True,
-        1.0,
-        policy.force_linking_unlinked,
-        policy.max_act_len,
-        max_route_edit_steps,
-        max_trim_actions,
-        force_nonhalt_first_step,
-        policy.allow_trim_below_min if trim else False,
-        policy.forbid_halt_when_overlong if trim else False,
-    )
-    env = ENVS[role](cost, policy.feature_set, params, policy.action_spec, node_normalizer=policy.node_norm,mask=mask)
-    env.bind(state, normalize=normalize, single_route=single_route)
-    return env
+    return binding.bind(state,policy,cost,normalize=normalize,single_route=single_route,mask=mask)
 
 
 @dataclass

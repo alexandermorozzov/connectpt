@@ -13,7 +13,7 @@ from ..common.logging import flush, log
 from ..policy.predict import evaluate_policy
 from ..policy.rollout import bind_env
 from ..env.state import RouteGenBatchState
-from ..env.base import EnvParams
+from ..env.base import EnvParams,EnvironmentBinding
 from ..objectives.pareto import canonical_network, summarize_evaluation
 from ..objectives.metrics import evaluate_network
 from .records import ParetoRecord, ValidationRecord
@@ -42,6 +42,7 @@ class EvaluationProfile:
     env: EnvParams
     batch_size: int
     symmetric_routes: bool
+    env_factory: object
 
 
 class Validation:
@@ -205,7 +206,8 @@ def evaluate_preferences(
                         int(profile.env.max_route_len),
                         preferences=fixed_cost.get_weights(),
                     )
-                    env = bind_env(template, model, fixed_cost, normalize=False,params=profile.env)
+                    env = bind_env(template, model, fixed_cost, normalize=False,
+                                   binding=EnvironmentBinding(profile.env_factory,profile.env))
                     result, routes = evaluate_policy(
                         env,
                         model,

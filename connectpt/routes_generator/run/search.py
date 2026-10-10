@@ -20,6 +20,7 @@ from .config import cost_params, policy_profile
 from ..objectives.cost import build_cost
 from ..search.plan import MethodParams, ExecutablePlan
 from ..search.search import run_search
+from .tasks import TASKS
 
 
 _log = logging.getLogger("connectpt.sweep")
@@ -53,6 +54,7 @@ class SearchRun(ExperimentRun):
 
         # models: build (role-checked) + strict-load the checkpoint into the class
         self.models: dict = {}
+        self.bindings={}
         for role in ("construction", "edit"):
             if role not in cfg.models:
                 continue
@@ -69,10 +71,11 @@ class SearchRun(ExperimentRun):
             if model.action_spec.role != role:
                 raise ValueError(f"profile for {role} has actions {model.action_spec}")
             self.models[role] = model
+            self.bindings[role]=TASKS[role].rollout_binding(model,self.instance)
 
         self.policies = self.models
         self.method = MethodParams.from_values(OmegaConf.to_container(cfg.method, resolve=True))
-        self.plan = ExecutablePlan.from_method(self.method, self.policies)
+        self.plan = ExecutablePlan.from_method(self.method, self.policies,self.bindings)
         self.keep_metrics = list(cfg.metrics)
 
         self.alpha = self.sweep.alpha
@@ -105,7 +108,7 @@ class SearchRun(ExperimentRun):
         result = run_search(
             inst,
             self.method,
-            self.policies,
+            self.plan,
             alpha,
             adjustment,
             self.run_params.seed,
