@@ -11,7 +11,7 @@ from ..network.routes import to_routes
 from ..objectives.metrics import Metrics, evaluate_network
 from ..objectives.evaluate import Evaluation
 from ..common.random import seed_everything
-from .colony import run_colony
+from .colony import Colony
 
 
 @dataclass
@@ -59,12 +59,11 @@ def run_search(
         )
         initial = to_routes(instance.init_routes, n_routes=int(state.n_routes_to_plan.min().item()))
         initial = initial.expand(state.batch_size, -1, -1).to(device)
-        state, evaluation, history = run_colony(
+        state, evaluation, history = Colony(
             state,
             cost,
             initial,
             plan=plan,
-            n_bees=plan.total_bees,
             n_iterations=int(iterations),
             passes_per_it=method.passes_per_it,
             mod_steps_per_pass=method.mod_steps_per_pass,
@@ -74,7 +73,7 @@ def run_search(
             silent=silent,
             logger_list=logger_list,
             mutation_counts_out=mutation_counts_out,
-        )
+        ).run()
         elapsed = perf_counter() - started
         metrics = evaluate_network(evaluation)
         evaluations.append(evaluation)

@@ -92,200 +92,155 @@ def _choose_route_indices(bee_networks, n_routes):
     )
 
 
-def run_colony(
-    state,
-    cost_obj,
-    init_network,
-    *,
-    n_bees,
-    passes_per_it,
-    mod_steps_per_pass,
-    shorten_prob,
-    n_iterations,
-    plan,
-    silent,
-    force_linking_unlinked,
-    logger_list,
-    mutation_counts_out,
-    process_neural_bees_sequentially,
-):
-    """Mutate, accept strict improvements and select recruiter networks."""
-    plan.validate(n_bees)
+class Colony:
+    """Own the population, evaluation and ordered colony operations."""
 
-    batch_size = state.batch_size
+    def __init__(self, state, cost_obj, init_network, *, passes_per_it, mod_steps_per_pass,
+                 shorten_prob, n_iterations, plan, silent, force_linking_unlinked,
+                 logger_list, mutation_counts_out, process_neural_bees_sequentially):
+        self.state = state
+        self.cost_obj = cost_obj
+        self.init_network = init_network
+        self.passes_per_it = passes_per_it
+        self.mod_steps_per_pass = mod_steps_per_pass
+        self.shorten_prob = shorten_prob
+        self.n_iterations = n_iterations
+        self.plan = plan
+        self.silent = silent
+        self.force_linking_unlinked = force_linking_unlinked
+        self.logger_list = logger_list
+        self.mutation_counts_out = mutation_counts_out
+        self.process_neural_bees_sequentially = process_neural_bees_sequentially
+        self.n_bees = plan.total_bees
+        self.initialize()
 
-    dev = state.device
-    batch_idxs = torch.arange(batch_size, device=dev)
-    max_n_nodes = state.max_n_nodes
-
-    # get all shortest paths
-    shortest_paths, _ = reconstruct_all_paths(state.nexts)
-
-    demand = torch.nn.functional.pad(state.demand, (0, 1, 0, 1))
-    n_routes = state.n_routes_to_plan
-    best_networks = torch.full((batch_size, n_routes, max_n_nodes), -1, device=dev)
-    n_init_routes = init_network.shape[1]
-    best_networks[:, :n_init_routes, : init_network.shape[-1]] = init_network
-    reference_networks = best_networks.clone()
-    state.set_adjustment_seed(reference_networks)
-
-    # expand state to networks
-
-    # compute can-be-directly-satisfied demand matrix
-    direct_sat_dmd = get_direct_sat_dmd(demand, shortest_paths, cost_obj.symmetric_routes)
-
-    # set up required matrices
-    street_node_neighbours = state.street_adj.isfinite() & (state.street_adj > 0)
-    bee_idxs = torch.arange(n_bees, device=dev)
-
-    log.debug("starting BCO")
-
-    # set up the cost function to work with batches of bees
-    # "multiply" the batch for the bees
-    exp_states = sum([[substate] * n_bees for substate in state.batch_to_list()], [])
-    bee_states = RouteGenBatchState.batch_from_list(exp_states)
-    # the construction ("bee") model prepares the bee states; heuristic-only
-    # plans have no such model and skip planning setup (legacy semantics).
-    planning_model = plan.planning_model
-    if planning_model is not None:
-        normalize_nodes(bee_states, planning_model.node_norm, planning_model.feature_set)
-    # Sequential neural-bee processing runs the model on one bee at a time and
-    # needs a state whose batch equals the number of graphs (not graphs *
-    # n_bees), so a single bee's network is not broadcast up to the full bee
-    # batch by the route-replace path. Build it once and reuse it per bee.
-    single_bee_states = None
-    if process_neural_bees_sequentially:
-        single_bee_states = RouteGenBatchState.batch_from_list(state.batch_to_list())
+    def initialize(self):
+        self.plan.validate(self.n_bees)
+        self.batch_size = self.state.batch_size
+        self.dev = self.state.device
+        self.batch_idxs = torch.arange(self.batch_size, device=self.dev)
+        self.max_n_nodes = self.state.max_n_nodes
+        self.shortest_paths, _ = reconstruct_all_paths(self.state.nexts)
+        self.demand = torch.nn.functional.pad(self.state.demand, (0, 1, 0, 1))
+        self.n_routes = self.state.n_routes_to_plan
+        self.best_networks = torch.full((self.batch_size, self.n_routes, self.max_n_nodes), -1, device=self.dev)
+        n_init_routes = self.init_network.shape[1]
+        self.best_networks[:, :n_init_routes, :self.init_network.shape[-1]] = self.init_network
+        self.reference_networks = self.best_networks.clone()
+        self.state.set_adjustment_seed(self.reference_networks)
+        self.direct_sat_dmd = get_direct_sat_dmd(self.demand, self.shortest_paths, self.cost_obj.symmetric_routes)
+        self.street_node_neighbours = self.state.street_adj.isfinite() & (self.state.street_adj > 0)
+        self.bee_idxs = torch.arange(self.n_bees, device=self.dev)
+        log.debug('starting BCO')
+        exp_states = sum([[substate] * self.n_bees for substate in self.state.batch_to_list()], [])
+        self.bee_states = RouteGenBatchState.batch_from_list(exp_states)
+        planning_model = self.plan.planning_model
         if planning_model is not None:
-            normalize_nodes(single_bee_states, planning_model.node_norm, planning_model.feature_set)
+            normalize_nodes(self.bee_states, planning_model.node_norm, planning_model.feature_set)
+        self.single_bee_states = None
+        if self.process_neural_bees_sequentially:
+            self.single_bee_states = RouteGenBatchState.batch_from_list(self.state.batch_to_list())
+            if planning_model is not None:
+                normalize_nodes(self.single_bee_states, planning_model.node_norm, planning_model.feature_set)
+        self.bee_networks = self.best_networks[:, None].repeat(1, self.n_bees, 1, 1)
+        self.bee_evaluation = self.evaluate(self.bee_networks)
+        self.bee_costs = self.bee_evaluation.cost.reshape(self.batch_size, self.n_bees).clone()
+        self.best_costs, self.best_idxs = self.bee_costs.min(1)
+        self.best_evaluation = self.bee_evaluation.select(self.batch_idxs * self.n_bees + self.best_idxs)
+        self.log_best(0)
+        self.cost_history = torch.zeros((self.batch_size, self.n_iterations + 1), device=self.dev)
+        self.cost_history[:, 0] = self.best_costs
+        log_metrics(self.logger_list, SearchRecord(0.0), 0)
 
-    def batched_cost_fn(bee_networks):
-        bee_states.replace_routes(bee_networks.flatten(0, 1))
+    def evaluate(self, bee_networks):
+        self.bee_states.replace_routes(bee_networks.flatten(0, 1))
+        return self.cost_obj(self.bee_states)
 
-        return cost_obj(bee_states)
-
-    # initialize bees' networks
-    # batch size x n_bees x n_routes x max_n_nodes
-    bee_networks = best_networks[:, None].repeat(1, n_bees, 1, 1)
-    # evaluate and record the reward of the initial network
-    bee_evaluation = batched_cost_fn(bee_networks)
-    bee_costs = bee_evaluation.cost.reshape(batch_size, n_bees).clone()
-    best_costs, best_idxs = bee_costs.min(1)
-    best_evaluation = bee_evaluation.select(batch_idxs * n_bees + best_idxs)
-
-    def log_best(step):
-        result = best_evaluation
+    def log_best(self, step):
+        result = self.best_evaluation
         metrics = evaluate_network(result)
         record = SearchBestRecord(
             float(result.cost.mean()),
             {name: float(result.goals[:, i].mean()) for i, name in enumerate(result.goal_names)},
             {name: float(result.penalties[:, i].mean()) for i, name in enumerate(result.penalty_names)},
             {MONITOR_FIELDS[name]: float(value.mean()) for name, value in metrics.items()
-             if name in MONITOR_FIELDS and MONITOR_FIELDS[name] in cost_obj.monitor},
+             if name in MONITOR_FIELDS and MONITOR_FIELDS[name] in self.cost_obj.monitor},
         )
-        log_metrics(logger_list, record, step)
+        log_metrics(self.logger_list, record, step)
 
-    log_best(0)
-
-    cost_history = torch.zeros((batch_size, n_iterations + 1), device=dev)
-    cost_history[:, 0] = best_costs
-
-    log_metrics(logger_list, SearchRecord(0.0), 0)
-    for iteration in tqdm(range(n_iterations), disable=silent):
-        accepted_count = 0
-        for pi in range(passes_per_it):
-            for mi in range(mod_steps_per_pass):
-
-                chosen_route_idxs = _choose_route_indices(bee_networks, n_routes)
-                _record_attempted_mutations(mutation_counts_out, plan.summary())
-                new_bee_networks, mutation_types = plan.get_mutants(
-                    bee_networks,
-                    chosen_route_idxs,
-                    direct_sat_dmd=direct_sat_dmd,
-                    shorten_prob=shorten_prob,
-                    street_node_neighbours=street_node_neighbours,
-                    shortest_paths=shortest_paths,
-                    force_linking_unlinked=force_linking_unlinked,
-                    env_state=bee_states,
-                    cost=cost_obj,
-                    single_bee_env_state=single_bee_states,
-                    adj_condition_target=cost_obj.adjustment_degree_target,
-                    adj_condition_weight=cost_obj.adjustment_degree_weight,
-                    process_neural_bees_sequentially=process_neural_bees_sequentially,
-                )
-
-                new_evaluation = batched_cost_fn(new_bee_networks)
-                new_bee_costs = new_evaluation.cost.reshape(batch_size, n_bees)
-
-                # greedy acceptance: keep only strict improvements
-                accepted_idxs = (new_bee_costs - bee_costs) < 0
-                accepted_count += int(accepted_idxs.sum())
-
-                _record_accepted_mutations(
-                    mutation_counts_out,
-                    mutation_types,
-                    accepted_idxs,
-                    plan.group_names(),
-                )
-                bee_networks[accepted_idxs] = new_bee_networks[accepted_idxs]
-                bee_costs[accepted_idxs] = new_bee_costs[accepted_idxs]
-                bee_evaluation = bee_evaluation.updated(new_evaluation, accepted_idxs.flatten())
-
-            # do "backward pass"
-
-            # update the best solution found so far
-            current_best_objective_cost, current_best_idx = bee_costs.min(1)
-            is_improvement = current_best_objective_cost < best_costs
-            improvement_idx = current_best_idx[is_improvement]
-            best_costs[is_improvement] = current_best_objective_cost[is_improvement]
-            best_networks[is_improvement] = bee_networks[is_improvement, improvement_idx]
-            candidate_best = bee_evaluation.select(batch_idxs * n_bees + current_best_idx)
-            best_evaluation = best_evaluation.updated(candidate_best, is_improvement)
-            cost_history[:, iteration + 1] = best_costs
-
-            # decide whether each bee is a recruiter or follower
-            max_bee_costs, _ = bee_costs.max(dim=1)
-            min_bee_costs, _ = bee_costs.min(dim=1)
-            spread = max_bee_costs - min_bee_costs
-            # avoid division by 0
-            spread[spread == 0] = 1
-
-            qualities = (max_bee_costs[:, None] - bee_costs) / spread[:, None]
-            min_quality, _ = qualities.min(1)
-            follow_probs = (-qualities + min_quality[:, None]).exp()
-            are_recruiters = follow_probs < torch.rand(n_bees, device=dev)
-
-            if not are_recruiters.any():
-                # no recruiters, so make everyone keep their own network.
-                continue
-
-            # decide which recruiter each follower will follow
-            denom = (qualities * are_recruiters).sum(1)
-            # avoid division by 0
-            denom[denom == 0] = 1
-            recruit_probs = qualities / denom[:, None]
-            recruit_probs[~are_recruiters] = 0
-            # set probs where there is no probability to 1, so multinomial
-            # doesn't complain.
-            no_valid_recruiters = recruit_probs.sum(-1) == 0
-            recruit_probs[no_valid_recruiters] = 1
-            recruiters = recruit_probs.multinomial(n_bees, replacement=True)
-            recruiters[no_valid_recruiters] = bee_idxs
-            recruiters[are_recruiters] = bee_idxs[None].expand(batch_size, -1)[are_recruiters]
-            _record_selection_stats(mutation_counts_out, recruiters, bee_costs)
-
-            # update the networks and costs of the followers
-            bee_networks = bee_networks[batch_idxs[:, None], recruiters]
-            bee_costs = bee_costs[batch_idxs[:, None], recruiters]
-            bee_evaluation = bee_evaluation.select((batch_idxs[:, None] * n_bees + recruiters).flatten())
-
-        log_best(iteration + 1)
-        log_metrics(
-            logger_list,
-            SearchRecord(accepted_count / (batch_size * n_bees * passes_per_it * mod_steps_per_pass)),
-            iteration + 1,
+    def mutate(self):
+        chosen_route_idxs = _choose_route_indices(self.bee_networks, self.n_routes)
+        _record_attempted_mutations(self.mutation_counts_out, self.plan.summary())
+        return self.plan.get_mutants(
+            self.bee_networks, chosen_route_idxs,
+            direct_sat_dmd=self.direct_sat_dmd, shorten_prob=self.shorten_prob,
+            street_node_neighbours=self.street_node_neighbours, shortest_paths=self.shortest_paths,
+            force_linking_unlinked=self.force_linking_unlinked, env_state=self.bee_states,
+            cost=self.cost_obj, single_bee_env_state=self.single_bee_states,
+            adj_condition_target=self.cost_obj.adjustment_degree_target,
+            adj_condition_weight=self.cost_obj.adjustment_degree_weight,
+            process_neural_bees_sequentially=self.process_neural_bees_sequentially,
         )
 
-    # return the best solution
-    state.replace_routes(best_networks)
-    return state, best_evaluation, cost_history
+    def accept(self, new_bee_networks, mutation_types):
+        new_evaluation = self.evaluate(new_bee_networks)
+        new_bee_costs = new_evaluation.cost.reshape(self.batch_size, self.n_bees)
+        # Keep only strict improvements, including equal-cost rejection.
+        accepted_idxs = new_bee_costs - self.bee_costs < 0
+        _record_accepted_mutations(self.mutation_counts_out, mutation_types, accepted_idxs, self.plan.group_names())
+        self.bee_networks[accepted_idxs] = new_bee_networks[accepted_idxs]
+        self.bee_costs[accepted_idxs] = new_bee_costs[accepted_idxs]
+        self.bee_evaluation = self.bee_evaluation.updated(new_evaluation, accepted_idxs.flatten())
+        return int(accepted_idxs.sum())
+
+    def best(self, iteration):
+        current_best_objective_cost, current_best_idx = self.bee_costs.min(1)
+        is_improvement = current_best_objective_cost < self.best_costs
+        improvement_idx = current_best_idx[is_improvement]
+        self.best_costs[is_improvement] = current_best_objective_cost[is_improvement]
+        self.best_networks[is_improvement] = self.bee_networks[is_improvement, improvement_idx]
+        candidate_best = self.bee_evaluation.select(self.batch_idxs * self.n_bees + current_best_idx)
+        self.best_evaluation = self.best_evaluation.updated(candidate_best, is_improvement)
+        self.cost_history[:, iteration + 1] = self.best_costs
+
+    def recruit(self):
+        max_bee_costs, _ = self.bee_costs.max(dim=1)
+        min_bee_costs, _ = self.bee_costs.min(dim=1)
+        spread = max_bee_costs - min_bee_costs
+        spread[spread == 0] = 1
+        qualities = (max_bee_costs[:, None] - self.bee_costs) / spread[:, None]
+        min_quality, _ = qualities.min(1)
+        follow_probs = (-qualities + min_quality[:, None]).exp()
+        # The same draw is broadcast across graphs, as in the original colony.
+        are_recruiters = follow_probs < torch.rand(self.n_bees, device=self.dev)
+        if not are_recruiters.any():
+            return
+        denom = (qualities * are_recruiters).sum(1)
+        denom[denom == 0] = 1
+        recruit_probs = qualities / denom[:, None]
+        recruit_probs[~are_recruiters] = 0
+        no_valid_recruiters = recruit_probs.sum(-1) == 0
+        recruit_probs[no_valid_recruiters] = 1
+        recruiters = recruit_probs.multinomial(self.n_bees, replacement=True)
+        recruiters[no_valid_recruiters] = self.bee_idxs
+        recruiters[are_recruiters] = self.bee_idxs[None].expand(self.batch_size, -1)[are_recruiters]
+        _record_selection_stats(self.mutation_counts_out, recruiters, self.bee_costs)
+        self.bee_networks = self.bee_networks[self.batch_idxs[:, None], recruiters]
+        self.bee_costs = self.bee_costs[self.batch_idxs[:, None], recruiters]
+        self.bee_evaluation = self.bee_evaluation.select((self.batch_idxs[:, None] * self.n_bees + recruiters).flatten())
+
+    def run(self):
+        for iteration in tqdm(range(self.n_iterations), disable=self.silent):
+            accepted_count = 0
+            for _ in range(self.passes_per_it):
+                for _ in range(self.mod_steps_per_pass):
+                    networks, kinds = self.mutate()
+                    accepted_count += self.accept(networks, kinds)
+                self.best(iteration)
+                self.recruit()
+            self.log_best(iteration + 1)
+            log_metrics(self.logger_list, SearchRecord(
+                accepted_count / (self.batch_size * self.n_bees * self.passes_per_it * self.mod_steps_per_pass)),
+                iteration + 1)
+        self.state.replace_routes(self.best_networks)
+        return self.state, self.best_evaluation, self.cost_history
