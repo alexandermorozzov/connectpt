@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 import torch
 from ..network.routes import get_unselected_routes
-from .operators import MutationContext, HeuristicRebuildOp, NeuralRebuildOp, ShortenOp, EditOp, get_new_route_variants
+from .operators import MutationContext, OPERATOR_FACTORIES, get_new_route_variants
 
 
 @dataclass(frozen=True)
@@ -36,27 +36,15 @@ class PlanGroup:
 
 
 class ExecutablePlan:
-    def __init__(self, groups: list[PlanGroup], *, construction_model=None, edit_model=None):
+    def __init__(self, groups: list[PlanGroup]):
         self.groups = list(groups)
-        # A construction policy normalizes bee states before mutation.
-        self.construction_model = construction_model
-        self.edit_model = edit_model
 
     @property
     def total_bees(self) -> int:
         return sum(g.count for g in self.groups)
 
-    @property
-    def planning_model(self):
-        """Model whose ``setup_planning`` prepares the bee states (legacy
-        semantics: the construction model when present)."""
-        return self.construction_model
-
     def needs_remaining_state(self) -> bool:
-        """Legacy condition: heuristic rebuild present, or no construction
-        model at all (the old ``bee_model is None`` branch)."""
-        if self.construction_model is None:
-            return True
+        """Prepare remaining networks for the operators that consume them."""
         return any(g.op.uses_remaining_state and g.count > 0 for g in self.groups)
 
     def group_names(self) -> list[str]:
@@ -114,7 +102,7 @@ class ExecutablePlan:
         # and force-linked empty-route construction both need the routes NOT
         # under mutation. Matches the legacy condition exactly.
         remaining_state = None
-        if self.construction_model is None or (empty_routes.any() and force_linking_unlinked):
+        if self.needs_remaining_state() or (empty_routes.any() and force_linking_unlinked):
             unsel_routes = get_unselected_routes(bee_networks, chosen_route_idxs)
             remaining_state = env_state.clone()
             remaining_state.replace_routes(unsel_routes.flatten(0, 1))
@@ -162,66 +150,25 @@ class ExecutablePlan:
 
     @property
     def needs_edit(self):
-        return any(g.op.kind == "neural_edit" and g.count > 0 for g in self.groups)
+        return any(g.op.model_role == 'edit' and g.count > 0 for g in self.groups)
 
     @property
     def needs_construction(self):
-        return any(g.op.kind == "neural_rebuild" and g.count > 0 for g in self.groups)
+        return any(g.op.model_role == 'construction' and g.count > 0 for g in self.groups)
 
     def validate(self, n_bees):
         if self.total_bees != n_bees or n_bees <= 0:
             raise ValueError("positive bee counts must sum to n_bees")
         if any(g.count < 0 for g in self.groups):
             raise ValueError("bee counts cannot be negative")
-        if self.needs_edit and (self.edit_model is None or not self.edit_model.supports_trim_actions):
-            raise ValueError("edit bees require a policy with trim actions")
 
     @classmethod
     def from_method(cls, method, policies,bindings):
-        factories = {
-            "shortest_path_rebuild": HeuristicRebuildOp,
-            "local_edit": ShortenOp,
-            "neural_rebuild": NeuralRebuildOp,
-            "neural_edit": EditOp,
-        }
         groups = []
         for name, spec in method.bees.items():
-            factory = factories[spec.operator]
-            if spec.model_ref is None:
-                if spec.allowed_actions or spec.ignore_max_route_len:
-                    raise ValueError("heuristic bees do not take action masks or neural bounds")
-                op = factory(name=name)
-            else:
-                model = policies[spec.model_ref]
-                if spec.operator == "neural_rebuild":
-                    if model.action_spec.role != "construction" or spec.allowed_actions != ["extend", "halt"]:
-                        raise ValueError("rebuild requires construction extend/halt actions")
-                    if spec.ignore_max_route_len:
-                        raise ValueError("full rebuild respects route bounds")
-                    op = factory(model, name=name,binding=bindings[spec.model_ref])
-                elif spec.operator == "neural_edit":
-                    valid = {"extend", "trim_start", "trim_end", "halt"}
-                    if (
-                        model.action_spec.role != "edit"
-                        or not spec.allowed_actions
-                        or not set(spec.allowed_actions) <= valid
-                    ):
-                        raise ValueError("edit bee has an incompatible policy or action mask")
-                    op = factory(
-                        model,
-                        binding=bindings[spec.model_ref],
-                        name=name,
-                        allowed_actions=spec.allowed_actions,
-                        ignore_max_route_len=spec.ignore_max_route_len,
-                    )
-                else:
-                    raise ValueError("heuristic operator cannot reference a policy")
+            op = OPERATOR_FACTORIES[spec.operator].from_spec(name, spec, policies, bindings)
             groups.append(PlanGroup(op, spec.count))
-        plan = cls(
-            groups,
-            construction_model=policies["construction"] if "construction" in policies else None,
-            edit_model=policies["edit"] if "edit" in policies else None,
-        )
+        plan = cls(groups)
         plan.validate(plan.total_bees)
         if method.passes_per_it <= 0 or method.mod_steps_per_pass <= 0 or not 0 <= method.shorten_prob <= 1:
             raise ValueError("invalid colony pass count or shortening probability")

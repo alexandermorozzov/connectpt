@@ -2,7 +2,6 @@
 import logging as log
 import torch
 from tqdm import tqdm
-from ..env.base import normalize_nodes
 from ..env.state import RouteGenBatchState
 from ..city.shortest_paths import reconstruct_all_paths
 from ..common.logging import log as log_metrics
@@ -134,14 +133,9 @@ class Colony:
         log.debug('starting BCO')
         exp_states = sum([[substate] * self.n_bees for substate in self.state.batch_to_list()], [])
         self.bee_states = RouteGenBatchState.batch_from_list(exp_states)
-        planning_model = self.plan.planning_model
-        if planning_model is not None:
-            normalize_nodes(self.bee_states, planning_model.node_norm, planning_model.feature_set)
         self.single_bee_states = None
         if self.process_neural_bees_sequentially:
             self.single_bee_states = RouteGenBatchState.batch_from_list(self.state.batch_to_list())
-            if planning_model is not None:
-                normalize_nodes(self.single_bee_states, planning_model.node_norm, planning_model.feature_set)
         self.bee_networks = self.best_networks[:, None].repeat(1, self.n_bees, 1, 1)
         self.bee_evaluation = self.evaluate(self.bee_networks)
         self.bee_costs = self.bee_evaluation.cost.reshape(self.batch_size, self.n_bees).clone()
