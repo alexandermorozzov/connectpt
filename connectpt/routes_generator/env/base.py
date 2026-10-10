@@ -49,7 +49,6 @@ def normalize_nodes(state, normalizer, feature_set):
     """Normalize once at reset; the neural layer retains its checkpoint keys."""
     nodes = select_features(state.graph_data[STOP_KEY].x, NODE_COLUMNS, feature_set.node)
     state.set_normalized_features(normalizer(nodes))
-    state.set_redundancy_feature_mode(feature_set.redundancy)
 
 
 class Env(ABC):
@@ -90,7 +89,6 @@ class Env(ABC):
 
     def bind(self, state, *, normalize=True, single_route=False, evaluation=None):
         self.state = state
-        self.state.set_redundancy_feature_mode(self.feature_set.redundancy)
         if normalize:
             normalize_nodes(state, self.node_normalizer, self.feature_set)
         self.steps = 0

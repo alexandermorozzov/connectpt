@@ -65,10 +65,8 @@ class ExtraStateData(HeteroData):
             "active_route_idx",
             "fixed_routes",
             "node_coords",
-            "adjustment_conditioned",
             "adjustment_target",
             "adjustment_weight",
-            "adjustment_use_current",
             "adjustment_seed",
         ]:
             return None
@@ -100,7 +98,6 @@ class RouteGenBatchState:
         self.symmetric_routes = constants.symmetric_routes
         self._finished_routes = [[] for _ in range(graph_data.num_graphs)]
         self._route_update_deferred = False
-        self._redundancy_features_enabled = False
 
         # the object isn't ready to give this property yet, so find it here
         dev = graph_data[STOP_KEY].x.device
@@ -195,8 +192,6 @@ class RouteGenBatchState:
 
             extra_data.adjustment_target = torch.tensor(0.0, device=dev)
             extra_data.adjustment_weight = torch.tensor(0.0, device=dev)
-            extra_data.adjustment_use_current = torch.tensor(False, device=dev)
-            extra_data.adjustment_conditioned = torch.tensor(False, device=dev)
             extra_data.adjustment_seed = torch.full((0, 0), -1, device=dev, dtype=torch.long)
 
             extra_datas.append(extra_data)
@@ -862,10 +857,6 @@ class RouteGenBatchState:
 
         return route_time
 
-    def set_redundancy_feature_mode(self, enabled):
-        """Select whether optional redundancy summaries join global features."""
-        self._redundancy_features_enabled = bool(enabled)
-
     def _count_route_legs(self, batch_routes):
         """Count adjacent stop-to-stop legs in a batch of route tensors."""
         batch_routes = self._prepare_batch_route_tensor(batch_routes)
@@ -1094,18 +1085,9 @@ class RouteGenBatchState:
         return self.extra_data.adjustment_weight
 
     @property
-    def adjustment_use_current(self):
-        """Per-graph flag recording an available adjustment reference."""
-        return self.extra_data.adjustment_use_current
-
-    @property
     def adjustment_seed(self):
         """Per-graph seed routes used to compute the live current adj."""
         return self.extra_data.adjustment_seed
-
-    @property
-    def is_adjustment_conditioned(self):
-        return bool(self.extra_data.adjustment_conditioned.reshape(-1)[0].item())
 
     def set_adjustment_seed(self, routes):
         """Set the objective reference without enabling policy conditioning."""
@@ -1145,7 +1127,6 @@ class RouteGenBatchState:
         if tt.numel() == 1:
             tt = tt.expand(bs)
         self.extra_data.adjustment_target = tt.reshape(bs).clone()
-        self.extra_data.adjustment_conditioned = torch.ones(bs, device=dev, dtype=torch.bool)
         if weight is None:
             self.extra_data.adjustment_weight = torch.zeros(bs, device=dev)
         else:
@@ -1153,14 +1134,11 @@ class RouteGenBatchState:
             if ww.numel() == 1:
                 ww = ww.expand(bs)
             self.extra_data.adjustment_weight = ww.reshape(bs).clone()
-        if seed_routes is None:
-            self.extra_data.adjustment_use_current = torch.zeros(bs, device=dev, dtype=torch.bool)
-        else:
+        if seed_routes is not None:
             sr = torch.as_tensor(seed_routes, device=dev, dtype=torch.long)
             if sr.dim() == 2:  # [n_routes, L] -> broadcast to batch
                 sr = sr.unsqueeze(0).expand(bs, -1, -1)
             self.extra_data.adjustment_seed = sr.reshape(bs, sr.shape[-2], sr.shape[-1]).clone()
-            self.extra_data.adjustment_use_current = torch.ones(bs, device=dev, dtype=torch.bool)
 
     def set_route_slot_context(self, route_batch, active_route_idx):
         """Keep route-slot ordering for closed-loop adjustment conditioning."""

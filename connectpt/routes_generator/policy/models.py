@@ -722,8 +722,7 @@ class PathCombiningRouteGenerator(RouteGeneratorBase):
         route_embed = (route_node_descs * route_valid).sum(dim=1) / \
             route_valid.sum(dim=1).clamp_min(1.0)
 
-        global_feats = global_state_features(state,
-            preference_goals=self.preference_goals).to(node_descs.dtype)
+        global_feats = state.global_features.to(node_descs.dtype)
         return torch.cat([graph_embed, route_embed, global_feats], dim=-1)
 
     def _get_extension_scores(self, state: Observation, route_lens,

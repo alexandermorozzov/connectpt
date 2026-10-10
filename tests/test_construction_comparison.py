@@ -346,7 +346,8 @@ def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     graphs = [dataset.transform(dataset.generate_graph()) for _ in range(2)]
     cost = build_cost(cost_params(cfg.cost), low_memory_mode=False, symmetric_routes=True)
     state = RouteGenBatchState(graphs, cost.constants, 1, 2, 5, preferences=cost.get_weights())
-    globals_ = global_state_features(state, preference_goals=model.preference_goals)
+    globals_ = global_state_features(state, include_redundancy=model.feature_set.redundancy,
+                                    preference_goals=model.preference_goals)
     assert globals_.shape[-1] == 11
     features = scalar.inputs_from_data(state.graph_data, state.cost_weights)
     degree = features[:, 9].clone()

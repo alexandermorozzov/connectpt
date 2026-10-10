@@ -201,9 +201,6 @@ def edit_route(
         halted = trajectory.outputs[0].action.kind == RouteActionKind.HALT
     finally:
         env_state.extra_data.max_route_len = original_max_route_len
-    if n_cond > 0:
-        env_state.extra_data.adjustment_conditioned.fill_(False)
-
     post_step_routes = env_state.current_routes.clone()
 
     new_flat_routes = pre_step_routes.clone()

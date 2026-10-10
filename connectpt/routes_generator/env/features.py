@@ -234,7 +234,7 @@ def observe(state, feature_set, *, allow_below_min=False):
     )
 
 
-def global_state_features(state, include_redundancy=None, *, preference_goals, adjustment_features=()):
+def global_state_features(state, include_redundancy, *, preference_goals, adjustment_features=()):
     """Global columns in historical checkpoint order, without mutation."""
     if isinstance(state, Observation):
         return state.global_features
@@ -276,8 +276,6 @@ def global_state_features(state, include_redundancy=None, *, preference_goals, a
         dim=-1,
     )
 
-    if include_redundancy is None:
-        include_redundancy = state._redundancy_features_enabled
     if include_redundancy:
         redundancy_features = redundancy_global_features(state)
         global_features = torch.cat((global_features, redundancy_features), dim=-1)
