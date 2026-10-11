@@ -359,7 +359,7 @@ def test_holliday_feature_layout_and_legacy_checkpoint_compatibility():
     permuted = replace(model.feature_set, critic=tuple(reversed(model.feature_set.critic)))
     reordered = ValueHead(('ATT', 'RTT'), permuted, critic_params, torch.device("cpu"), scalar=False)
     assert torch.equal(reordered._features_from_state(state), vector._features_from_state(state).flip(-1))
-    legacy_model = build_policy(policy_profile(legacy.model, legacy.cost, legacy.experiment, torch.device("cpu")))
+    legacy_model = build_policy(policy_profile(legacy.model, legacy.cost, legacy.common, torch.device("cpu")))
     assert legacy_model.edge_feat_dim == 14
     load_model_weights(
         legacy_model, "artifacts/model_weights/inductive_random_graphs_weighted_connectivity.pt", strict=True
