@@ -22,8 +22,8 @@ from connectpt.routes_generator.run.config import load_experiment, policy_profil
 from connectpt.routes_generator.run.context import resolve_under_root, resolve_weights_path
 from connectpt.routes_generator.run.context import resolve_device, seed_everything
 from connectpt.routes_generator.policy.build import build_policy
-from connectpt.routes_generator.run.schemas import InitialParams, params
-from connectpt.routes_generator.search.initial import build_init_routes
+from connectpt.routes_generator.run.schemas import JohnParams, params
+from connectpt.routes_generator.search.initial import INITIALIZERS, build_init_routes
 from connectpt.routes_generator.run.instances import load_instance
 from connectpt.routes_generator.run.const import INSTANCES_DIR, MODEL_WEIGHTS_DIR
 from connectpt.routes_generator.network.routes import write_routes_txt
@@ -34,7 +34,8 @@ INSTANCES = ["mandl", "mumford0", "mumford1", "mumford2", "mumford3"]
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--instances", nargs="*", default=INSTANCES)
-    parser.add_argument("--generator", choices=["lc", "john", "nikolic"], default="lc")
+    parser.add_argument("--generator", choices=INITIALIZERS, default=None,
+                        help="select the network/initial config group")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--instances-dir", default=None, help="default: datasets/instances")
     parser.add_argument("--cpu", action="store_true")
@@ -43,13 +44,18 @@ def main() -> None:
 
     root = resolve_under_root(args.instances_dir) if args.instances_dir else INSTANCES_DIR
     device = resolve_device(cpu=args.cpu)
-    cfg = load_experiment("init_routes")
+    overrides = [] if args.generator is None else [f"network/initial={args.generator}"]
+    cfg = load_experiment("init_routes", overrides=overrides)
+    generator = cfg.initial.name
+    if generator not in INITIALIZERS:
+        parser.error(f"unknown initial.name: {generator}")
     network_seed = cfg.run.seed if args.seed is None else args.seed
     cost = build_cost(
         cost_params(cfg.cost), symmetric_routes=cfg.common.symmetric_routes, low_memory_mode=cfg.cost.low_memory_mode
     )
-    initial = params(InitialParams, cfg.initial)
-    corruption = RealisticParams.from_values(OmegaConf.to_container(cfg.corruption, resolve=True))
+    initial = params(JohnParams, cfg.initial.params) if generator == "john" else None
+    corruption = (RealisticParams.from_values(OmegaConf.to_container(cfg.corruption, resolve=True))
+                  if generator == "lc" and not args.clean else None)
 
     for name in args.instances:
         d = root / name
@@ -57,7 +63,7 @@ def main() -> None:
         spec = instance.spec
         seed_everything(network_seed)
         policy, binding, instance_cost = None, None, cost
-        if args.generator == "lc":
+        if generator == "lc":
             seed_everything(cfg.run.seed)
             policy = build_policy(policy_profile(
                 cfg.model_profile.model, cfg.cost, cfg.common, device,
@@ -71,7 +77,7 @@ def main() -> None:
         routes = build_init_routes(
             spec,
             instance.tensors,
-            generator=args.generator,
+            generator=generator,
             cost=instance_cost,
             initial=initial,
             corruption=corruption,
@@ -82,8 +88,8 @@ def main() -> None:
             device=device,
         )
         tier = "construction only" if args.clean else "+ realistic tier"
-        generator_label = "learned construction" if args.generator == "lc" else args.generator
-        description = f"{generator_label} {tier}" if args.generator == "lc" else generator_label
+        generator_label = "learned construction" if generator == "lc" else generator
+        description = f"{generator_label} {tier}" if generator == "lc" else generator_label
         n = write_routes_txt(d / "Routes.txt", routes, f"{name} initial network -- {description}, seed {network_seed}")
         print(f"{name}: {n} routes -> {d / 'Routes.txt'}")
 

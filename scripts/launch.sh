@@ -7,9 +7,9 @@
 # (<log-dir> = --log-dir or artifacts/logs). Console output (tqdm, tracebacks)
 # goes to <log>.out. --wait blocks until the run ends and returns its exit code.
 #
-#   scripts/launch.sh run.py --config-name runs/train_construction_overnight trainer=ppo_construction
-#   scripts/launch.sh run_search.py --methods ea nea --instances mandl --alpha 0 1
-#   scripts/launch.sh --wait run.py --config-name runs/train --dry-run
+#   scripts/launch.sh run.py --config-name runs/train_construction training/algorithm=ppo
+#   scripts/launch.sh run.py --config-name runs/search --methods ea nea --instances mandl --alpha 0 1
+#   scripts/launch.sh --wait run.py --config-name runs/train_edit --dry-run
 set -e
 cd "$(dirname "$0")/.."
 [ -f .venv/bin/activate ] && source .venv/bin/activate

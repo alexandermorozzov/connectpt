@@ -8,10 +8,10 @@ the tokens have no --log, the launcher adds --log <log-dir>/<script>_<stamp>.log
 non-zero exit code. There is no param() block: tokens such as --config-name and
 Hydra overrides must reach the script untouched.
 
-  .\scripts\launch.ps1 run.py --config-name runs/train_construction_overnight trainer=ppo_construction
-  .\scripts\launch.ps1 run.py --config-name runs/train_construction_overnight trainer=d3po_construction
-  .\scripts\launch.ps1 run_search.py --methods ea nea --instances mandl --alpha 0 1
-  .\scripts\launch.ps1 --wait run.py --config-name runs/train --dry-run
+  .\scripts\launch.ps1 run.py --config-name runs/train_construction training/algorithm=ppo
+  .\scripts\launch.ps1 run.py --config-name runs/train_construction training/algorithm=d3po
+  .\scripts\launch.ps1 run.py --config-name runs/search --methods ea nea --instances mandl --alpha 0 1
+  .\scripts\launch.ps1 --wait run.py --config-name runs/train_edit --dry-run
 
   follow: Get-Content -Wait -Tail 20 <log>
   stop:   Stop-Process -Id <PID>
