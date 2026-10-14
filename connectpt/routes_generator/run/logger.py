@@ -7,7 +7,20 @@ from ..common.logging import Logger
 
 
 class TensorBoardLogger(Logger):
-    """Event files in ``<run_dir>/tensorboard``."""
+    """Compact Time Series metrics in ``<run_dir>/tensorboard``."""
+
+    _MAIN_TAGS = {
+        'eval/cost': 'main/val_cost',
+        'rollout/cost': 'main/train_cost',
+        'eval/feasible_fraction': 'main/val_feasible_fraction',
+        'rollout/feasible_fraction': 'main/train_feasible_fraction',
+        'pareto/greedy/hv': 'main/greedy_hv',
+        'pareto/greedy/eu_conditioned': 'main/greedy_eu',
+        'pareto/greedy/distinct_networks': 'main/distinct_networks',
+        'pareto/greedy/pareto_points_feasible': 'main/pareto_points',
+        'rollout/ep_rew_mean': 'main/episode_reward',
+        'rollout/ep_len_mean': 'main/episode_length',
+    }
 
     _DISPLAY_TAGS = frozenset({
         'eval/cost', 'eval/feasible_fraction',
@@ -47,7 +60,7 @@ class TensorBoardLogger(Logger):
 
     def scalar(self, tag, value, step):
         if self._display_scalar(tag):
-            self.writer.add_scalar(tag, value, step)
+            self.writer.add_scalar(self._MAIN_TAGS.get(tag, tag), value, step)
 
     def flush(self):
         self.writer.flush()
