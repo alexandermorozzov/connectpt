@@ -42,9 +42,10 @@ def _matrix(routes: torch.Tensor, tensors: dict, cost_obj) -> np.ndarray:
     if not isinstance(tensors, dict) or not all(isinstance(value, torch.Tensor) for value in tensors.values()):
         raise TypeError("tensors must be a dictionary of torch.Tensor values")
 
-    data = to_batch(tensors)
+    data = to_batch(tensors, device=routes.device)
     lens = (routes[0] >= 0).sum(-1)
-    state = RouteGenBatchState(data, cost_obj.constants, routes.shape[1], int(lens.min()), int(lens.max()), preferences=cost_obj.get_weights())
+    state = RouteGenBatchState(data, cost_obj.constants, routes.shape[1], int(lens.min()), int(lens.max()),
+                              preferences=cost_obj.get_weights(device=routes.device))
     state.add_new_routes(routes)
     return (evaluate(state, cost_obj).connectivity_pair_times.squeeze(0) / 60.0).cpu().numpy()
 
@@ -85,8 +86,7 @@ def connectivity_gdf(
     if not isinstance(agg, str) and not callable(agg):
         raise TypeError("agg must be an aggregation name or callable")
 
-    routes = to_routes(routes).long()
-    routes = routes if routes.ndim == 3 else routes[None]
+    routes = to_routes(routes)
     tensors = load_city_tensors(Path(instance_dir))
     nodes = mapped["node"].dropna().astype(int)
     matrix = _matrix(routes, tensors, cost)
