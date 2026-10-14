@@ -29,40 +29,48 @@ db.sqlite3
 
 # Environments
 .env
-.venv/
-.venv2/
-venv/
-ENV/
-!connectpt/routes_generator/env/
-!connectpt/routes_generator/env/*.py
-!connectpt/routes_generator/cfg/env/
-!connectpt/routes_generator/cfg/env/*.yaml
+/.venv*/
+/venv/
+/ENV/
 
 # Editors
-.idea
-
-
+.idea/
+.vscode/
 
 # Generated run artifacts -- results CSV, route dumps, model weights,
 # training logs -- are kept local only; regenerate with the scripts/ entry points.
-artifacts/
-.tmp_pycache
+/artifacts/*
+!/artifacts/model_weights/
+/artifacts/model_weights/*
+!/artifacts/model_weights/inductive_random_graphs_weighted_connectivity.pt
+.tmp_pycache/
 
 # Local task-tracking / agent files (not part of the published repo)
+AGENTS.md
+AGENTS.override.md
 CLAUDE.md
+GEMINI.md
+.codex/
+.claude/
+.agents/
+.aider*
 docs/
-artifacts (2).zip
-artifacts.zip
-artifacts do not delete.zip
 # datasets/ is local; only Mandl and Mumford benchmark instances are tracked
 # (raw graphs, training data, EKB and MACSA stay local, or use git-lfs).
 datasets/*
 !datasets/instances/
 datasets/instances/*
 !datasets/instances/mandl/
-!datasets/instances/mumford*/
+!datasets/instances/mumford0/
+!datasets/instances/mumford1/
+!datasets/instances/mumford2/
+!datasets/instances/mumford3/
 graphify-out/
 training_figure_variants/
-curric_noadj_v1/
 tmp/
 tests/
+archive/
+
+# Local visualization and experiment helpers
+scripts/plot_ekb_route_diff.py
+scripts/run_diversity_sweep.ps1
