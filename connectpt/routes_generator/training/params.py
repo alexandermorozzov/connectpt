@@ -1,7 +1,7 @@
 """Typed dataset and training parameters, independent of configuration libraries."""
 from dataclasses import dataclass
 from pathlib import Path
-from .const import DatasetKind, DataSourceKind
+from .const import DatasetKind, DataSourceKind, PreferenceDistribution
 from .dataset import DatasetLimits
 from .split import SplitParams
 from .pipeline import GraphPipeline
@@ -56,3 +56,7 @@ class LoopParams:
     action_seed: int | None
     force_nonhalt_until: int | None
     resample_preferences_on_terminal: bool
+    preference_distribution: PreferenceDistribution
+
+    def __post_init__(self):
+        object.__setattr__(self, 'preference_distribution', PreferenceDistribution(self.preference_distribution))

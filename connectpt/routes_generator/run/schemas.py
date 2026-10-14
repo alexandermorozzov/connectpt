@@ -70,8 +70,8 @@ class AdjustmentParams:
 
 
 @dataclass(frozen=True)
-class InitialParams:
-    """``cfg/initial``: heuristic initial networks (John et al.)."""
+class JohnParams:
+    """John's heuristic parameters from the selected ``initial.params``."""
     alpha: float
     prioritize_direct_connections: bool
 

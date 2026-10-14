@@ -1,5 +1,5 @@
 """Replay minibatches through the collected action masks."""
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, field
 import numpy as np
 import torch
 
@@ -44,6 +44,55 @@ class UpdateStats:
     values: torch.Tensor
     targets: torch.Tensor
     value_loss_by_objective: list
+    diagnostics: dict = field(default_factory=dict)
+
+
+def gradient_diagnostics(policy_objective, diversity_loss, weight, parameters):
+    """Separate ascent gradients before clipping; retain the training graph.
+
+    autograd.grad leaves parameter .grad and RNG untouched. Zero norms make
+    ratios/cosines undefined (NaN), rather than suggesting agreement.
+    """
+    def gradients(objective):
+        if not objective.requires_grad:
+            return [torch.zeros_like(p) for p in parameters]
+        return [torch.zeros_like(p) if g is None else g.detach() for p, g in zip(
+            parameters, torch.autograd.grad(objective, parameters, retain_graph=True, allow_unused=True))]
+
+    pg, dg = gradients(policy_objective), gradients(-diversity_loss)
+    pn = sum(g.double().square().sum() for g in pg).sqrt()
+    dn = sum(g.double().square().sum() for g in dg).sqrt()
+    dot = sum((a.double() * b.double()).sum() for a, b in zip(pg, dg))
+    return {
+        'policy_gradient_norm': float(pn),
+        'diversity_gradient_norm': float(dn),
+        'weighted_diversity_gradient_norm': float(dn * weight),
+        'diversity_gradient_ratio': float(dn * weight / pn) if pn > 0 else float('nan'),
+        'gradient_cosine': float(dot / (pn * dn)) if pn > 0 and dn > 0 and weight > 0 else float('nan'),
+    }
+
+
+def summarize_diagnostics(gradients, samples, *, diversity_reduction='state_mean'):
+    """Mean sampled minibatch gradients; state-weighted distribution statistics."""
+    result = {key: float(np.nanmean([row[key] for row in gradients]))
+              if any(np.isfinite(row[key]) for row in gradients) else float('nan')
+              for key in gradients[0]} if gradients else {}
+    result['gradient_samples'] = len(gradients)
+    if samples:
+        kl, target, counts = [torch.cat(items) for items in zip(*samples)]
+        free = counts > 1
+        result.update(diversity_free_fraction=float(free.double().mean()),
+                      diversity_state_count=kl.numel(), diversity_free_state_count=int(free.sum()))
+        if diversity_reduction == 'state_mean':
+            # With batch_mean, singleton errors can cancel other states' errors;
+            # they are not an independently unavoidable contribution to loss.
+            result['diversity_singleton_loss_floor'] = float((target.square() * ~free).mean())
+        for name, values in [('diversity_kl_free', kl[free]), ('diversity_target_free', target[free]),
+                             ('diversity_abs_error_free', (kl-target).abs()[free])]:
+            result[name + '_mean'] = float(values.mean()) if values.numel() else float('nan')
+            for q, suffix in [(0.1, 'p10'), (0.5, 'p50'), (0.9, 'p90')]:
+                result[name + '_' + suffix] = float(values.double().quantile(q)) if values.numel() else float('nan')
+    return result
 
 
 def shape_groups(states, indices):
@@ -84,12 +133,17 @@ def replay_mask(masks, indices, batch_size, score, device):
 
 def update(env, policy, algorithm, critic, optimizer, batch):
     p = algorithm.params
+    diagnostic_interval = p.gradient_diagnostics_interval
+    if diagnostic_interval < 0:
+        raise ValueError('gradient_diagnostics_interval must be nonnegative')
+    parameters = tuple(parameter for parameter in policy.parameters() if parameter.requires_grad)
     device = next(policy.parameters()).device
     batch_size = batch.rewards.shape[1]
     states_per_minibatch = max(1, p.minibatch_size // batch_size)
     order = torch.cat([torch.randperm(len(batch.states), device=device) for _ in range(p.n_epochs)])
     stats, value_buffer, target_buffer, per_goal_mse = [], [], [], []
     initial_error = None
+    gradient_samples, diversity_samples = [], []
     for raw_indices in torch.split(order, states_per_minibatch):
         for indices in shape_groups(batch.states, raw_indices):
             state = prepare_replay(batch.states, indices, device)
@@ -121,7 +175,13 @@ def update(env, policy, algorithm, critic, optimizer, batch):
                     raise RuntimeError(f"Initial replay ratio differs from 1: {initial_error}")
             clipped = ratios.clamp(1 - p.epsilon, 1 + p.epsilon)
             surrogate = algorithm.surrogate(ratios, clipped, advantages, preferences)
-            diversity = algorithm.diversity(policy, env, state, output, mask)
+            diversity = algorithm.diversity(policy, env, state, output, mask, diagnostics=diagnostic_interval > 0)
+            if diagnostic_interval:
+                if diversity.kl_by_state is not None:
+                    diversity_samples.append((diversity.kl_by_state, diversity.target_by_state, diversity.action_counts))
+                if len(stats) % diagnostic_interval == 0:
+                    gradient_samples.append(gradient_diagnostics(surrogate.mean(), diversity.loss,
+                                                               p.diversity_weight, parameters))
             objective = (
                 surrogate.mean() + output.entropy.mean() * p.entropy_weight - p.diversity_weight * diversity.loss
             )
@@ -158,4 +218,6 @@ def update(env, policy, algorithm, critic, optimizer, batch):
             variance > 0, 1 - residual / variance.clamp_min(1e-12), torch.full_like(variance, float("nan"))
         ).tolist()
     goal_loss = torch.stack(per_goal_mse).mean(dim=0).tolist() if targets.ndim > 1 else []
-    return UpdateStats(*means[:6], initial_error, *means[6:9], explained, per_goal, values, targets, goal_loss)
+    diagnostics = summarize_diagnostics(gradient_samples, diversity_samples,
+                                        diversity_reduction=p.diversity_reduction) if diagnostic_interval else {}
+    return UpdateStats(*means[:6], initial_error, *means[6:9], explained, per_goal, values, targets, goal_loss, diagnostics)

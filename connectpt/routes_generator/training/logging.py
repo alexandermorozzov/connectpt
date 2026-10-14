@@ -45,6 +45,7 @@ def log_iteration(env, algorithm, batch, stats, logger_list, data, budget, itera
             -stats.objective,
             stats.diversity_kl,
             stats.diversity_target,
+            stats.diagnostics,
         ),
         iteration,
     )

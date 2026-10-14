@@ -10,6 +10,12 @@ def nondominated(points):
     return points[np.asarray(keep, dtype=bool)]
 
 
+def sparsity(front):
+    """D3PO SP (Def. B.2): mean L2 gap between consecutive points of the front ordered by goal 0."""
+    ordered = front[np.argsort(front[:, 0], kind="stable")]
+    return float(np.linalg.norm(np.diff(ordered, axis=0), axis=1).mean())
+
+
 def hypervolume_2d(points, reference):
     reference = np.asarray(reference, dtype=float)
     if reference.shape != (2,) or not np.isfinite(reference).all():
@@ -79,10 +85,13 @@ def front_metrics(rows, reference, eu_preference_count):
             distance = np.abs(front[:, None] - front[None]).sum(-1)
             np.fill_diagonal(distance, np.inf)
             metrics["spacing_feasible"] = float(np.std(distance.min(1), ddof=1))
+            metrics["sparsity_feasible"] = sparsity(front)
         else:
             metrics["spacing_feasible"] = None
+            metrics["sparsity_feasible"] = None
     else:
         metrics["spacing_feasible"] = None
+        metrics["sparsity_feasible"] = None
     return metrics
 
 

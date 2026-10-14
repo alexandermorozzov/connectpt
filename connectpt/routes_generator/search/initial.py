@@ -256,7 +256,7 @@ def build_init_routes(
     also gets the realistic corruption tier unless ``clean``.
 
     The objects come from ``scripts/make_init_routes.py`` (``cfg/runs/init_routes.yaml``):
-    ``cost``, ``initial`` (``InitialParams``), ``corruption`` (``RealisticParams``) and,
+    ``cost``, ``initial`` (``JohnParams``), ``corruption`` (``RealisticParams``) and,
     for ``lc``, the construction ``policy``."""
     import random
 

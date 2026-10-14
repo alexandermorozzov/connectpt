@@ -46,10 +46,18 @@ class D3PO(Algorithm):
         clipped_goals = torch.minimum(ratios[:, None] * advantages, clipped[:, None] * advantages)
         return (preferences * clipped_goals).sum(-1)
 
-    def diversity(self, policy, env, state, output, mask):
+    def diversity(self, policy, env, state, output, mask, *, diagnostics=False):
         if self.params.diversity_weight == 0:
-            zero = output.logp.new_zeros(())
-            return Diversity(zero, zero, zero)
+            if not diagnostics:
+                zero = output.logp.new_zeros(())
+                return Diversity(zero, zero, zero)
+            # Measure the disabled regularizer without advancing training RNG.
+            devices = [output.logp.device.index] if output.logp.is_cuda else []
+            with torch.random.fork_rng(devices=devices):
+                return self._diversity(policy, env, state, output, mask, diagnostics=True)
+        return self._diversity(policy, env, state, output, mask, diagnostics=diagnostics)
+
+    def _diversity(self, policy, env, state, output, mask, *, diagnostics):
         preferences = self.cost.get_preference_weights(state, normalize=True)
         neighbor = sample_neighbor_preferences(
             preferences, self.params.preference_noise_sigma, self.cost.enabled_component_mask
@@ -57,7 +65,16 @@ class D3PO(Algorithm):
         target = self.params.diversity_alpha * (preferences - neighbor).abs().sum(-1)
         neighbor_state = state.clone()
         neighbor_state.set_cost_weights(preference_dict(neighbor))
-        obs = env.observation(neighbor_state)
-        neighbor_output = policy.evaluate(obs, mask, output.action)
+        # The upstream alternative treats the neighbor as a fixed target.
+        with torch.set_grad_enabled(torch.is_grad_enabled() and not self.params.diversity_detach_neighbor):
+            obs = env.observation(neighbor_state)
+            neighbor_output = policy.evaluate(obs, mask, output.action)
         kl = categorical_kl(output.log_probs, neighbor_output.log_probs)
-        return Diversity((kl - target).pow(2).mean(), kl.mean(), target.mean())
+        if self.params.diversity_reduction == 'batch_mean':
+            loss = (kl.mean() - target.mean()).pow(2)
+        else:
+            loss = (kl - target).pow(2).mean()
+        return Diversity(loss, kl.mean(), target.mean(),
+                         kl.detach() if diagnostics else None,
+                         target.detach() if diagnostics else None,
+                         (output.probs.detach() > 0).sum(-1) if diagnostics else None)

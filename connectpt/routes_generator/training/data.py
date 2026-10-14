@@ -9,7 +9,7 @@ from ..city.synthetic import load_graph_collection
 from ..objectives.preferences import PreferenceSampler,state_preferences
 from .const import DatasetKind, DataSourceKind, DATASET_MANIFEST
 from .dataset import load_dataset
-from .episodes import EpisodeSource
+from .episodes import EpisodeSource, EpisodePreferences
 from .params import DatasetInputParams
 from .pipeline import GraphPipeline, GraphView, OnlineGraphs
 from .split import graph_source_id, evaluation_indices
@@ -30,14 +30,14 @@ class ConstructionDataset:
     benchmark: object | None
     sampler: PreferenceSampler
 
-    def prepare(self, cost, batch_size, evaluation, device, env_params, curriculum, resample_preferences):
+    def prepare(self, cost, batch_size, evaluation, device, env_params, curriculum, preferences: EpisodePreferences):
         if curriculum.enabled:
             raise ValueError('construction data has no curriculum tiers; use curriculum.enabled=false')
-        data = self.load(batch_size, evaluation, device, env_params, resample_preferences=resample_preferences)
+        data = self.load(batch_size, evaluation, device, env_params, preferences=preferences)
         val_cost = cost.with_params(**state_preferences(self.sampler.sample_named(data.validation_batch_size, device)))
         return data, val_cost
 
-    def load(self, batch_size, evaluation, device, env_params, *, resample_preferences):
+    def load(self, batch_size, evaluation, device, env_params, *, preferences):
         source = self.params.source
         test_graphs, test_ids = None, ()
         if self.params.test_path is not None:
@@ -82,6 +82,10 @@ class ConstructionDataset:
         indices = evaluation_indices(range(len(validation)), evaluation.graph_count, evaluation.seed).tolist()
         if evaluation.graph_count is not None:
             validation = [validation[index] for index in indices]
+        monitor = full_validation
+        if evaluation.pareto_graph_count is not None:
+            monitor = [full_validation[index] for index in
+                       evaluation_indices(range(len(full_validation)), evaluation.pareto_graph_count, evaluation.seed).tolist()]
         if not len(validation) or (source != DataSourceKind.DYNAMIC and len(train) < batch_size):
             raise ValueError('training needs a full batch and nonempty validation')
         validation_batch_size = batch_size * 4
@@ -91,30 +95,29 @@ class ConstructionDataset:
         counts = (counts,) if isinstance(counts, int) else tuple(counts)
         return ConstructionData(
             train_loader, DataLoader(validation,batch_size=validation_batch_size),device,
-            n_routes=counts,resample_preferences_on_terminal=resample_preferences,
+            n_routes=counts,preferences=preferences,monitor_graphs=monitor,
             validation_indices=indices,validation_batch_size=validation_batch_size,
             test_graphs=test_graphs,full_validation=full_validation,
             training_source_ids=train_ids,validation_source_ids=validation_ids,test_source_ids=test_ids,
             online=source==DataSourceKind.DYNAMIC,
-            sampler=self.sampler,
         )
 
 
 class ConstructionData(EpisodeSource):
-    def __init__(self, train_loader, validation_loader, device, *, n_routes, resample_preferences_on_terminal,
+    def __init__(self, train_loader, validation_loader, device, *, n_routes, preferences, monitor_graphs,
                  validation_indices, validation_batch_size, test_graphs, full_validation,
-                 training_source_ids, validation_source_ids, test_source_ids, online,sampler):
+                 training_source_ids, validation_source_ids, test_source_ids, online):
         super().__init__()
         self.train_loader = train_loader
         self.validation_loader = validation_loader
         self.device = device
         self.n_routes = tuple(n_routes)
-        self.resample_preferences = resample_preferences_on_terminal
+        self.preferences = preferences
+        self.monitor_graphs = monitor_graphs
         self.validation_indices, self.validation_batch_size = validation_indices, validation_batch_size
         self.test_graphs, self.full_validation = test_graphs, full_validation
         self.training_source_ids, self.validation_source_ids, self.test_source_ids = training_source_ids, validation_source_ids, test_source_ids
         self.online = online
-        self.sampler=sampler
         self.batch_size = train_loader.batch_size
         self.generator = None
         self.finished = None
@@ -128,6 +131,10 @@ class ConstructionData(EpisodeSource):
     @property
     def validation_count(self):
         return len(self.validation_loader.dataset)
+
+    @property
+    def monitor_count(self):
+        return len(self.monitor_graphs)
 
     @property
     def final_split(self):
@@ -156,7 +163,7 @@ class ConstructionData(EpisodeSource):
             self.graph_instances_loaded += graphs.num_graphs
             self.graph_batches_loaded += 1
             env.set_route_count(self.route_count)
-            env.reset(graphs, state_preferences(self.sampler.sample_named(graphs.num_graphs, self.device)))
+            env.reset(graphs, self.preferences.sample(graphs.num_graphs, self.device))
             self.finished = env.is_done().clone()
             self.start_episode(graphs.num_graphs,self.device)
 
@@ -166,8 +173,8 @@ class ConstructionData(EpisodeSource):
     def after_step(self, env, done):
         self.finished |= done
         sampled = None
-        if self.resample_preferences and done.any():
-            sampled = state_preferences(self.sampler.sample_named(int(done.sum()), self.device))
+        if self.preferences.resample_on_terminal and done.any():
+            sampled = self.preferences.sample(int(done.sum()), self.device)
         env.reset_completed(done, sampled)
 
     def bootstrap_mask(self, env):

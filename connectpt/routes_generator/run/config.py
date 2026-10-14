@@ -78,6 +78,7 @@ def _retarget_instance(cfg, name: str) -> None:
 def build_experiment(
     name: str,
     *,
+    overrides=None,
     instance: str | None = None,
     method: str | None = None,
     alpha=None,
@@ -94,6 +95,7 @@ def build_experiment(
     Every keyword defaults to ``None`` -> the value stays as written in the YAML
     (parent config + groups). A passed value is merged into the composed cfg so
     the sweep/data/run block reflects it, without touching any file on disk.
+    Hydra overrides are applied first; explicit keyword arguments take precedence.
 
     A **method** selects the ``search/method=<x>`` Hydra group, which carries the
     operators AND the models they need.
@@ -106,7 +108,7 @@ def build_experiment(
     """
     # Group selections must be compose-time overrides (Hydra picks the defaults
     # group before merge); everything else is injected into the composed cfg.
-    group_overrides = []
+    group_overrides = list(overrides or [])
     if method is not None:
         group_overrides.append(f"search/method={method}")
     if instance is not None:

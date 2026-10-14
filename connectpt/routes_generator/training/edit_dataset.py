@@ -5,11 +5,10 @@ import torch
 
 from ..city.const import STOP_KEY
 from ..network.routes import to_routes
-from ..objectives.preferences import PreferenceSampler,state_preferences
 from .curriculum import prepare_curriculum
 from .dataset import Dataset, load_dataset,read_manifest
 from .const import DATASET_MANIFEST,DatasetKind
-from .episodes import EpisodeSource
+from .episodes import EpisodeSource, EpisodePreferences
 from .params import DatasetInputParams
 from .pipeline import GraphPipeline
 from .split import evaluation_indices
@@ -20,7 +19,6 @@ class EditDataset:
     params: DatasetInputParams
     train_pipeline: GraphPipeline
     evaluation_pipeline: GraphPipeline
-    sampler: PreferenceSampler
 
     def validate_input(self):
         """Check required seed artifacts before training; prepare validates their tensors."""
@@ -39,7 +37,7 @@ class EditDataset:
                                       not list(folder.glob('lc_*_routes_routes.pkl')) for folder in directories):
                 raise ValueError('edit dataset requires seed networks for every graph folder')
 
-    def prepare(self, cost, batch_size, evaluation, device, env_params, curriculum, resample_preferences):
+    def prepare(self, cost, batch_size, evaluation, device, env_params, curriculum, preferences: EpisodePreferences):
         dataset = load_dataset(self.params.path, kind=self.params.kind, legacy_limits=self.params.limits,
                                legacy_split=self.params.legacy_split)
         module = SeedDataModule(dataset,device,self.train_pipeline,self.evaluation_pipeline)
@@ -59,7 +57,7 @@ class EditDataset:
         stages = prepare_curriculum(dataset.split.train,dataset.params.tiers,curriculum)
         monitor = evaluation_indices(dataset.split.monitor,evaluation.graph_count,evaluation.seed)
         data = EditData(module,stages,dataset.split.train,dataset.split.validation,monitor,batch_size,
-                        final_module,final_indices,final_split,self.sampler)
+                        final_module,final_indices,final_split,preferences)
         return data,cost
 
 
@@ -82,9 +80,9 @@ class SeedDataModule:
 
 class EditData(EpisodeSource):
     def __init__(self, module, curriculum, train_indices, val_indices, monitor_indices, batch_size,
-                 final_module, final_indices, final_split,sampler):
+                 final_module, final_indices, final_split,episode_preferences):
         super().__init__()
-        self.sampler=sampler
+        self.episode_preferences=episode_preferences
         self.module, self.curriculum = module, curriculum
         self.train_indices, self.val_indices = train_indices, val_indices
         self.all_val_indices = val_indices
@@ -154,10 +152,13 @@ class EditData(EpisodeSource):
             width = max(self.working.shape[-1], env.params.max_route_len)
             self.working = to_routes(self.working, width=width)
             self.reference = self.working.clone()
-            self.preferences = state_preferences(self.sampler.sample_named(self.graphs.num_graphs, self.device))
+            self.preferences = self.episode_preferences.sample(self.graphs.num_graphs, self.device)
             self.route_cursor = 0
             self.graph_instances_loaded += self.graphs.num_graphs
             self.graph_batches_loaded += 1
+        elif self.episode_preferences.resample_on_terminal:
+            # One route slot is one episode here.
+            self.preferences = self.episode_preferences.sample(self.graphs.num_graphs, self.device)
         route_idx = self.route_cursor
         self.route_cursor = (route_idx + 1) % self.working.shape[1]
         env.reset(self.graphs, self.preferences, self.working, route_idx=route_idx, reference_networks=self.reference)

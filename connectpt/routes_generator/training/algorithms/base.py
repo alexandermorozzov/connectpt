@@ -19,6 +19,14 @@ class AlgorithmParams:
     diversity_alpha: float
     preference_noise_sigma: float
     max_grad_norm: float
+    gradient_diagnostics_interval: int
+    # Defaults also allow configs saved before these alternatives were added.
+    diversity_detach_neighbor: bool = False
+    diversity_reduction: str = 'state_mean'
+
+    def __post_init__(self):
+        if self.diversity_reduction not in ('state_mean', 'batch_mean'):
+            raise ValueError('diversity_reduction must be state_mean or batch_mean')
 
 
 class Algorithm(ABC):
@@ -39,7 +47,7 @@ class Algorithm(ABC):
         """Clipped policy objective in scalar or goal space."""
 
     @abstractmethod
-    def diversity(self, policy, env, state, output, mask):
+    def diversity(self, policy, env, state, output, mask, *, diagnostics=False):
         """Extra algorithm objective, from the replay's full distribution."""
 
     @property
@@ -74,6 +82,9 @@ class Diversity:
     loss: torch.Tensor
     kl: torch.Tensor
     target: torch.Tensor
+    kl_by_state: torch.Tensor | None = None
+    target_by_state: torch.Tensor | None = None
+    action_counts: torch.Tensor | None = None
 
 
 def expand_mask(mask, value):

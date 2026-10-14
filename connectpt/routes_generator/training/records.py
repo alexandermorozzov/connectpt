@@ -67,6 +67,7 @@ class ParetoRecord:
     pareto_points_penalized: float | None = None
     pareto_points_feasible: float | None = None
     spacing_feasible: float | None = None
+    sparsity_feasible: float | None = None
     distinct_networks: float | None = None
     distinct_feasible_networks: float | None = None
     distinct_pareto_networks: float | None = None
@@ -95,6 +96,7 @@ class TrainRecord:
     loss: float
     diversity_kl: float
     diversity_target: float
+    diagnostics: dict = field(default_factory=dict)
 
 
 @dataclass

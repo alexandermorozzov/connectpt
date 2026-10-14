@@ -1,8 +1,27 @@
-"""Episode-source hooks and owned reward/length counters."""
+"""Episode-source hooks, training preferences and owned reward/length counters."""
 from abc import ABC,abstractmethod
 from dataclasses import dataclass
 
 import torch
+
+from ..objectives.preferences import PreferenceSampler,state_preferences
+from .const import PreferenceDistribution
+
+
+@dataclass(frozen=True)
+class EpisodePreferences:
+    """Training-episode preferences: distribution and lifetime. Validation keeps the configured sampler.
+
+    ``sample`` consumes the global torch RNG and returns State weight keys -> Tensor[count].
+    """
+    sampler: PreferenceSampler
+    distribution: PreferenceDistribution
+    resample_on_terminal: bool
+
+    def sample(self,count,device):
+        if self.distribution is PreferenceDistribution.SIMPLEX:
+            return state_preferences(self.sampler.sample_simplex_named(count,device))
+        return state_preferences(self.sampler.sample_named(count,device))
 
 
 @dataclass

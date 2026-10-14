@@ -16,6 +16,7 @@ from ..training.algorithms.base import AlgorithmParams
 from ..training.algorithms.d3po import D3PO
 from ..training.algorithms.ppo import PPO
 from ..training.critic import CriticParams, ValueHead
+from ..training.episodes import EpisodePreferences
 from ..training.loop import Budget, train
 from ..training.params import CurriculumParams, LoopParams, OptimizerParams
 from ..training.records import DataCounts
@@ -102,7 +103,7 @@ class TrainingRun(ExperimentRun):
         evaluation = self.evaluation
         if self.env_name == "construction":
             validation = dict(split="held-out validation", indices=data.validation_indices, n_routes=list(data.n_routes))
-            monitor_counts = {"validation": data.validation_count}
+            monitor_counts = {"validation": data.monitor_count}
         else:
             validation = dict(
                 split="held-out validation", indices=data.all_val_indices.tolist(),
@@ -163,7 +164,7 @@ class TrainingRun(ExperimentRun):
             device,
             self.env_params,
             self.curriculum,
-            lp.resample_preferences_on_terminal,
+            EpisodePreferences(self.sampler, lp.preference_distribution, lp.resample_preferences_on_terminal),
         )
         self.metadata["evaluation_protocol"] = self.evaluation_protocol(data, val_cost)
         self.write_metadata()

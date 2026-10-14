@@ -16,7 +16,8 @@ def construction_source(prepared,sampler):
 
 
 def edit_source(prepared,sampler):
-    source=EditDataset(prepared.params,prepared.train_pipeline,prepared.evaluation_pipeline,sampler)
+    # Edit validation uses the fixed cost weights; training ω comes from EpisodePreferences.
+    source=EditDataset(prepared.params,prepared.train_pipeline,prepared.evaluation_pipeline)
     source.validate_input()
     return source
 

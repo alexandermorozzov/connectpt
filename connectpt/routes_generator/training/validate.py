@@ -22,6 +22,7 @@ from .split import evaluation_indices
 class EvaluationParams:
     validation_mode: str
     graph_count: int | None
+    pareto_graph_count: int | None
     test_graph_count: int | None
     pareto_enabled: bool
     pareto_period: int
@@ -110,7 +111,7 @@ class ConstructionValidation(Validation):
                 yield graphs, None, count
 
     def monitor_batches(self):
-        yield self.data.validation_loader.dataset, None
+        yield self.data.monitor_graphs, None
 
 
 class EditValidation(Validation):

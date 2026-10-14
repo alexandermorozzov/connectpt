@@ -173,6 +173,17 @@ class PreferenceSampler:
         weights=self.sample(batch_size,device)
         return {name:weights[:,i] for i,name in enumerate(self.objectives)}
 
+    def sample_simplex_named(self, batch_size, device=None):
+        """Uniform on the simplex of the configured goals, Dirichlet(1,...,1); no corner masses.
+
+        Normalized Exp(1) draws from one ``torch.rand([B, K])`` call. Returns goal_id -> Tensor[B]
+        in configured goal order; rows sum to one.
+        """
+        uniform = torch.rand(batch_size, len(self.objectives), device=device)
+        exponential = -uniform.clamp_min(torch.finfo(uniform.dtype).tiny).log()
+        weights = exponential / exponential.sum(-1, keepdim=True)
+        return {name: weights[:, i] for i, name in enumerate(self.objectives)}
+
     def sample(self, batch_size, device=None):
         """Sample only active goals, in configured objective order."""
         if any(name not in GOAL_NAMES for name in self.objectives):

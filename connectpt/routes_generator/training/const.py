@@ -14,6 +14,11 @@ class DataSourceKind(StrEnum):
     BENCHMARK = "benchmark"
 
 
+class PreferenceDistribution(StrEnum):
+    SAMPLER = "sampler"
+    SIMPLEX = "simplex"
+
+
 DATASET_SCHEMA = 1
 DATASET_MANIFEST = "manifest.json"
 DATASET_CONTENT = "dataset.pt"
