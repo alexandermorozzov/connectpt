@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-- /run: standard
+- /common: experiment
 - /training/dataset_build: construction
 - _self_
 run:

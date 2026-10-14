@@ -1,0 +1,5 @@
+# @package _global_
+common:
+  symmetric_routes: true
+run:
+  seed: 0

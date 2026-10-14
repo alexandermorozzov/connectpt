@@ -1,0 +1,6 @@
+# @package algorithm
+defaults:
+- d3po
+- _self_
+diversity_detach_neighbor: true
+diversity_reduction: batch_mean

@@ -14,8 +14,7 @@ logger_list:
 defaults:
 - /objectives/cost: att_rtt
 - /training/dataset: construction
-- /common: standard
-- /run: standard
+- /common: experiment
 - /policy/model: construction_holliday
 - /training/algorithm: ppo
 - /env: construction
@@ -40,6 +39,7 @@ train_loop:
   action_seed: null
   force_nonhalt_until: null
   resample_preferences_on_terminal: false
+  preference_distribution: sampler
 algorithm:
   minibatch_size: ${train_loop.batch_size}
   entropy_weight: 0.0
@@ -50,6 +50,7 @@ algorithm:
 evaluation:
   validation_mode: sample
   graph_count: 64
+  pareto_graph_count: ${evaluation.graph_count}
   test_graph_count: null
   pareto_enabled: true
   pareto_period: 10

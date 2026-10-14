@@ -1,0 +1,9 @@
+# @package _global_
+defaults:
+- train_construction_holliday
+- _self_
+run:
+  name: construction_d3po_${algorithm.name}_seed${run.seed}
+train_loop:
+  preference_distribution: simplex
+  resample_preferences_on_terminal: true

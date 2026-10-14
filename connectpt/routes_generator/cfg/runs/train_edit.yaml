@@ -1,0 +1,74 @@
+# @package _global_
+run:
+  type: training
+  name: edit_training_v1
+  cpu: false
+paths:
+  weights_dir: artifacts/model_weights
+  output_dir: artifacts/runs/edit_training_v1
+  checkpoint_path: improvement/edit_training_v1.pt
+  init_checkpoint_path: null
+logger_list:
+- tensorboard
+- csv
+defaults:
+- /objectives/cost: rtt_wmc
+- /objectives/adjustment: cap
+- /training/dataset: lc_copytiers
+- /common: experiment
+- /policy/model: edit_trim_seeded
+- /training/algorithm: ppo
+- /env: edit
+- /training/curriculum: copytiers
+- _self_
+optimizer:
+  name: Adam
+  learning_rate: 0.0003
+  decay: 1.0e-05
+train_loop:
+  n_iterations: 700
+  horizon: 200
+  val_period: 10
+  validate_before_update: false
+  max_seconds: null
+  batch_size: 4
+  batch_size_cuda: 16
+  cpu_threads: null
+  warmup_batches: 4
+  max_rollout_samples: 8192
+  calibrate_before_validation: false
+  action_seed: null
+  force_nonhalt_until: 150
+  resample_preferences_on_terminal: false
+  preference_distribution: sampler
+algorithm:
+  minibatch_size: 256
+  entropy_weight: 0.05
+  gamma: 1.0
+model:
+  route_generator:
+    kwargs:
+      serial_halting: true
+env:
+  params:
+    max_route_edit_steps: 30
+    max_trim_actions_per_route: 1
+    force_nonhalt_first_step: true
+    allow_trim_below_min: true
+evaluation:
+  validation_mode: greedy
+  graph_count: null
+  pareto_graph_count: ${evaluation.graph_count}
+  test_graph_count: null
+  pareto_enabled: false
+  pareto_period: 10
+  pareto_preference_count: 11
+  pareto_stochastic_samples: 1
+  hv_reference:
+  - 3.0
+  - 3.0
+  eu_preference_count: 101
+  preference_count: 21
+  stochastic_samples: 4
+  seed: 9001
+  final_test: false

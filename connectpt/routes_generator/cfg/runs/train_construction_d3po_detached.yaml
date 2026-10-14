@@ -1,0 +1,7 @@
+# @package _global_
+defaults:
+- train_construction_d3po
+- override /training/algorithm: d3po_detached
+- _self_
+run:
+  name: construction_d3po_detached_seed${run.seed}

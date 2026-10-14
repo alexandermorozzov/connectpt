@@ -12,6 +12,9 @@ diversity_weight: 0.0
 diversity_alpha: 1.0
 preference_noise_sigma: 0.15
 max_grad_norm: 0.5
+gradient_diagnostics_interval: 0
+diversity_detach_neighbor: false
+diversity_reduction: state_mean
 critic:
   learning_rate: 0.0005
   decay: 0.01

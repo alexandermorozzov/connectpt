@@ -2,8 +2,7 @@
 defaults:
 - /objectives/cost: rtt_wmc
 - /objectives/adjustment: cap
-- /common: standard
-- /run: standard
+- /common: experiment
 - /policy/model_profile: construction_v1
 - /training/dataset_build: copytiers
 - _self_

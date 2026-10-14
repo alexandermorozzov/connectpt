@@ -1,0 +1,5 @@
+# @package initial
+name: john
+params:
+  alpha: 0.5
+  prioritize_direct_connections: true

@@ -1,0 +1,22 @@
+# @package _global_
+defaults:
+- train_construction
+- _self_
+run:
+  name: construction_holliday_${algorithm.name}_seed${run.seed}
+  cpu: true
+algorithm:
+  gamma: 0.95
+train_loop:
+  batch_size: 32
+  batch_size_cuda: 32
+  horizon: 64
+  n_iterations: 200
+  max_seconds: null
+evaluation:
+  graph_count: null
+  pareto_graph_count: 64
+  test_graph_count: 64
+  pareto_period: 50
+  preference_count: 11
+  stochastic_samples: 1

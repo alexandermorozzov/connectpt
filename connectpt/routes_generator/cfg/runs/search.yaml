@@ -1,8 +1,7 @@
 # @package _global_
 defaults:
 - /objectives/cost: rtt_wmc
-- /common: standard
-- /run: standard
+- /common: experiment
 - /objectives/adjustment: cap
 - /city/instance: mandl
 - /search/method: nea_combined

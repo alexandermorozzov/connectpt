@@ -1,0 +1,6 @@
+# @package initial
+defaults:
+- /policy/model_profile: construction_v1
+- /network/corruption: realistic
+- _self_
+name: lc

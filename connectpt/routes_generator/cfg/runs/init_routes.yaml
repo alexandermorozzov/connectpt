@@ -2,9 +2,6 @@
 defaults:
 - /objectives/cost: rtt_wmc
 - /objectives/adjustment: cap
-- /common: standard
-- /run: standard
-- /policy/model_profile: construction_v1
-- /search/initial: heuristic
-- /network/corruption: realistic
+- /common: experiment
+- /network/initial: lc
 - _self_
