@@ -8,6 +8,8 @@ import shapely
 
 from shapely.geometry import Polygon, MultiPolygon
 from iduedu import get_drive_graph, graph_to_gdf, get_public_transport_graph
+from iduedu.constants.transport_specs import DEFAULT_REGISTRY, TransportRegistry, TransportSpec
+
 from typing import Dict
 
 from .types import Modality, MODALITY_LINE_TAGS
@@ -15,6 +17,23 @@ from .utils import _close_gaps, restore_linestrings
 
 ox.settings.useful_tags_way.append("railway")
 warnings.filterwarnings("ignore", category=UserWarning)
+
+osm_road_matrix = {
+    'motorway':     {'v_default': 110, 'k_class': 0.90},  # Автомагистраль (почти нет задержек)
+    'trunk':        {'v_default': 90,  'k_class': 0.85},  # Выездные шоссе
+    'primary':      {'v_default': 60,  'k_class': 0.70},  # Главные городские улицы (светофоры, автобусы)
+    'secondary':    {'v_default': 60,  'k_class': 0.60},  # Районные магистрали
+    'tertiary':     {'v_default': 60,  'k_class': 0.50},  # Внутрирайонные дороги
+    'unclassified': {'v_default': 40,  'k_class': 0.45},  # Местные проезды
+    'residential':  {'v_default': 40,  'k_class': 0.40},  # Жилые улицы
+    'living_street':{'v_default': 20,  'k_class': 0.50},  # Дворы / пешеходные зоны (едут ~10-15 км/ч),
+    'tertiary_link' : {'v_default': 60,  'k_class': 0.50},  # Внутрирайонные дороги
+    'secondary_link': {'v_default': 60,  'k_class': 0.60},   # Районные магистрали
+    'primary_link'  : {'v_default': 60,  'k_class': 0.70},   # Главные городские улицы (светофоры, автобусы)
+    'trunk_link'    : {'v_default': 90,  'k_class': 0.85},   # Выездные шоссе
+    'living_street' : {'v_default': 20,  'k_class': 0.50},   # Дворы / пешеходные зоны (едут ~10-15 км/ч)
+}
+
 
 
 def get_drive_graph_iduedu(territory):
@@ -26,12 +45,14 @@ def get_drive_graph_iduedu(territory):
     G_drive_nodes = graph_to_gdf(G_drive, edges=False, restore_edge_geom=True)
     return G_drive, G_drive_edges, G_drive_nodes
 
-def get_bus_graph_iduedu(territory):
+def get_bus_graph_iduedu(territory, max_speed_kmh=90):
+    bus_registry = TransportRegistry({ "bus": TransportSpec("bus", vmax_tech_kmh=max_speed_kmh, accel_dist_m=700, brake_dist_m=650, traffic_coef=0.7)})
     G_pt = get_public_transport_graph(territory=territory,
                                       transport_types='bus',
+                                      osm_edge_tags=['highway', 'maxspeed', 'reg', 'name', 'lanes', 'ref'],
+                                      transport_registry=bus_registry,
                                       clip_by_territory=True
                                       )
-    
     G_pt_edges = graph_to_gdf(G_pt, nodes=False, restore_edge_geom=True)
     G_pt_nodes = graph_to_gdf(G_pt, edges=False, restore_edge_geom=True)
     return G_pt, G_pt_edges, G_pt_nodes

@@ -103,9 +103,22 @@ def preprocess(blocks : gpd.GeoDataFrame, modalities : list[Modality]) :
 
     return result, simplified_graph_largest
 
+# def get_boundary_gdf(polygons_gdf):
+#     union = polygons_gdf.geometry.union_all()
+#     boundary = Polygon(union.exterior)
+#     boundary_gdf = gpd.GeoDataFrame(geometry=[boundary], crs=polygons_gdf.crs)
+#     return boundary_gdf
+
 def get_boundary_gdf(polygons_gdf):
     union = polygons_gdf.geometry.union_all()
-    boundary = Polygon(union.exterior)
-    boundary_gdf = gpd.GeoDataFrame(geometry=[boundary], crs=polygons_gdf.crs)
+    if union.geom_type == 'Polygon':
+        boundary = Polygon(union.exterior)
+    elif union.geom_type == 'MultiPolygon':
+        largest_geom = max(union.geoms, key=lambda geom: geom.area)
+        boundary = Polygon(largest_geom.exterior)
+    boundary_gdf = gpd.GeoDataFrame(
+        geometry=[boundary],
+        crs=polygons_gdf.crs
+    )
     return boundary_gdf
 

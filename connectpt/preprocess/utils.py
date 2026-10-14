@@ -1,4 +1,3 @@
-import logging
 import numpy as np
 import geopandas as gpd
 import pandas as pd
@@ -408,7 +407,7 @@ def _add_edges_block_graph(
             
             total_time += segment_time
             road_count += 1
-            road_geometries.append(road_segment)
+            road_geometries.append((road_segment, segment_time))
 
         if road_count > 0:
             weight = total_time / road_count
