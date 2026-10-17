@@ -136,9 +136,10 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget, 
         policy.update_and_freeze_feature_norms()
     policy.eval()
     data.initialize()
-    tracker = ValidationTracker(validation)
-    started = time.monotonic()
     checkpoint_dir = budget.output_dir / f"{budget.run_name}_checkpoints"
+    tracker = ValidationTracker(validation, on_best=lambda best:
+                                save_model_weights(best, checkpoint_dir / 'best.pt'))
+    started = time.monotonic()
     iterations = 0
     for iteration in range(budget.n_iterations):
         if iteration and budget.max_seconds is not None and time.monotonic() - started >= budget.max_seconds:
@@ -168,10 +169,13 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget, 
         ):
             tracker.run(policy, logger_list, iterations)
         flush(logger_list)
-    tracker.finish(policy, logger_list, iterations)
+    # Preserve completed training before the potentially expensive final evaluation.
+    save_model_weights(policy, checkpoint_dir / 'last.pt')
     snapshot = {
         "state_dict": critic.model.state_dict(),
         "values": stats.values.detach().cpu(),
         "targets": stats.targets.detach().cpu(),
     }
+    torch.save(snapshot, checkpoint_dir / 'critic_snapshot.pt')
+    tracker.finish(policy, logger_list, iterations)
     return TrainingResult(tracker.best_policy, tracker.best_cost, iterations, snapshot)

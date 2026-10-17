@@ -20,6 +20,7 @@ from .split import evaluation_indices
 
 @dataclass(frozen=True)
 class EvaluationParams:
+    batch_size: int | None
     validation_mode: str
     graph_count: int | None
     pareto_graph_count: int | None
@@ -116,7 +117,8 @@ class ConstructionValidation(Validation):
 
 class EditValidation(Validation):
     def batches(self):
-        for chunk in self.data.monitor_indices.split(self.data.batch_size):
+        batch_size = self.profile.evaluation.batch_size or self.data.batch_size
+        for chunk in self.data.monitor_indices.split(batch_size):
             graphs, seeds = self.data.module.make_batch(chunk)
             yield graphs, seeds, seeds.shape[1]
 
@@ -128,23 +130,26 @@ class EditValidation(Validation):
 class ValidationTracker:
     """One validation/monitor/best sequence before, after and at training end."""
 
-    def __init__(self, validation):
+    def __init__(self, validation, *, on_best=None):
         self.validation = validation
+        self.on_best = on_best
         self.best_cost, self.best_policy = float('inf'), None
         self.last_step, self.last_cost = None, None
 
     def _best(self, policy, cost):
         if cost < self.best_cost:
             self.best_cost, self.best_policy = cost, copy.deepcopy(policy)
+            if self.on_best is not None:
+                self.on_best(self.best_policy)
 
     def run(self, policy, logger_list, step, *, freeze=False, final=False):
         self.last_cost = self.validation.run(policy, logger_list, step)
         self.last_step = step
         if freeze:
             policy.update_and_freeze_feature_norms()
+        self._best(policy, self.last_cost)
         self.validation.monitor(policy, logger_list, step,
                                 batches=self.validation.monitor_batches(), final=final)
-        self._best(policy, self.last_cost)
 
     def finish(self, policy, logger_list, step):
         if self.last_step != step:

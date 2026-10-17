@@ -9,6 +9,7 @@ the objects; a dry run stops there. Otherwise the run directory gets
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -83,9 +84,18 @@ class ExperimentRun:
         try:
             artifact = self.execute()
         except BaseException:
-            self.write_metadata("failed")
+            try:
+                self.write_metadata("failed")
+            except Exception:
+                logging.getLogger(__name__).exception('Could not persist failed run metadata')
             raise
         finally:
-            close(self.logger_list)
+            if sys.exc_info()[0] is None:
+                close(self.logger_list)
+            else:
+                try:
+                    close(self.logger_list)
+                except Exception:
+                    logging.getLogger(__name__).exception('Could not close failed run loggers')
         self.write_metadata(self.stop_reason)
         return artifact

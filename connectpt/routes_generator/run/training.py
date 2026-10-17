@@ -73,9 +73,12 @@ class TrainingRun(ExperimentRun):
         self.algorithm = {"ppo": PPO, "d3po": D3PO}[algorithm_params.name](algorithm_params, self.cost)
         self.optimizer_params = params(OptimizerParams, cfg.optimizer)
         self.evaluation = params(EvaluationParams, cfg.evaluation)
+        if self.evaluation.batch_size is not None and self.evaluation.batch_size < 1:
+            raise ValueError('evaluation.batch_size must be positive or null')
         self.batch_size = self.loop_params.batch_size_cuda if device.type == "cuda" else self.loop_params.batch_size
         self.evaluation_profile = EvaluationProfile(
-            self.evaluation, self.env_params, self.batch_size, cfg.common.symmetric_routes,self.task.env_factory
+            self.evaluation, self.env_params, self.evaluation.batch_size or self.batch_size,
+            cfg.common.symmetric_routes,self.task.env_factory
         )
         self.sampler=PreferenceSampler(sampler_params(cfg.preferences))
         self.dataset=self.task.source(self.data_input,self.sampler)
@@ -112,6 +115,8 @@ class TrainingRun(ExperimentRun):
             monitor_counts = {'validation': len(data.monitor_indices)}
         validation.update(
             graph_count=data.validation_count, mode=evaluation.validation_mode,
+            batch_size=(data.validation_batch_size if self.env_name == 'construction'
+                        else evaluation.batch_size or data.batch_size),
             action_rng="training torch RNG" if evaluation.validation_mode != "greedy" else "greedy",
             preference_weights={key: torch.as_tensor(value).cpu().tolist() for key, value in val_cost.get_weights().items()},
         )

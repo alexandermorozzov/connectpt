@@ -48,6 +48,7 @@ algorithm:
     huber: false
     value_clip: null
 evaluation:
+  batch_size: null
   validation_mode: sample
   graph_count: 64
   pareto_graph_count: ${evaluation.graph_count}

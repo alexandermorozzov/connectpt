@@ -88,7 +88,7 @@ class ConstructionDataset:
                        evaluation_indices(range(len(full_validation)), evaluation.pareto_graph_count, evaluation.seed).tolist()]
         if not len(validation) or (source != DataSourceKind.DYNAMIC and len(train) < batch_size):
             raise ValueError('training needs a full batch and nonempty validation')
-        validation_batch_size = batch_size * 4
+        validation_batch_size = evaluation.batch_size or batch_size * 4
         if evaluation.graph_count is not None:
             validation_batch_size = min(validation_batch_size, len(validation))
         counts = env_params.n_routes
