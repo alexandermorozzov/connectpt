@@ -134,7 +134,7 @@ def prepare_dataset(cfg, output, *, force=False, dry_run=False, convert_from=Non
     prepare_split(list(range(config.n_graphs)),labels,split)
     source = DynamicCityGraphDataset(**asdict(source_params))
     output = resolve_under_root(output).absolute()
-    if output.is_symlink() or output.is_junction():
+    if output.is_symlink() or getattr(output, 'is_junction', lambda: False)():
         raise ValueError('dataset output must not be a directory link')
     output = output.resolve()
     if (output == ROOT_DIR or output in ROOT_DIR.parents or output == MODEL_WEIGHTS_DIR

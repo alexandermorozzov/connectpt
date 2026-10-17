@@ -175,7 +175,7 @@ def save_dataset(dataset: Dataset, path, *, configuration, inputs, commit, force
     """Write a complete staging folder, then publish it to the explicit output."""
     dataset.validate()
     path = Path(path).absolute()
-    if path.is_symlink() or path.is_junction():
+    if path.is_symlink() or getattr(path, 'is_junction', lambda: False)():
         raise ValueError('dataset output must not be a directory link')
     path = path.resolve()
     workspace = Path.cwd().resolve()
@@ -198,7 +198,7 @@ def save_dataset(dataset: Dataset, path, *, configuration, inputs, commit, force
         (staging / DATASET_MANIFEST).write_text(json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False),encoding='utf-8')
         load_dataset(staging, kind=dataset.params.kind)
         if path.exists():
-            if path.resolve() != path or path.is_symlink() or path.is_junction():
+            if path.resolve() != path or path.is_symlink() or getattr(path, 'is_junction', lambda: False)():
                 raise ValueError('dataset output changed while preparing files')
             backup = Path(tempfile.mkdtemp(prefix=path.name + '.previous-', dir=path.parent)).resolve()
             if backup.parent != path.parent or staging.resolve().parent != path.parent:
