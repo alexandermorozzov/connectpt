@@ -28,7 +28,7 @@ import psutil
 
 
 REPO = Path(__file__).resolve().parents[1]
-SCHEMA = 1
+SCHEMA = 2
 GB = 1_000_000_000
 
 
@@ -163,6 +163,10 @@ def snapshot(root):
         (root / 'environment' / filename).write_bytes(result.stdout)
     save_json(root / 'environment/packaging-machine.json', machine_info())
     from importlib.metadata import version
+    project = source / 'pyproject.toml'
+    project.write_text(project.read_text(encoding='utf-8').replace(
+        '[tool.setuptools_scm]', '[tool.setuptools_scm]\nfallback_version = ' + json.dumps(version('connectpt'))),
+        encoding='utf-8')
     packages = ('torch', 'torch-geometric', 'numpy', 'scipy', 'pandas', 'scikit-learn', 'networkx',
                 'hydra-core', 'omegaconf', 'tensorboard', 'tqdm', 'psutil', 'matplotlib', 'geopandas')
     runtime = ['--extra-index-url https://download.pytorch.org/whl/cpu']
@@ -198,10 +202,10 @@ def worker_config(root, spec):
     cfg.train_loop.horizon = spec['horizon']
     cfg.train_loop.n_iterations = spec['updates']
     cfg.train_loop.max_seconds = None
-    cfg.train_loop.val_period = 1 if settings['smoke'] else 10
+    cfg.train_loop.val_period = settings['val_period']
     cfg.train_loop.cpu_threads = spec['threads']
     cfg.train_loop.preference_distribution = spec['sampler']
-    cfg.train_loop.resample_preferences_on_terminal = False
+    cfg.train_loop.resample_preferences_on_terminal = spec['resample']
     cfg.algorithm.gamma, cfg.algorithm.n_epochs = .95, 1
     cfg.algorithm.minibatch_size = spec['batch']
     cfg.algorithm.diversity_weight = spec['weight']
@@ -212,7 +216,7 @@ def worker_config(root, spec):
     cfg.algorithm.gradient_diagnostics_interval = 0
     cfg.evaluation.batch_size = min(32, spec['batch'])
     cfg.evaluation.graph_count = settings['validation_graphs']
-    cfg.evaluation.pareto_graph_count = settings['validation_graphs']
+    cfg.evaluation.pareto_graph_count = settings['selection_graphs']
     cfg.evaluation.test_graph_count = settings['test_graphs']
     cfg.evaluation.preference_count = settings['preference_count']
     cfg.evaluation.eu_preference_count = settings['preference_count']
@@ -230,10 +234,11 @@ def prepare_data(root):
     from connectpt.routes_generator.run.config import load_experiment
     from connectpt.routes_generator.run.dataset import prepare_dataset
     from connectpt.routes_generator.training.dataset import load_dataset, dataset_fingerprint
-    from connectpt.routes_generator.training.split import evaluation_indices
     settings = read_json(root / 'manifest.json')['settings']
     base = root / 'data/base'
-    for part, count, seed in [('pool', settings['pool_graphs'], 1701), ('test', settings['test_graphs'], 1702)]:
+    for part, count, seed in [('pool', settings['pool_graphs'], 1701),
+                              ('test', settings['test_graphs'], 1702),
+                              ('selection', settings['selection_graphs'], 1703)]:
         cfg = load_experiment('generate_construction')
         cfg.run.cpu, cfg.run.seed = True, seed
         cfg.dataset_build.n_graphs = count
@@ -242,23 +247,22 @@ def prepare_data(root):
         cfg.dataset_build.limits.max_route_len = settings['length']
         prepare_dataset(cfg, base / part)
     pool = load_dataset(base / 'pool', kind='construction')
-    validation = pool.split.validation
-    chosen = evaluation_indices(range(len(validation)), settings['validation_graphs'], 9001)
-    held = set(validation[chosen].tolist())
-    selected = [i for i in validation.tolist() if i not in held][:settings['selection_graphs']]
-    if len(selected) != settings['selection_graphs']:
-        raise ValueError('Pool held-out split is too small for disjoint validation/selection')
+    validation = pool.split.validation.tolist()
+    selection = load_dataset(base / 'selection', kind='construction')
+    test = load_dataset(base / 'test', kind='construction')
+    sources = [set(pool.params.source_ids), set(selection.params.source_ids), set(test.params.source_ids)]
+    if any(sources[i] & sources[j] for i in range(3) for j in range(i)):
+        raise ValueError('Source city leaks between pool, selection and test')
     save_json(root / 'protocols/splits.json', dict(
-        train=pool.split.train.tolist(), validation=sorted(held), selection=selected,
+        train=pool.split.train.tolist(), validation=validation, selection=list(range(len(selection.graphs))),
         train_sources=[pool.params.source_ids[i] for i in pool.split.train.tolist()],
-        validation_sources=[pool.params.source_ids[i] for i in sorted(held)],
-        selection_sources=[pool.params.source_ids[i] for i in selected]))
+        validation_sources=[pool.params.source_ids[i] for i in validation],
+        selection_sources=list(selection.params.source_ids), test_sources=list(test.params.source_ids)))
     # No route data live in a construction dataset. Only limits/fingerprint differ.
     for routes, length in {(settings['routes'], settings['length']),
-                           (max(1, settings['routes'] // 2), settings['length']),
-                           (settings['routes'], min(8, settings['length']))}:
+                           (max(1, settings['routes'] // 2), settings['length'])}:
         tag = f'r{routes}_l{length}'
-        for part in ('pool', 'test'):
+        for part in ('pool', 'test', 'selection'):
             destination = root / 'data' / tag / part
             destination.mkdir(parents=True, exist_ok=True)
             meta = read_json(base / part / 'manifest.json')
@@ -309,13 +313,27 @@ def candidate_summary(rows, preference_count, routes):
                        hv_common_rtt_reference10=metrics['hv_common_rtt_reference10'])
 
 
-def rebuild_run(root, spec):
+def common_reference_rows(rows, routes):
+    """Recost every candidate before best-of-K selection, keeping physical minutes."""
+    result = []
+    for row in rows:
+        penalty = row['penalized_0'] - row['objective_0']
+        rtt = row['objective_1'] * routes / 10
+        result.append(dict(row, objective_1=rtt, penalized_1=rtt + penalty,
+                           training_normalized_cost=row['scalar_cost'],
+                           scalar_cost=row['preference'] * row['objective_0']
+                           + (1 - row['preference']) * rtt + penalty))
+    return result
+
+
+def rebuild_run(root, spec, checkpoint_label='best'):
     """Reuse the existing evaluator's selectors, Pareto plotting and publication."""
     from scripts.evaluate_policy import select_rows, publish, write_csv, pareto_figures, digest
     import numpy as np
     settings = read_json(root / 'manifest.json')['settings']
-    out = root / 'evaluation' / spec['id'] / 'best'
+    out = root / 'evaluation' / spec['id'] / checkpoint_label
     protocol = read_json(out / 'protocol.json')
+    label = spec['id'] if checkpoint_label == 'best' else f"{spec['id']}@{protocol['updates']}"
     pools = []
     for path in sorted((out / 'candidates').glob('*.json.gz')):
         with gzip.open(path, 'rt', encoding='utf-8') as stream:
@@ -334,7 +352,8 @@ def rebuild_run(root, spec):
     if len(sampled) != expected:
         raise ValueError(f'Incomplete K pool: {spec["id"]}: {len(sampled)}/{expected}')
     k_greedy = [r for r in greedy if r['graph'] < protocol['k_graph_count']]
-    record = dict(label=spec['id'], identity=protocol['identity'], completed_alphas=len(protocol['alphas']),
+    record = dict(label=label, training_spec=dict(spec, updates=protocol['updates']),
+                  identity=protocol['identity'], completed_alphas=len(protocol['alphas']),
                   overall=[], by_alpha=[], per_city=[])
     modes = [('greedy', k_greedy)] + [(f'best_of_{k}', select_rows(k_greedy, sampled, k)) for k in protocol['ks']]
     selections = []
@@ -349,22 +368,45 @@ def rebuild_run(root, spec):
             previous = costs
         seconds = sum(p['seconds'] for p in pools if (p['mode'] == 'greedy' if k == 0 else
                                                     p['mode'] == 'sample' and p['sample'] < k))
-        record['overall'].append(dict(model=spec['id'], mode=mode, K=k,
+        record['overall'].append(dict(model=label, mode=mode, K=k,
             candidates_per_query=max(1, k), generation_evaluation_seconds=seconds, **brief))
         save_json(out / f'metrics_{mode}.json', metrics)
         for alpha in protocol['alphas']:
             subset = [r for r in rows if r['preference'] == alpha]
             _, brief_alpha = candidate_summary(subset, 1, spec['routes'])
-            record['by_alpha'].append(dict(model=spec['id'], mode=mode, alpha=alpha, **brief_alpha))
+            record['by_alpha'].append(dict(model=label, mode=mode, alpha=alpha, **brief_alpha))
         for row in rows:
             selections.append(dict(mode=mode, graph=row['graph'], alpha=row['preference'],
                                    candidate_id=row['candidate_id'], sample=row.get('selected_sample', row['sample'])))
-            record['per_city'].append(dict(model=spec['id'], mode=mode, graph=row['graph'],
+            record['per_city'].append(dict(model=label, mode=mode, graph=row['graph'],
                 alpha=row['preference'], cost=row['scalar_cost'], ATT_minutes=row['ATT'],
                 RTT_minutes=row['RTT'], feasible=row['feasible'], network_id=digest(row['network_signature'])[:16]))
     write_csv(out / 'selected.csv', selections)
     request = dict(graph_count=protocol['k_graph_count'], preference_count=len(protocol['alphas']),
                    ks=protocol['ks'], seed=protocol['seed'], test_indices=list(range(protocol['k_graph_count'])))
+    common_greedy = common_reference_rows(k_greedy, spec['routes'])
+    common_sampled = common_reference_rows(sampled, spec['routes'])
+    common_out = out / 'common_reference10'
+    common_out.mkdir(exist_ok=True)
+    common = dict(overall=[], by_alpha=[], per_city=[], selected=[])
+    for mode, rows in [('greedy', common_greedy)] + [
+            (f'best_of_{k}', select_rows(common_greedy, common_sampled, k)) for k in protocol['ks']]:
+        metrics, brief = candidate_summary(rows, len(protocol['alphas']), 10)
+        save_json(common_out / f'metrics_{mode}.json', metrics)
+        common['overall'].append(dict(model=label, mode=mode, **brief))
+        for alpha in protocol['alphas']:
+            _, brief_alpha = candidate_summary([r for r in rows if r['preference'] == alpha], 1, 10)
+            common['by_alpha'].append(dict(model=label, mode=mode, alpha=alpha, **brief_alpha))
+        for row in rows:
+            common['selected'].append(dict(mode=mode, graph=row['graph'], alpha=row['preference'],
+                candidate_id=row['candidate_id'], cost=row['scalar_cost'],
+                training_normalized_cost=row['training_normalized_cost']))
+            common['per_city'].append(dict(model=label, mode=mode, graph=row['graph'],
+                alpha=row['preference'], cost=row['scalar_cost'], ATT_minutes=row['ATT'],
+                RTT_minutes=row['RTT'], feasible=row['feasible'], network_id=digest(row['network_signature'])[:16]))
+    for name, rows in common.items():
+        write_csv(common_out / f'{name}.csv', rows)
+    record['common_reference10'] = common
     publish(out, out / 'report.md', [record], complete=True, request=request)
     report_path = out / 'report.md'
     report_path.write_text(report_path.read_text(encoding='utf-8').replace(
@@ -372,7 +414,7 @@ def rebuild_run(root, spec):
         'Best-of-K выбирает из K stochastic кандидатов; greedy сохранён отдельно.'), encoding='utf-8')
     metrics, _ = candidate_summary(greedy, len(protocol['alphas']), spec['routes'])
     save_json(out / 'greedy_all_metrics.json', metrics)
-    all_rows = [dict(model=spec['id'], mode='greedy', graph=r['graph'], alpha=r['preference'],
+    all_rows = [dict(model=label, mode='greedy', graph=r['graph'], alpha=r['preference'],
                     cost=r['scalar_cost'], ATT_minutes=r['ATT'], RTT_minutes=r['RTT'], feasible=r['feasible'],
                     network_id=digest(r['network_signature'])[:16]) for r in greedy]
     full = out / 'greedy_all'
@@ -381,7 +423,7 @@ def rebuild_run(root, spec):
     return record
 
 
-def evaluate_run(root, spec, *, selection=False, probe=False):
+def evaluate_run(root, spec, *, selection=False, probe=False, checkpoint_label='best'):
     import torch
     import numpy as np
     from omegaconf import OmegaConf
@@ -391,23 +433,26 @@ def evaluate_run(root, spec, *, selection=False, probe=False):
     from connectpt.routes_generator.policy.predict import predict
     settings = read_json(root / 'manifest.json')['settings']
     directory = root / 'runs' / spec['id']
-    out = (root / 'selection' / spec['id']) if selection else root / 'evaluation' / spec['id'] / 'best'
+    out = (root / 'selection' / spec['id']) if selection else root / 'evaluation' / spec['id'] / checkpoint_label
     cfg = OmegaConf.load(directory / 'config.yaml')
-    checkpoint = directory / 'checkpoints/best.pt'
-    cfg.paths.init_checkpoint_path = f"{spec['id']}/checkpoints/best.pt"
+    checkpoint = directory / 'checkpoints' / f'{checkpoint_label}.pt'
+    cfg.paths.init_checkpoint_path = f"{spec['id']}/checkpoints/{checkpoint_label}.pt"
     actor = TrainingRun(cfg)
     actor.setup()
     torch.set_num_threads(spec['threads'])
     actor.policy.eval()
     params = actor.data_input.params
-    raw = evaluation_graphs(params.path if selection else params.test_path, params.kind, params.limits)
-    indices = read_json(root / 'protocols/splits.json')['selection'] if selection else list(range(len(raw)))
+    raw = evaluation_graphs(root / 'data' / variant_name(spec) / 'selection' if selection else params.test_path,
+                            params.kind, params.limits)
+    splits = read_json(root / 'protocols/splits.json')
+    indices = splits['selection'] if selection else list(range(len(raw)))
+    source_ids = splits['selection_sources' if selection else 'test_sources']
     if probe:
-        indices = indices[:1]
+        indices = indices[:cfg.evaluation.batch_size]
     graphs = [actor.dataset.evaluation_pipeline.graph(raw[i]) for i in indices]
     alphas = [spec['alpha']] if spec.get('alpha') is not None else np.linspace(0, 1, settings['preference_count']).tolist()
     if probe:
-        alphas = [.5]
+        alphas = [.5] if settings['smoke'] else [0., .5, 1.]
     ks = [1] if selection or probe else settings['ks']
     k_count = min(len(graphs), settings['k_graphs'])
     inputs = dict(spec=spec, config=file_hash(directory / 'config.yaml'), checkpoint=file_hash(checkpoint),
@@ -416,6 +461,10 @@ def evaluate_run(root, spec, *, selection=False, probe=False):
                   ks=ks, k_count=k_count, seed=9001, selection=selection, probe=probe)
     fingerprint = identity(inputs)
     protocol = dict(identity=inputs, fingerprint=fingerprint, graph_count=len(graphs),
+                    split='independent selection' if selection else 'independent test',
+                    source_ids=[source_ids[i] for i in indices],
+                    checkpoint_label=checkpoint_label,
+                    updates=spec['comparison_updates'] if checkpoint_label != 'best' else spec['updates'],
                     k_graph_count=k_count, alphas=alphas, ks=ks, seed=9001)
     save_json(out / 'protocol.json', protocol)
     before = {k: v.clone() for k, v in actor.policy.state_dict().items()}
@@ -444,7 +493,7 @@ def evaluate_run(root, spec, *, selection=False, probe=False):
                             rows = prediction_rows(prediction, start, alpha, sample)
                             for offset, row in enumerate(rows):
                                 row.update(mode=mode, sampling_seed=seed,
-                                    source_id=str(getattr(graphs[start+offset], 'source_id', indices[start+offset])),
+                                    source_id=source_ids[indices[start+offset]],
                                     dataset_index=indices[start+offset],
                                     candidate_id=f'{mode}:{ai}:{sample}:{start+offset}',
                                     routes=prediction.routes[offset].cpu().tolist())
@@ -464,38 +513,104 @@ def evaluate_run(root, spec, *, selection=False, probe=False):
     if selection:
         result = dict(feasible_fraction=float(np.mean([r['feasible'] for r in all_rows])),
                       cost=float(np.mean([r['scalar_cost'] for r in all_rows])))
+        from scripts.evaluate_policy import write_csv
+        by_alpha = []
+        for alpha in alphas:
+            rows = [r for r in all_rows if r['preference'] == alpha]
+            by_alpha.append(dict(alpha=alpha, cost=float(np.mean([r['scalar_cost'] for r in rows])),
+                ATT_minutes=float(np.mean([r['ATT'] for r in rows])),
+                RTT_minutes=float(np.mean([r['RTT'] for r in rows])),
+                feasible_fraction=float(np.mean([r['feasible'] for r in rows]))))
+        write_csv(out / 'by_alpha.csv', by_alpha)
+        save_json(out / 'metrics.json', candidate_summary(all_rows, len(alphas), spec['routes'])[0])
         save_json(out / 'result.json', result)
         return result
     if not probe:
-        rebuild_run(root, spec)
+        rebuild_run(root, spec, checkpoint_label)
     return protocol
 
 
-def study_training_run(cfg):
+def study_training_run(cfg, comparison_updates=None):
     """Scope isolated validation RNG to this study; do not alter existing Run behavior."""
     from dataclasses import replace
     import torch
     from connectpt.routes_generator.run.training import TrainingRun
     from connectpt.routes_generator.training.validate import ConstructionValidation
     from connectpt.routes_generator.training.data import ConstructionDataset
+    from connectpt.routes_generator.policy.checkpoints import save_model_weights
+    from omegaconf import OmegaConf
+
+    owner = None
 
     class StudyDataset(ConstructionDataset):
         def prepare(self, cost, batch_size, evaluation, *args, **kwargs):
             with torch.random.fork_rng(devices=[]):
                 torch.random.default_generator.manual_seed(int(evaluation.seed))
-                return super().prepare(cost, batch_size, evaluation, *args, **kwargs)
+                prepared = super().prepare(cost, batch_size, evaluation, *args, **kwargs)
+            if owner is not None and getattr(owner, 'run_dir', None) is not None:
+                data, _ = prepared
+                histograms = {key: torch.zeros(11, dtype=torch.long) for key in ('transitions', 'completed')}
+                prepare_step, record_step = data.prepare_step, data.record_step
+                alpha = None
+
+                def step(env):
+                    nonlocal alpha
+                    prepare_step(env)
+                    alpha = env.state.cost_weights['demand_time_weight'].detach()
+
+                def record(reward, ended, active):
+                    for name, mask in (('transitions', active), ('completed', ended)):
+                        bins = (alpha[mask].clamp(0, 1) * 10).long()
+                        histograms[name] += torch.bincount(bins.cpu(), minlength=11)
+                    return record_step(reward, ended, active)
+
+                data.prepare_step, data.record_step = step, record
+                owner.preference_histograms = histograms
+            return prepared
 
     class StudyValidation(ConstructionValidation):
         def run(self, policy, logger_list, step):
+            started = time.monotonic()
             with torch.random.fork_rng(devices=[]):
                 torch.random.default_generator.manual_seed(int(self.profile.evaluation.seed))
-                return super().run(policy, logger_list, step)
+                cost = super().run(policy, logger_list, step)
+            directory = getattr(owner, 'run_dir', None)
+            if directory is not None:
+                append_csv(directory / 'validation.csv', dict(step=step, cost=cost,
+                    seconds=time.monotonic()-started, graphs=self.data.validation_count))
+                self.validated_cost = cost
+                if hasattr(owner, 'preference_histograms'):
+                    save_json(directory / 'preferences.json', dict(
+                        bins='[0,.1), [.1,.2), ..., [.9,1), {1}',
+                        **{k: v.tolist() for k, v in owner.preference_histograms.items()}))
+            return cost
+
+        def monitor(self, policy, logger_list, step, **kwargs):
+            super().monitor(policy, logger_list, step, **kwargs)
+            # Tracker calls monitor after freezing features and updating its best.
+            # Its untracked feature-calibration call never enters this hook.
+            if (comparison_updates is not None and step <= comparison_updates
+                    and self.validated_cost < getattr(self, 'prefix_best', math.inf)):
+                self.prefix_best = self.validated_cost
+                save_model_weights(policy, owner.best_checkpoint.with_name(f'best_at_{comparison_updates}.pt'),
+                                   OmegaConf.to_container(cfg, resolve=True))
+                save_json(owner.run_dir / 'comparison_checkpoint.json', dict(
+                    budget_updates=comparison_updates, best_step=step, best_cost=self.validated_cost))
 
     class StudyTrainingRun(TrainingRun):
         def setup(self):
+            nonlocal owner
             super().setup()
+            owner = self
             self.task = replace(self.task, validation_factory=StudyValidation)
             self.dataset = StudyDataset(**vars(self.dataset))
+            if getattr(self, 'run_dir', None) is not None:
+                digest = hashlib.sha256()
+                for key, value in self.policy.state_dict().items():
+                    digest.update(key.encode())
+                    digest.update(value.detach().cpu().contiguous().numpy().tobytes())
+                save_json(self.run_dir / 'initialization.json', dict(
+                    seed=self.run_params.seed, actor_sha256=digest.hexdigest(), init_checkpoint=None))
 
         def evaluation_protocol(self, data, val_cost):
             protocol = super().evaluation_protocol(data, val_cost)
@@ -528,11 +643,13 @@ def worker(root, job_id):
         if (directory / 'history.csv').exists():
             raise ValueError('Interrupted training is preserved; actor-only checkpoints are not an exact resume')
         save_json(directory / 'progress.json', dict(phase='training', updated_at=now()))
-        study_training_run(cfg).run()
+        study_training_run(cfg, spec.get('comparison_updates')).run()
     if spec['kind'] == 'probe':
         return
     evaluate_run(root, spec, selection=True)
     evaluate_run(root, spec)
+    if spec.get('comparison_updates') is not None:
+        evaluate_run(root, spec, checkpoint_label=f"best_at_{spec['comparison_updates']}")
     save_json(directory / 'progress.json', dict(phase='completed', updated_at=now()))
 
 
@@ -699,17 +816,22 @@ class Coordinator:
 
 
 def training_spec(job_id, settings, **changes):
-    spec = dict(id=job_id, kind='training', algorithm='d3po', weight=.01, detach=False,
+    spec = dict(id=job_id, kind='training', algorithm='d3po', weight=0., detach=False,
                 batch=settings['batches'][-1], horizon=settings['horizon'], threads=2,
                 routes=settings['routes'], length=settings['length'], sampler='sampler',
-                seed=0, alpha=None, updates=2, parent=None)
+                seed=0, alpha=None, updates=2, parent=None, resample=False)
     spec.update(changes)
     return spec
 
 
-def choose(root, specs):
+def choose(root, specs, *, prefer=None, relative_tolerance=0.):
     values = [(spec, read_json(root / 'selection' / spec['id'] / 'result.json')) for spec in specs]
     winner, result = min(values, key=lambda pair: (-pair[1]['feasible_fraction'], pair[1]['cost']))
+    if prefer is not None:
+        reference, metric = next(pair for pair in values if pair[0]['id'] == prefer)
+        if (metric['feasible_fraction'] == result['feasible_fraction']
+                and metric['cost'] - result['cost'] <= abs(metric['cost']) * relative_tolerance):
+            return reference, metric
     return winner, result
 
 
@@ -734,25 +856,32 @@ def resource_figures(root):
 
 def summary(root):
     state = read_json(root / 'manifest.json')
-    rows, models = [], []
+    rows, common_rows, models = [], [], []
     for job_id, job in state['jobs'].items():
-        result_path = root / 'evaluation' / job_id / 'best/results.json'
-        if job['status'] == 'completed' and result_path.exists():
+        if job['status'] != 'completed':
+            continue
+        for result_path in sorted((root / 'evaluation' / job_id).glob('*/results.json')):
             result = read_json(result_path)
-            models.extend(result['models'])
-            rows.extend(result['models'][0]['overall'])
+            for model in result['models']:
+                models.append(model)
+                spec = model['training_spec']
+                metadata = {k: spec[k] for k in ('algorithm', 'weight', 'sampler', 'resample', 'routes', 'updates', 'seed')}
+                rows.extend(dict(row, **metadata) for row in model['overall'])
+                common_rows.extend(dict(row, **metadata) for row in model['common_reference10']['overall'])
     from scripts.evaluate_policy import write_csv, pareto_figures
     directory = root / 'summary'
     directory.mkdir(exist_ok=True)
     if rows:
         write_csv(directory / 'metrics.csv', rows)
+        write_csv(directory / 'metrics_common_reference10.csv', common_rows)
     # Overlay only comparable tasks/specialist grids; never pool cities or seeds.
     groups = {}
     for model in models:
-        spec = state['jobs'][model['label']]['spec']
-        stage = 'screen' if spec['id'].startswith(('lambda_', 'detached_')) else 'main'
-        key = f"{variant_name(spec)}_{stage}_" + ('universal' if spec['alpha'] is None else f"alpha{spec['alpha']}")
-        groups.setdefault(key, []).extend(model['per_city'])
+        spec = model['training_spec']
+        key = f"l{spec['length']}_u{spec['updates']}_seed{spec['seed']}"
+        groups.setdefault(f'{variant_name(spec)}_{key}', []).extend(model['per_city'])
+        # Common reference cost and physical ATT/RTT allow overlays across S=5 and S=10.
+        groups.setdefault(f'common_reference10_{key}', []).extend(model['common_reference10']['per_city'])
     for key, values in groups.items():
         labels = list(dict.fromkeys(row['model'] for row in values))
         for start in range(1, max(2, len(labels)), 2):
@@ -770,11 +899,53 @@ def summary(root):
     if state.get('error'):
         text += ['', 'Причина остановки: ' + state['error']]
     text += ['', 'Отбор вариантов использует selection, не test. Pareto строится отдельно по городам.',
+             'Обычная валидация: весь validation-сплит, смесь Holliday, каждые 20 обновлений и в конце.',
+             '16 selection-городов × 11 alpha: только итоговая диагностика best и отбор настроек.',
+             'Основной метод: D3PO div=0; другие seed проверяются последними.',
+             'metrics_common_reference10.csv: общий RTT/(10D), best-of-K заново выбран из полного пула.',
              'Screening и основной бюджет различаются; один training seed не устанавливает превосходство.',
              'HV reference [3,3] зафиксирован до test; coverage сохранено в metrics JSON.',
              'best_of_K — выбранные ответы по alpha; greedy+K не смешивается с K.', '']
     (directory / 'report.md').write_text('\n'.join(text), encoding='utf-8')
     resource_figures(root)
+
+
+def campaign_jobs(settings, batch, threads, protocol=None):
+    """Two-stage screening; every training job starts from the common seed, not a parent actor."""
+    protocol = protocol or dict(sampler='sampler', resample=False)
+    def make(job_id, updates, **changes):
+        return training_spec(job_id, settings, batch=batch, threads=threads, updates=updates,
+                             **dict(protocol, **changes))
+    tournament = [make(f'protocol_{sampler}_resample{int(resample)}', settings['screen_updates'],
+                       sampler=sampler, resample=resample)
+                  for sampler in ('sampler', 'simplex') for resample in (False, True)]
+    main = [make(f'main_{algorithm}', settings['main_updates'], algorithm=algorithm,
+                 comparison_updates=settings['route_updates']) for algorithm in ('ppo', 'd3po')]
+    routes = [make(f"routes{max(1, settings['routes']//2)}_{algorithm}", settings['route_updates'], algorithm=algorithm,
+                   routes=max(1, settings['routes']//2), parent=f'main_{algorithm}')
+              for algorithm in ('ppo', 'd3po')]
+    return dict(protocol=tournament, main=main, routes=routes,
+        baseline=[make('original_ppo', settings['screen_updates'], algorithm='ppo',
+                       sampler='sampler', resample=False)],
+        diversity=[make(f'lambda_{weight}', settings['screen_updates'], weight=weight)
+                   for weight in (.01, .1)],
+        confirmation=[make(f'confirm_{algorithm}_seed1', settings['main_updates'], algorithm=algorithm,
+                           seed=1, parent=f'main_{algorithm}') for algorithm in ('ppo', 'd3po')])
+
+
+def probe_timing(root, spec, multiplier=1.):
+    history = csv_rows(root / 'runs' / spec['id'] / 'history.csv')
+    elapsed = [float(r['time/time_elapsed']) for r in history if r.get('time/time_elapsed')]
+    validation = csv_rows(root / 'runs' / spec['id'] / 'validation.csv')
+    # Probe validation is before/final only; update-to-update differences exclude it.
+    differences = [b-a for a, b in zip(elapsed, elapsed[1:])]
+    per_update = max(differences[-2:]) if differences else elapsed[-1]
+    total_validation = sum(float(r['seconds']) for r in validation)
+    resources = read_json(root / 'runs' / spec['id'] / 'worker-resources.json')
+    startup = max(0., resources['wall_seconds'] - per_update * spec['updates'] - total_validation)
+    return dict(update=per_update * multiplier,
+                validation=max(float(r['seconds']) for r in validation) * multiplier,
+                startup=startup * multiplier)
 
 
 def pipeline(controller, calibrate_only=False):
@@ -783,33 +954,34 @@ def pipeline(controller, calibrate_only=False):
     controller.group([dict(id='prepare_data', kind='data', threads=1)], 'data')
     verify_files(root, read_json(root / 'protocols/data-hashes.json'))
     cores = psutil.cpu_count(logical=False) or 1
-    profiles = []
-    for batch in settings['batches']:
-        specs = [training_spec(f'probe_b{batch}_{algorithm}', settings, kind='probe', algorithm=algorithm,
-                    weight=1. if algorithm == 'd3po' else 0., batch=batch,
-                    threads=max(1, min(4, cores // 2))) for algorithm in ('ppo', 'd3po')]
-        state['workers'] = 1
-        controller.group(specs, f'calibration_b{batch}_single')
-        profiles.append((sum(state['jobs'][s['id']]['seconds'] for s in specs) / (4 * batch * settings['horizon']), specs))
-    _, best = min(profiles, key=lambda item: item[0])
-    profile = best[-1]
-    single_seconds = sum(state['jobs'][s['id']]['seconds'] for s in best)
-    pair = [dict(spec, id=spec['id'] + '_pair') for spec in best]
-    peak = sum(state['jobs'][s['id']]['peak_memory_bytes'] for s in best)
-    if settings['workers'] == 2 and cores >= 2 and peak * 1.25 < controller.limit and psutil.virtual_memory().available > peak * 1.25 + controller.reserved:
+    batch = settings['batches'][-1]
+    probes = [training_spec(f'probe_{algorithm}', settings, kind='probe', algorithm=algorithm,
+                           updates=settings['probe_updates'], batch=batch,
+                           threads=max(1, min(4, cores//2))) for algorithm in ('ppo', 'd3po')]
+    state['workers'] = 1
+    controller.group(probes, 'calibration_single')
+    single_seconds = sum(state['jobs'][s['id']]['seconds'] for s in probes)
+    pair = [dict(spec, id=spec['id'] + '_pair') for spec in probes]
+    peak = sum(state['jobs'][s['id']]['peak_memory_bytes'] for s in probes)
+    if (settings['workers'] == 2 and cores >= 2 and peak * 1.25 < controller.limit
+            and psutil.virtual_memory().available > peak * 1.25 + controller.reserved):
         state['workers'] = 2
         controller.group(pair, 'calibration_pair')
         span = (max(datetime.fromisoformat(state['jobs'][s['id']]['finished']) for s in pair) -
                 min(datetime.fromisoformat(state['jobs'][s['id']]['started']) for s in pair)).total_seconds()
         workers = 2 if span < single_seconds else 1
-        multiplier = max(1., sum(state['jobs'][s['id']]['seconds'] for s in pair) / single_seconds)
         reason = 'Measured pair faster' if workers == 2 else 'Single worker has better aggregate throughput'
     else:
-        workers, multiplier, reason = 1, 1., 'Pair not safe under memory/core limits'
+        workers, reason = 1, 'Pair not safe under memory/core limits'
     state['workers'], state['concurrency_reason'] = workers, reason
-    # Actual inference measurement, not a guessed 100x extrapolation of training FPS.
-    evaluation_probe = dict(profile, id='probe_inference', kind='evaluate', model_run=profile['id'])
-    # Reuse a trained probe actor, without pretending it is a main model.
+    timings = {spec['algorithm']: probe_timing(root, spec) for spec in probes}
+    if workers == 2:
+        for spec in pair:
+            paired = probe_timing(root, spec)
+            for key in timings[spec['algorithm']]:
+                timings[spec['algorithm']][key] = max(timings[spec['algorithm']][key], paired[key])
+    profile = probes[-1]
+    evaluation_probe = dict(profile, id='probe_inference', kind='evaluate')
     probe_dir = root / 'runs/probe_inference'
     probe_dir.mkdir(parents=True, exist_ok=True)
     for name in ('config.yaml', 'training_result.json'):
@@ -817,110 +989,110 @@ def pipeline(controller, calibrate_only=False):
     (probe_dir / 'checkpoints').mkdir(exist_ok=True)
     shutil.copy2(root / 'runs' / profile['id'] / 'checkpoints/best.pt', probe_dir / 'checkpoints/best.pt')
     controller.group([evaluation_probe], 'calibration_inference')
-    inference = state['jobs']['probe_inference']['seconds']
-    prediction_seconds = []
+    chunks = []
     for path in (root / 'evaluation/probe_inference/best/candidates').glob('*.json.gz'):
         with gzip.open(path, 'rt', encoding='utf-8') as stream:
-            chunk = json.load(stream)
-        prediction_seconds.append(chunk['seconds'] / len(chunk['rows']))
-    train_seconds, validation_seconds = {}, {}
-    for spec in best:
-        history = csv_rows(root / 'runs' / spec['id'] / 'history.csv')
-        elapsed = [float(r['time/time_elapsed']) for r in history if r.get('time/time_elapsed')]
-        per_update = max(.001, elapsed[-1] - elapsed[-2]) if len(elapsed) >= 2 else elapsed[-1] / 2
-        train_seconds[spec['algorithm']] = per_update * multiplier
-        validation_seconds[spec['algorithm']] = max(0., state['jobs'][spec['id']]['seconds'] - 2 * per_update) / 2 * multiplier
-    # Startup time is a fixed cost, not a per-network cost. Selection also uses inference.
-    queries = settings['preference_count'] * (settings['test_graphs'] + settings['selection_graphs']
-                                             + max(settings['ks']) * settings['k_graphs'])
-    eval_seconds = max(prediction_seconds) * queries * multiplier + inference + (2 if settings['smoke'] else 60)
-    budget = dict(batch=profile['batch'], horizon=profile['horizon'], threads=profile['threads'], workers=workers,
-                  train_seconds_per_update=train_seconds, validation_seconds=validation_seconds,
-                  inference_seconds_per_network=max(prediction_seconds), evaluation_seconds_per_universal_run=eval_seconds,
-                  concurrency_reason=reason, memory_limit_bytes=controller.limit, memory_peak_bytes=controller.peak)
-    save_json(root / 'calibration/budget.json', budget)
+            chunks.append(json.load(stream))
+    seconds_per_network = {mode: max(c['seconds']/len(c['rows']) for c in chunks if c['mode'] == mode)
+                           for mode in ('greedy', 'sample')}
+    inference_startup = max(0., state['jobs']['probe_inference']['seconds'] - sum(c['seconds'] for c in chunks))
+    inference_multiplier = 1.
+    if workers == 2:
+        # Validation forward passes provide a measured bound on pair contention.
+        inference_multiplier = max(1., max(
+            probe_timing(root, p)['validation']/probe_timing(root, s)['validation']
+            for s, p in zip(probes, pair)))
+    eval_seconds = ((seconds_per_network['greedy'] * (settings['test_graphs'] + settings['selection_graphs'])
+                    + seconds_per_network['sample'] * max(settings['ks']) * settings['k_graphs'])
+                    * settings['preference_count'] * inference_multiplier
+                    + inference_startup + (2 if settings['smoke'] else 60))
+    budget = dict(batch=batch, horizon=settings['horizon'], threads=profile['threads'], workers=workers,
+        timings=timings, inference_seconds_per_network=seconds_per_network,
+        evaluation_seconds_per_universal_run=eval_seconds, inference_pair_multiplier=inference_multiplier,
+        concurrency_reason=reason, memory_limit_bytes=controller.limit, memory_peak_bytes=controller.peak,
+        validation_graphs=len(read_json(root / 'protocols/splits.json')['validation']),
+        screen_updates=settings['screen_updates'], main_updates=settings['main_updates'],
+        route_updates=settings['route_updates'], late_training_margin=settings['late_training_margin'],
+        selection_graphs=settings['selection_graphs'], validation_period=settings['val_period'])
     state['calibration'] = budget
+    state['budget'] = settings['main_updates'] * batch * settings['horizon']
+    def estimate(specs):
+        loads = [0.] * workers
+        for spec in specs:
+            if state['jobs'].get(spec['id'], {}).get('status') == 'completed':
+                continue
+            timing = timings[spec['algorithm']]
+            duration = (timing['startup'] + timing['update'] * spec['updates']
+                        * settings['late_training_margin'] * (1.5 if spec['weight'] else 1.)
+                        + timing['validation'] * (math.ceil(spec['updates']/settings['val_period']) + 1)
+                        + eval_seconds * (2 if spec.get('comparison_updates') is not None else 1))
+            loads[loads.index(min(loads))] += duration
+        return max(loads) * state.get('forecast_factor', 1.)
+    def plan_record(jobs):
+        return [dict(stage=stage, required=stage in ('protocol', 'main', 'routes', 'baseline'),
+                     jobs=specs, forecast_hours=estimate(specs)/3600)
+                for stage, specs in jobs.items()]
+    jobs = campaign_jobs(settings, batch, profile['threads'])
+    required = sum(estimate(jobs[stage]) for stage in ('protocol', 'main', 'routes', 'baseline')) * 1.3
+    budget.update(plan=plan_record(jobs), required_hours_with_margin=required/3600,
+                  remaining_hours=controller.remaining()/3600,
+                  decision='fits' if required < controller.remaining() else 'minimum_does_not_fit')
+    save_json(root / 'calibration/budget.json', budget)
+    save_json(root / 'protocols/planned-jobs.json', budget['plan'])
+    controller.save()
     if calibrate_only:
         state['status'] = 'calibrated'
         controller.save()
         return
-    batch, horizon = profile['batch'], profile['horizon']
-    screen_n = 2 * batch * horizon if settings['smoke'] else 307200
-    candidates = [2 * batch * horizon] if settings['smoke'] else [3072000, 1536000, 768000]
-    def estimate(specs):
-        loads = [0.] * workers
-        for s in specs:
-            if state['jobs'].get(s['id'], {}).get('status') == 'completed':
-                continue
-            duration = (train_seconds[s['algorithm']] * s['updates'] * (s['batch'] * s['horizon']) / (batch * horizon)
-                        + validation_seconds[s['algorithm']] * (math.ceil(s['updates'] / (1 if settings['smoke'] else 10)) + 1)
-                        + eval_seconds)
-            loads[loads.index(min(loads))] += duration
-        return max(loads) * state.get('forecast_factor', 1.)
-    def make(job_id, transitions, **changes):
-        spec = training_spec(job_id, settings, batch=batch, horizon=horizon, threads=profile['threads'], **changes)
-        per = spec['batch'] * spec['horizon']
-        if transitions % per:
-            raise ValueError('Budget must divide batch*horizon exactly')
-        spec['updates'] = transitions // per
-        return spec
-    sweep = [make(f'lambda_{str(weight).replace(".", "p")}', screen_n, weight=weight) for weight in (0., .01, .1, 1.)]
-    sweep.append(make('detached_control', screen_n, weight=1., detach=True))
-    selected_n = None
-    budget['forecasts'] = []
-    for transitions in [state['budget']] if state.get('budget') else candidates:
-        minimal = [make('main_ppo', transitions, algorithm='ppo', weight=0.), make('main_d3po', transitions)]
-        required = (estimate(sweep) + estimate(minimal)) * 1.3
-        budget['forecasts'].append(dict(transitions=transitions, required_hours_with_margin=required/3600,
-                                       remaining_hours=controller.remaining()/3600))
-        if required < controller.remaining():
-            selected_n = transitions
-            break
-    if selected_n is None:
-        budget['decision'] = 'minimum_does_not_fit'
+    if required >= controller.remaining():
+        raise RuntimeError('Minimum study (75-update tournament, 200-update main, matched 100-update routes, '
+                           'full validation and per-run K100) does not fit; see calibration/budget.json')
+    controller.group(jobs['protocol'], 'protocol_tournament', eta=estimate(jobs['protocol']))
+    winner, metric = choose(root, jobs['protocol'], prefer=jobs['protocol'][0]['id'],
+                            relative_tolerance=settings['selection_tolerance'])
+    settings_protocol = {k: winner[k] for k in ('sampler', 'resample')}
+    state['choices']['protocol'] = dict(parent=winner['id'], **settings_protocol, selection=metric,
+        relative_cost_tolerance=settings['selection_tolerance'])
+    jobs = campaign_jobs(settings, batch, profile['threads'], settings_protocol)
+    if settings_protocol == dict(sampler='sampler', resample=False):
+        jobs['baseline'] = []
+    budget['plan'] = plan_record(jobs)
+    save_json(root / 'protocols/planned-jobs.json', budget['plan'])
+    # Reserve all remaining mandatory work before admitting a long training group.
+    core = [('main', jobs['main']), ('routes', jobs['routes']), ('baseline', jobs['baseline'])]
+    for index, (stage, specs) in enumerate(core):
+        remaining_core = sum(estimate(group) for _, group in core[index:]) * 1.3
+        budget.update(remaining_core_hours_with_margin=remaining_core/3600,
+                      remaining_hours=controller.remaining()/3600)
+        if remaining_core > controller.remaining():
+            budget['decision'] = 'remaining_core_does_not_fit'
         save_json(root / 'calibration/budget.json', budget)
-        raise RuntimeError(f'Minimum required study including per-run K100 exceeds remaining {controller.remaining()/3600:.2f} h; see calibration/budget.json')
-    state['budget'] = selected_n
-    budget.update(transitions_per_main_run=selected_n, transitions_per_screen=screen_n)
-    save_json(root / 'calibration/budget.json', budget)
-    controller.group(sweep, 'lambda_sweep', eta=estimate(sweep))
-    winner, metric = choose(root, sweep[:-1])
-    state['choices']['lambda'] = dict(parent=winner['id'], weight=winner['weight'], selection=metric)
-    main = [make('main_ppo', selected_n, algorithm='ppo', weight=0., seed=1),
-            make('main_d3po', selected_n, weight=winner['weight'], seed=1)]
-    controller.group(main, 'main', eta=estimate(main))
-    parent, metric = choose(root, main)
-    if not settings['smoke']:
-        simplex = [dict(spec, id=spec['id'] + '_simplex', sampler='simplex', parent=spec['id']) for spec in main]
-        if controller.group(simplex, 'simplex', optional=True, eta=estimate(simplex)):
-            parent, metric = choose(root, main + simplex)
-        state['choices']['universal'] = dict(parent=parent['id'], selection=metric)
-        specialists = [dict(parent, id=f'specialist_{str(alpha).replace(".", "p")}', alpha=alpha,
-                            parent=parent['id']) for alpha in (.4, .5, .6)]
-        controller.group(specialists, 'specialists', optional=True, eta=estimate(specialists))
-        if settings['extended']:
-            second = next(b for b in settings['batches'] if b != parent['batch'])
-            alternative = dict(parent, id='batch_alternative', batch=second,
-                               updates=selected_n // (second * parent['horizon']), parent=parent['id'])
-            if controller.group([alternative], 'batch', optional=True, eta=estimate([alternative])):
-                parent, metric = choose(root, [parent, alternative])
-            short = dict(parent, id='horizon_alternative', horizon=60,
-                         updates=selected_n // (parent['batch'] * 60), parent=parent['id'])
-            if controller.group([short], 'horizon', optional=True, eta=estimate([short])):
-                parent, metric = choose(root, [parent, short])
-            routes = [dict(parent, id='routes_5', routes=5, parent=parent['id']),
-                      dict(parent, id='length_8', length=8, parent=parent['id'])]
-            controller.group(routes, 'route_limits', optional=True, eta=estimate(routes))
-            # A promoted profile needs its missing algorithm control.
-            if parent['id'] not in [s['id'] for s in main + simplex]:
-                opposite = 'ppo' if parent['algorithm'] == 'd3po' else 'd3po'
-                control = dict(parent, id='promoted_control', algorithm=opposite,
-                               weight=0. if opposite == 'ppo' else winner['weight'], parent=parent['id'])
-                controller.group([control], 'promoted_control', optional=True, eta=estimate([control]))
-        if settings['confirm']:
-            confirmation = [dict(parent, id=f'confirm_{a}_seed2', algorithm=a, seed=2,
-                weight=0. if a == 'ppo' else winner['weight'], parent=parent['id']) for a in ('ppo', 'd3po')]
-            controller.group(confirmation, 'confirmation', optional=True, eta=estimate(confirmation))
+        if remaining_core > controller.remaining():
+            raise RuntimeError('Updated forecast: remaining required study does not fit; artifacts preserved')
+        controller.group(specs, stage, eta=estimate(specs))
+        if stage == 'main':
+            initial = [read_json(root / 'runs' / spec['id'] / 'initialization.json')['actor_sha256']
+                       for spec in jobs['main']]
+            if len(set(initial)) != 1:
+                raise RuntimeError('Matched PPO/D3PO actors did not start from identical weights')
+    diversity = jobs['diversity']
+    if estimate(diversity) * 1.3 <= controller.remaining():
+        controller.group(diversity, 'diversity', optional=True, eta=estimate(diversity))
+    else:
+        for spec in diversity:
+            controller.group([spec], spec['id'], optional=True, eta=estimate([spec]))
+    candidates = [winner] + [s for s in diversity if state['jobs'][s['id']]['status'] == 'completed']
+    div_winner, div_metric = choose(root, candidates, prefer=winner['id'],
+                                   relative_tolerance=settings['selection_tolerance'])
+    state['choices']['diversity'] = dict(parent=div_winner['id'], weight=div_winner['weight'],
+                                        selection=div_metric, evidence=f"{settings['screen_updates']}-update screening")
+    if div_winner['weight']:
+        promoted = dict(jobs['main'][1], id='main_d3po_diversity', weight=div_winner['weight'],
+                        parent=div_winner['id'])
+        promoted.pop('comparison_updates')
+        controller.group([promoted], 'diversity_confirmation', optional=True, eta=estimate([promoted]))
+    if settings['confirm']:
+        controller.group(jobs['confirmation'], 'confirmation_last', optional=True, eta=estimate(jobs['confirmation']))
     state['status'], state['stage'] = 'completed', 'summary'
     controller.save()
 
@@ -936,6 +1108,7 @@ Linux, Python 3.11+ (локальная проверка: Python 3.13, CPU).
   source source/.venv/bin/activate
   python -m pip install TORCH_REQUIREMENT --index-url https://download.pytorch.org/whl/cpu
   python -m pip install -r environment/runtime-requirements.txt
+  python -m pip install --no-deps -e source
   bash source/scripts/launch.sh run_study.py --out-dir "$PWD" --resume --log "$PWD/controller-console.log"
 
 Начнётся генерация данных и измерение ресурсов. Затем автоматически продолжится
@@ -944,17 +1117,28 @@ Linux, Python 3.11+ (локальная проверка: Python 3.13, CPU).
 35 часов отсчитываются с первого запуска, а не с упаковки/копирования.
 Предел 50 GB относится к сумме процессов; одновременно не более двух workers.
 Монитор памяти опрашивается раз в 5 секунд; это не ограничение cgroup ОС.
+Новая серия: D3PO div=0, четыре протокола по 75 обновлений, основная пара по 200,
+5/10 маршрутов на общем бюджете 100; ненулевые lambda далее, другие seed последними.
+Валидация: весь validation-сплит, каждые 20 обновлений и в конце, best по смеси Holliday.
+Отдельные 16 городов x 11 alpha проверяются только в конце по best checkpoint.
+Длинные прогоны начинаются с нуля. Минимальное ядро не сокращается автоматически.
 
 Смотреть:
   watch -n 5 cat status.txt
   tail -f controller.log
   calibration/budget.json       — оценка времени и выбранная параллельность
+  protocols/planned-jobs.json   — обязательные и условные задания с оценкой времени
   resources.csv                — память, число workers/процессов, время
   figures/resources.png        — график ресурсов после завершения
   summary/report.md            — список выполненных и пропущенных экспериментов
   summary/metrics.csv          — сводная таблица метрик
+  summary/metrics_common_reference10.csv — сравнение по общему RTT/(10D)
+  selection/<run>/by_alpha.csv — итоговая проверка 16 x 11 и отбор настроек
   evaluation/<run>/best/        — Pareto, метрики, все кандидаты и выбранные ответы
   runs/<run>/checkpoints/       — best.pt и last.pt
+  evaluation/<run>/best_at_100/ — основной прогон при бюджете 100 для сравнения маршрутов
+  runs/<run>/validation.csv     — время и cost полной валидации
+  runs/<run>/preferences.json  — распределение alpha по переходам и завершённым эпизодам
   runs/<run>/console.log.out    — вывод worker; Windows: ошибки в .err
 
 Скопировать всю папку обратно. Графики из сохранённых кандидатов без инференса:
@@ -976,8 +1160,9 @@ def main(argv=None):
     parser.add_argument('--workers', type=int, choices=[1, 2], default=2)
     parser.add_argument('--calibrate-only', action='store_true')
     parser.add_argument('--prepare-only', action='store_true', help='Export the portable folder without generating data or starting its clock')
-    parser.add_argument('--extended', action='store_true', help='Try batch/horizon/route branches when the budget permits')
-    parser.add_argument('--confirm', action='store_true', help='Try a matched fresh-seed confirmation pair')
+    parser.add_argument('--extended', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--confirm', action=argparse.BooleanOptionalAction, default=True,
+                        help='Try fresh-seed confirmation last, after the planned ablations')
     parser.add_argument('--replot', action='store_true')
     parser.add_argument('--smoke', action='store_true', help='Tiny two-update integration check; not a scientific experiment')
     parser.add_argument('--resume', action='store_true')
@@ -1041,13 +1226,17 @@ def main(argv=None):
             verify_files(root, state['source_hashes'])
         else:
             settings = dict(hours=args.hours, memory_gb=args.memory_gb, workers=args.workers,
-                smoke=args.smoke, extended=args.extended, confirm=args.confirm,
+                smoke=args.smoke, confirm=args.confirm,
                 pool_graphs=32 if args.smoke else 32768, nodes=9 if args.smoke else 20,
-                routes=2 if args.smoke else 10, length=6 if args.smoke else 12,
-                validation_graphs=2 if args.smoke else 128, selection_graphs=2 if args.smoke else 32,
+                routes=2 if args.smoke else 10, length=9 if args.smoke else 12,
+                validation_graphs=None, selection_graphs=2 if args.smoke else 16,
                 test_graphs=2 if args.smoke else 64, k_graphs=1 if args.smoke else 16,
                 preference_count=3 if args.smoke else 11, ks=[1, 3] if args.smoke else [1, 10, 100],
-                batches=[2, 4] if args.smoke else [64, 128], horizon=4 if args.smoke else 120,
+                batches=[2] if args.smoke else [128], horizon=4 if args.smoke else 120,
+                screen_updates=2 if args.smoke else 75, main_updates=2 if args.smoke else 200,
+                route_updates=2 if args.smoke else 100, probe_updates=2 if args.smoke else 4,
+                val_period=1 if args.smoke else 20, late_training_margin=1. if args.smoke else 1.25,
+                selection_tolerance=.005,
                 poll_seconds=1 if args.smoke else 5)
             state = dict(schema=SCHEMA, created=now(), settings=settings, jobs={}, choices={},
                          source_hashes=snapshot(root), status='preparing', workers=1, peak_memory_bytes=0)
@@ -1057,7 +1246,8 @@ def main(argv=None):
             sys.path.insert(0, str(root / 'source'))
             for job in state['jobs'].values():
                 if job['status'] == 'completed' and job['spec']['kind'] == 'training':
-                    rebuild_run(root, job['spec'])
+                    for protocol in (root / 'evaluation' / job['spec']['id']).glob('*/protocol.json'):
+                        rebuild_run(root, job['spec'], protocol.parent.name)
             summary(root)
             return
         if args.prepare_only:

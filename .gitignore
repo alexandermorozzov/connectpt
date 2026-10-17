@@ -74,3 +74,4 @@ archive/
 # Local visualization and experiment helpers
 scripts/plot_ekb_route_diff.py
 scripts/run_diversity_sweep.ps1
+studies/
