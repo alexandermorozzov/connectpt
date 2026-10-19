@@ -291,7 +291,7 @@ def pareto_figures(out, per_city, test_indices, ks, *, complete):
                         groups.setdefault(r['network_id'], []).append(r)
                     for group in groups.values():
                         r = group[0]
-                        annotation = ','.join(f"{p['alpha']:.1f}" for p in group)
+                        annotation = ','.join(f"{p['alpha']:g}" for p in group)
                         ax.annotate(annotation, (r['RTT_minutes'], r['ATT_minutes']),
                                     xytext=(4, 6 if label == labels[0] else -12),
                                     textcoords='offset points', fontsize=6, color=color)
@@ -455,8 +455,8 @@ def publish_preference_tests(out, report, records, ks, test_indices):
             limit = max(1., float(np.abs(gain).max()))
             ax = axes[ri, ci]
             im = ax.imshow(gain, origin='lower', cmap='RdBu', vmin=-limit, vmax=limit, aspect='auto')
-            ax.set(xticks=range(len(alphas)), xticklabels=[f'{a:.1f}' for a in alphas],
-                   yticks=range(len(alphas)), yticklabels=[f'{a:.1f}' for a in alphas],
+            ax.set(xticks=range(len(alphas)), xticklabels=[f'{a:g}' for a in alphas],
+                   yticks=range(len(alphas)), yticklabels=[f'{a:g}' for a in alphas],
                    xlabel='Requested alpha', ylabel='Generation alpha',
                    title=f"{record['label']} | {'greedy' if k == 0 else f'best-of-{k}'}")
             ax.axhline(alphas.index(min(alphas, key=lambda a: abs(a-.5))), color='black', lw=1)
@@ -570,7 +570,7 @@ def publish(out, report_path, records, *, complete, request):
              '|---|---|---:|---:|---:|---:|']
     for r in by_alpha:
         if r['mode'] in ('greedy', f"best_of_{max(request['ks'])}"):
-            text.append(f"| {r['model']} | {r['mode']} | {r['alpha']:.1f} | {r['cost']:.5f} | {r['ATT_minutes']:.2f} | {r['RTT_minutes']:.2f} |")
+            text.append(f"| {r['model']} | {r['mode']} | {r['alpha']:g} | {r['cost']:.5f} | {r['ATT_minutes']:.2f} | {r['RTT_minutes']:.2f} |")
     image_path = os.path.relpath(out/'comparison.png', report_path.parent).replace('\\', '/')
     text += ['', f'![Сравнение стоимости и физических целей]({image_path})', '',
              'Полные таблицы: `summary.csv`, `by_alpha.csv`, `per_city.csv`, `paired_differences.csv` рядом с `results.json`.',
