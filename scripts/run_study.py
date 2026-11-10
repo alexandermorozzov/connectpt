@@ -706,7 +706,9 @@ class Coordinator:
             memory_limit_bytes=self.limit, peak_memory_bytes=self.peak, **memory,
             system_available_bytes=vm.available, system_swap_bytes=swap.used, cpu_percent=psutil.cpu_percent(),
             elapsed_hours=(time.time()-datetime.fromisoformat(self.state['started']).timestamp())/3600,
-            remaining_hours=self.remaining()/3600, jobs=rows,
+            remaining_hours=self.remaining()/3600,
+            overrun_hours=max(0., time.time()-self.deadline)/3600,
+            time_budget_enforced=False, jobs=rows,
             completed=sum(j['status'] == 'completed' for j in self.state['jobs'].values()),
             skipped=sum(j['status'] == 'skipped' for j in self.state['jobs'].values()),
             error=self.state.get('error'), budget=self.state.get('budget'),
@@ -717,7 +719,7 @@ class Coordinator:
             f"Workers: {status['workers']}/{status['worker_limit']} | OS processes: {memory['process_count']}",
             f"Study RAM ({memory['memory_measure']}): {memory['memory_bytes']/GB:.2f} / {self.limit/GB:.2f} GB | peak {self.peak/GB:.2f} GB",
             f"System available: {vm.available/GB:.2f} GB | swap {swap.used/GB:.2f} GB | CPU {status['cpu_percent']:.0f}%",
-            f"Elapsed: {status['elapsed_hours']:.2f} h | remaining: {status['remaining_hours']:.2f} h | stage ETA: {status['stage_eta_hours']} h",
+            f"Elapsed: {status['elapsed_hours']:.2f} h | target remaining: {status['remaining_hours']:.2f} h | overrun: {status['overrun_hours']:.2f} h | stage ETA: {status['stage_eta_hours']} h",
             f"Completed: {status['completed']} | skipped: {status['skipped']}",
             f"Budget: {status['budget']} | {status['concurrency_reason'] or ''}"]
         for row in rows:
@@ -733,7 +735,7 @@ class Coordinator:
             'system_swap_bytes', 'cpu_percent', 'elapsed_hours', 'remaining_hours')})
         return memory['memory_bytes'] <= self.limit and vm.available >= self.reserved
 
-    def group(self, specs, stage, *, optional=False, eta=0.):
+    def group(self, specs, stage, *, eta=0.):
         self.stage_deadline = time.time() + eta
         self.state['stage'] = stage
         self.state['status'] = 'running'
@@ -753,20 +755,15 @@ class Coordinator:
         report_reserve = self.state['settings'].get('summary_reserve_seconds', 0.)
         protected_eta = eta * self.state['settings'].get('admission_margin', 1.3) + report_reserve
         if protected_eta > self.remaining():
-            if not optional:
-                raise RuntimeError(f'Required group {stage} does not fit: forecast with reserves {protected_eta/3600:.2f} h, remaining {self.remaining()/3600:.2f} h')
-            for spec in pending:
-                self.state['jobs'][spec['id']].update(status='skipped', reason='Insufficient time including per-run K100 and final report')
-            self.save()
-            return False
+            self.log.warning('Stage %s does not fit the forecast: %.2f h with reserves, '
+                             '%.2f h remaining; continuing; time budget is advisory',
+                             stage, protected_eta/3600, self.remaining()/3600)
         self.log.info('Stage %s: %d jobs, max %d worker(s)', stage, len(pending), self.state['workers'])
         try:
             while pending or self.active:
                 safe = self.sample()
                 if not safe and self.active:
                     raise RuntimeError('Memory guard: study limit exceeded or insufficient system headroom')
-                if self.remaining() <= report_reserve:
-                    raise RuntimeError('Study wall-clock budget exhausted; preserving the final report reserve')
                 while pending and len(self.active) < self.state['workers'] and safe:
                     spec = pending.pop(0)
                     directory = self.root / 'runs' / spec['id']
@@ -900,7 +897,7 @@ def summary(root):
             count = max(r['graph'] for r in subset) + 1
             pareto_figures(out, subset, list(range(count)), state['settings']['ks'], complete=True)
     text = ['# Исследование PPO/D3PO', '', f"Статус: {state['status']}",
-            f"Память: не более {state['settings']['memory_gb']} GB; срок: {state['settings']['hours']} ч.",
+            f"Память: не более {state['settings']['memory_gb']} GB; ориентир времени: {state['settings']['hours']} ч, без автоостановки.",
             '', 'Текущее состояние: ../status.txt; история ресурсов: ../resources.csv.', '',
             '| Задание | Статус | Время, с | Причина пропуска |', '|---|---|---:|---|']
     for job_id, job in state['jobs'].items():
@@ -1263,7 +1260,8 @@ def pipeline(controller, calibrate_only=False):
         batch=batch, horizon=settings['horizon'], threads=threads, workers=workers,
         validation_graphs=forecast.validation_count, validation_period=settings['val_period'],
         memory_limit_bytes=controller.limit, late_training_margin=settings['late_training_margin'],
-        admission_margin=margin, summary_reserve_seconds=report_reserve, full_recalibration=False)
+        admission_margin=margin, summary_reserve_seconds=report_reserve,
+        time_budget_enforced=False, full_recalibration=False)
     state['calibration'] = budget
     def record(jobs, decision, required):
         budget.update(plan=forecast_plan(forecast, jobs), decision=decision, remaining_hours=controller.remaining()/3600,
@@ -1283,8 +1281,10 @@ def pipeline(controller, calibrate_only=False):
         controller.save()
         return
     if required >= controller.remaining():
-        raise RuntimeError('Minimum study (75-update tournament, 200-update main, matched 100-update routes, '
-                           'full validation and per-run K100) does not fit; see calibration/budget.json')
+        logging.getLogger('study').warning(
+            'Minimum study does not fit the forecast: %.2f h with reserves, %.2f h remaining; '
+            'continuing; time budget is advisory; see calibration/budget.json',
+            required/3600, controller.remaining()/3600)
     controller.group(jobs['protocol'], 'protocol_tournament', eta=estimate(jobs['protocol']))
     forecast.update()
     winner, metric = choose(root, jobs['protocol'], prefer=jobs['protocol'][0]['id'],
@@ -1301,7 +1301,10 @@ def pipeline(controller, calibrate_only=False):
         remaining_core = sum(estimate(group) for _, group in core[index:]) * margin + report_reserve
         record(jobs, 'fits' if remaining_core <= controller.remaining() else 'remaining_core_does_not_fit', remaining_core)
         if remaining_core > controller.remaining():
-            raise RuntimeError('Updated forecast: remaining required study does not fit; artifacts preserved')
+            logging.getLogger('study').warning(
+                'Updated forecast: remaining required study does not fit before %s: '
+                '%.2f h with reserves, %.2f h remaining; continuing; time budget is advisory',
+                stage, remaining_core/3600, controller.remaining()/3600)
         controller.group(specs, stage, eta=estimate(specs))
         if stage == 'main':
             initial = [read_json(root / 'runs' / spec['id'] / 'initialization.json')['actor_sha256']
@@ -1310,11 +1313,7 @@ def pipeline(controller, calibrate_only=False):
                 raise RuntimeError('Matched PPO/D3PO actors did not start from identical weights')
     forecast.update()
     diversity = jobs['diversity']
-    if estimate(diversity) * margin + report_reserve <= controller.remaining():
-        controller.group(diversity, 'diversity', optional=True, eta=estimate(diversity))
-    else:
-        for spec in diversity:
-            controller.group([spec], spec['id'], optional=True, eta=estimate([spec]))
+    controller.group(diversity, 'diversity', eta=estimate(diversity))
     candidates = [winner] + [s for s in diversity if state['jobs'].get(s['id'], {}).get('status') == 'completed']
     div_winner, div_metric = choose(root, candidates, prefer=winner['id'],
                                    relative_tolerance=settings['selection_tolerance'])
@@ -1325,7 +1324,7 @@ def pipeline(controller, calibrate_only=False):
                         parent=div_winner['id'])
         promoted.pop('comparison_updates')
         jobs['diversity_confirmation'] = [promoted]
-        controller.group([promoted], 'diversity_confirmation', optional=True, eta=estimate([promoted]))
+        controller.group([promoted], 'diversity_confirmation', eta=estimate([promoted]))
     # Select the specialist's algorithm using only the matched main pair's selection results.
     specialist_parent, specialist_metric = choose(root, jobs['main'], prefer=jobs['main'][0]['id'],
                                                  relative_tolerance=settings['selection_tolerance'])
@@ -1333,7 +1332,7 @@ def pipeline(controller, calibrate_only=False):
     forecast.update()
     record(jobs, 'optional_stages', 0.)
     if settings['confirm']:
-        controller.group(jobs['confirmation'], 'confirmation_last', optional=True, eta=estimate(jobs['confirmation']))
+        controller.group(jobs['confirmation'], 'confirmation_last', eta=estimate(jobs['confirmation']))
     forecast.update()
     record(jobs, 'completed', 0.)
     state['status'], state['stage'] = 'completed', 'summary'
@@ -1342,7 +1341,6 @@ def pipeline(controller, calibrate_only=False):
 
 def specialist_block(controller, forecast, parent, metric, jobs):
     root, state, settings = controller.root, controller.state, controller.state['settings']
-    report_reserve = settings.get('summary_reserve_seconds', 0.)
     base = dict(parent, batch=settings['specialist_batch'], sampler='sampler',
                 comparison_updates=None, parent=parent['id'])
     base.pop('comparison_updates')
@@ -1352,28 +1350,8 @@ def specialist_block(controller, forecast, parent, metric, jobs):
     probe = dict(base, id='probe_specialist_b16', kind='probe', alpha=1., updates=2)
     choice = state['choices'].setdefault('specialists', dict(algorithm=parent['algorithm'], parent=parent['id'],
         selection=metric, batch=settings['specialist_batch'], alphas=[0., .25, .5, .75, 1.]))
-    # Admit this one new-mode probe only if even a minimum family can plausibly fit.
-    minimum = [dict(base, id=f'specialist_{a:g}', alpha=a,
-                    updates=choice.get('updates', min(settings['specialist_update_candidates'])))
-               for a in choice['alphas']]
     probe_eta = forecast.estimate([probe])
-    lower_bound = forecast.estimate([dict(s, kind='evaluation') for s in minimum]+[control])
-    if ('updates' not in choice and state['jobs'].get(probe['id'], {}).get('status') != 'completed'
-            and (probe_eta+lower_bound)*settings['admission_margin'] + report_reserve > controller.remaining()):
-        choice.update(status='skipped', reason='No time for B16 check and five final evaluations')
-        for spec in minimum+[control]:
-            state['jobs'][spec['id']] = dict(spec=spec, status='skipped', reason=choice['reason'])
-        jobs['specialists'] = minimum+[control]
-        controller.save()
-        return
-    controller.group([probe], 'specialist_b16_check', optional=True, eta=probe_eta)
-    if state['jobs'][probe['id']]['status'] != 'completed':
-        choice.update(status='skipped', reason='B16 check does not fit')
-        for spec in minimum+[control]:
-            state['jobs'][spec['id']] = dict(spec=spec, status='skipped', reason=choice['reason'])
-        jobs['specialists'] = minimum+[control]
-        controller.save()
-        return
+    controller.group([probe], 'specialist_b16_check', eta=probe_eta)
     measured = probe_timing(root, probe)
     forecast.specialist_timing = dict(update=measured['update'],
         validation_per_graph=max(measured['validation']/forecast.validation_count,
@@ -1381,26 +1359,17 @@ def specialist_block(controller, forecast, parent, metric, jobs):
         startup=measured['startup'])
     choice['timing'] = forecast.specialist_timing
     choice['late_training_margin'] = max(settings['late_training_margin'], 1.25)
-    candidates = [choice['updates']] if 'updates' in choice else settings['specialist_update_candidates']
-    admitted = None
-    for updates in candidates:
-        specialists = [dict(base, id=f'specialist_{a:g}', alpha=a, updates=updates) for a in choice['alphas']]
-        group = specialists+[control]
-        eta = forecast.estimate(group)
-        if eta*settings['admission_margin'] + report_reserve <= controller.remaining():
-            admitted = group
-            choice.update(updates=updates, transitions=updates*base['batch']*base['horizon'],
-                          forecast_hours=eta/3600, status='admitted')
-            break
-    if admitted is None:
-        admitted = minimum+[control]
-        choice.update(status='skipped', reason='Five B16 specialists plus universal extra-alpha K100 do not fit')
-        for spec in admitted:
-            if state['jobs'].get(spec['id'], {}).get('status') != 'completed':
-                state['jobs'][spec['id']] = dict(spec=spec, status='skipped', reason=choice['reason'])
-    else:
-        completed = controller.group(admitted, 'specialists', optional=True, eta=forecast.estimate(admitted))
-        choice['status'] = 'completed' if completed else 'skipped'
+    # Preserve a previously chosen or recorded budget when resuming an older study.
+    previous = state['jobs'].get('specialist_0')
+    updates = choice.get('updates', previous['spec']['updates'] if previous
+                         else settings['specialist_update_candidates'][0])
+    admitted = [dict(base, id=f'specialist_{a:g}', alpha=a, updates=updates) for a in choice['alphas']]+[control]
+    eta = forecast.estimate(admitted)
+    choice.pop('reason', None)
+    choice.update(updates=updates, transitions=updates*base['batch']*base['horizon'],
+                  forecast_hours=eta/3600, status='admitted')
+    controller.group(admitted, 'specialists', eta=eta)
+    choice['status'] = 'completed'
     jobs['specialists'] = admitted
     controller.save()
 
@@ -1422,17 +1391,17 @@ Linux, Python 3.11+ (локальная проверка: Python 3.13, CPU).
 Начнётся генерация данных, затем турнир без полной повторной калибровки.
 Прогноз использует приложенные фактические замеры прежней серии; он уточняется
 по штатным validation/обновлениям и итоговым оценкам новых заданий.
-Серия продолжается автоматически, если обязательная часть с K100 помещается в бюджет.
-Иначе запуск остановится с объяснением в status.txt и calibration/budget.json.
-35 часов отсчитываются с первого запуска, а не с упаковки/копирования.
+Серия выполняет выбранные этапы до завершения; превышение прогноза даёт предупреждение.
+35 часов — ориентир для оценки времени, без автоостановки и пропуска заданий.
+Прошедшее время отсчитывается с первого запуска, а не с упаковки/копирования.
 Предел 50 GB относится к сумме процессов; одновременно не более двух workers.
 Монитор памяти опрашивается раз в 5 секунд; это не ограничение cgroup ОС.
 Новая серия: D3PO div=0, четыре протокола по 75 обновлений, основная пара по 200,
 5/10 маршрутов на общем бюджете 100; ненулевые lambda далее, другие seed последними.
 Перед seed-повторами: пять специалистов alpha=0/.25/.5/.75/1, batch=minibatch=16.
-Для нового B16 — одна проверка на два обновления; бюджет всем пяти одинаковый,
-выбирается из 200/150/100/75 по оставшемуся времени, с резервом на оценки.
-Если весь блок не помещается, он явно пропускается. Валидационный batch не уменьшается.
+Для нового B16 — одна проверка на два обновления; бюджет всем пяти одинаковый:
+сохранённый при прежнем запуске либо первый из настроенных вариантов 200/150/100/75.
+Прогноз времени не сокращает и не пропускает блок. Валидационный batch не уменьшается.
 Universal-контроль дополнительно получает настоящие K100 на alpha=.25/.75.
 Валидация: весь validation-сплит, каждые 20 обновлений и в конце, best по смеси Holliday.
 Отдельные 16 городов x 11 alpha проверяются только в конце по best checkpoint.
@@ -1467,7 +1436,7 @@ Universal-контроль дополнительно получает наст�
 --resume сохраняет выполненные задания и продолжает оценку по чанкам.
 Прерванное обучение не продолжает с actor-only весов: точного состояния
 оптимизатора нет. Его артефакты сохраняются, требуется новая папка серии.
-Незавершённый запуск и время простоя входят в исходный лимит 35 часов.
+Незавершённый запуск и время простоя учитываются в прошедшем времени.
 Настройки серии зафиксированы в manifest.json; исходники — в source/.
 '''.replace('TORCH_REQUIREMENT', torch_requirement), encoding='utf-8')
 
@@ -1475,7 +1444,7 @@ Universal-контроль дополнительно получает наст�
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out-dir', required=True)
-    parser.add_argument('--hours', type=float, default=35.)
+    parser.add_argument('--hours', type=float, default=35., help='Advisory time target; does not stop or skip jobs')
     parser.add_argument('--memory-gb', type=float, default=50.)
     parser.add_argument('--workers', type=int, choices=[1, 2], default=2)
     parser.add_argument('--measurements-from', help='Previous study folder; bundle its actual timings without new main-model probes')

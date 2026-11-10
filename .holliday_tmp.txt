@@ -1,0 +1,2430 @@
+=== PAGE 1 ===
+ARTICLE
+Learning Heuristics for Transit Network Design and Improvement
+with Deep Reinforcement Learning
+Andrew Hollidaya and Ahmed El-Geneidyb and Gregory Dudeka
+aMcGill University Center for Intelligent Machines, 3480 University Street, McConnell
+Engineering Building, Room 410, Montreal, Quebec, Canada, H3A 0E9
+bMcGill University School of Urban Planning, 815 rue Sherbrooke West,
+Macdonald-Harrington Building, Room 400, Montreal, Quebec, Canada, H3A 0C2
+ARTICLE HISTORY
+Compiled May 22, 2025
+ABSTRACT
+Planning a network of public transit routes is a challenging optimization problem.
+Metaheuristic algorithms search through the space of possible transit networks by
+applying heuristics that randomly alter routes in a network. The design of these
+heuristics has a major impact on the quality of the result. In this paper, we use
+deep reinforcement learning to train a graph neural net to provide heuristics for
+an evolutionary algorithm. These neural heuristics improve the algorithm’s results
+on benchmark synthetic cities with 70 nodes or more, and achieve new state-of-
+the-art results on the challenging Mumford benchmark. They also improve upon
+a simulation of the real transit network in the city of Laval, Canada, by 52% and
+25% on two key metrics, and offer cost savings of up to 19% over the city’s existing
+transit network.
+Email: andrew.holliday@mail.mcgill.ca
+arXiv:2404.05894v5  [cs.LG]  21 May 2025
+
+=== PAGE 2 ===
+KEYWORDS
+Public transit; urban planning; neural networks; reinforcement learning;
+optimization
+1.
+Introduction
+The COVID-19 pandemic caused declines in transit ridership in cities around the
+world (Liu, Miller, and Scheff 2020), putting many transit agencies under pressure
+to reduce operating costs (Kar et al. 2022). By improving a transit network’s spatial
+layout, it may be possible to reduce costs while improving service quality. But network
+redesigns can be very costly and are disruptive for riders, so it is vital that agencies
+get a design (or re-design) right the first time. Good algorithms for the transit network
+design problem (NDP) can therefore be very useful to transit agencies.
+The NDP is the problem of designing a high-quality set of transit routes for a city.
+It is an NP-hard problem, and real-world cities typically have hundreds or even thou-
+sands of transit stops, making analytical optimization approaches infeasible. The most
+successful approaches to the NDP to-date have been metaheuristic algorithms. These
+repeatedly apply heuristics that randomly change a network, and use a metaheuristic
+rule such as natural selection or metallic annealing to decide which changes to keep.
+Different heuristics used in these algorithms make different kinds of changes to
+networks, such as randomly removing a stop from a route, or randomly exchanging
+two stops on a route. What most heuristics have in common is that they make changes
+purely at random, ignoring the particulars of the network or city. In this work, we
+use deep reinforcement learning (DRL) to train neural-net-based heuristics to choose
+changes to a transit network based on information about the city and the current
+network. We integrate these with a simple evolutionary algorithm to form what we
+2
+
+=== PAGE 3 ===
+call a Neural Evolutionary Algorithm, and we show that in challenging scenarios, this
+technique outperforms existing non-neural algorithms.
+This paper expands on our prior work (Holliday and Dudek 2023, 2024) in a number
+of ways. We present new results obtained with an improved evolutionary algorithm and
+an improved graph neural net (GNN) model trained via Proximal Policy Optimiza-
+tion instead of REINFORCE. We compare these results with state-of-the-art methods
+on the widely-used Mandl (Mandl 1980) and Mumford (Mumford 2013a) benchmark
+cities, and find that on the most challenging benchmarks our method sets a new state
+of the art, improving on other methods by up to 4.8%.
+We also report on ablation studies that show the importance of different features of
+our method. As part of these studies, we consider a novel non-neural heuristic, where
+shortest paths with common end-points are joined uniformly at random instead of
+according to the GNN’s output. Interestingly, we find that in the narrow case where we
+are only concerned with minimizing passenger travel time, this heuristic outperforms
+both the baseline heuristics of Nikoli´c and Teodorovi´c (2013) and our GNN heuristic;
+in most other cases, however, our GNN heuristic performs better.
+Finally, we perform a case study, applying our neural heuristics to a simulation of
+the real-world city of Laval, Canada, showing that they can plan transit networks that
+improve on the city’s existing transit system by a wide margin by three distinct opti-
+mization criteria. These results show that neural heuristics may allow transit agencies
+to offer better service at less cost.
+3
+
+=== PAGE 4 ===
+2.
+Background and related work
+2.1.
+Deep Learning for Optimization Problems
+Deep reinforcement learning refers to the use of ‘deep’ artificial neural nets - that is,
+neural nets with many hidden layers - as reinforcement learning (RL) models. RL is
+a branch of machine learning concerned with learning from feedback that comes in
+the form of a numerical ‘reward’ that indicates how good or bad the model’s outputs
+are, so that its outputs change to maximize the reward it receives. As documented in
+Bengio, Lodi, and Prouvost (2021), there is growing interest in the application of deep
+RL to combinatorial optimization (CO) problems.
+Vinyals, Fortunato, and Jaitly (2015) proposed a deep neural net model called
+a Pointer Network, and trained it via supervised learning to solve instances of the
+travelling salesman problem (TSP). This work has been built on by Dai et al. (2017),
+Kool, Hoof, and Welling (2019), Sykora, Ren, and Urtasun (2020) and others, training
+similar neural net models with reinforcement learning to construct CO solutions. These
+have attained impressive performance on the TSP, the vehicle routing problem (VRP),
+and other CO problems. More recently, Mundhenk et al. (2021) train a recurrent
+neural net (RNN) via RL to construct a starting population of solutions to a genetic
+algorithm, the outputs of which are used to further train the RNN. Fu, Qiu, and Zha
+(2021) train a model on small TSP instances and present an algorithm that applies
+the model to much larger instances. Choo et al. (2022) present a hybrid algorithm of
+Monte Carlo Tree Search and Beam Search that draws better sample solutions for the
+TSP and Capacitated VRP (CVRP) from a neural net policy like that of Kool, Hoof,
+and Welling (2019).
+These approaches all belong to the family of ‘construction’ methods, which solve a
+4
+
+=== PAGE 5 ===
+CO problem by starting with an ‘empty’ solution and adding to it until it is complete
+- for example, in the TSP, this would mean constructing a path one node at a time,
+starting with an empty path and stopping once the path includes all nodes. The
+solutions from these neural construction methods come close to the quality of those
+from specialized algorithms such as Concorde (Applegate et al. 2001), while requiring
+much less run-time to compute (Kool, Hoof, and Welling 2019).
+By contrast with construction methods, ‘improvement’ methods start with a com-
+plete solution and repeatedly modify it, searching through the solution space for im-
+provements. In the TSP example, this might involve starting with a complete path,
+and swapping pairs of nodes in the path at each step to see if the path is shortened.
+Because this search process can continue indefinitely, improvement methods are gen-
+erally more computationally costly than construction methods, but can yield better
+results. Evolutionary algorithms belong to this category.
+Some work (Hottung and Tierney 2019; Chen and Tian 2019; da Costa et al. 2020;
+Wu et al. 2021; Ma et al. 2021), has considered training neural nets to choose the
+search moves to be made at each step of an improvement method. meanwhile Kim,
+Park et al. (2021) train one neural net to construct a set of initial solutions, and
+another to modify and improve them. And more recently, Ye et al. (2024) train a
+neural net to provide a heuristic score for choices in CO problems in the context of an
+ant colony optimization algorithm. This work has shown impressive performance on
+the TSP, VRP, and similar CO problems.
+In most of the above work, the neural net models used are graph neural nets, a type
+of neural net model that is designed to operate on graph-structured data (Bruna et al.
+2013; Kipf and Welling 2016; Defferrard, Bresson, and Vandergheynst 2016; Duvenaud
+et al. 2015). These have been applied in many other domains, including the analysis of
+5
+
+=== PAGE 6 ===
+large web graphs (Ying et al. 2018), the design of printed circuit boards (Mirhoseini
+et al. 2021), and the prediction of chemical properties of molecules (Duvenaud et al.
+2015; Gilmer et al. 2017). An overview of GNNs is provided by Battaglia et al. (2018).
+Like many CO problems, the NDP lends itself to being described as a graph problem,
+so we use GNN models here as well.
+CO problems also have in common that it is difficult to find a globally optimal
+solution but easier to gauge the quality of a given solution. As
+Bengio, Lodi, and
+Prouvost (2021) note, this makes reinforcement learning a natural fit to CO problems.
+Most of the work cited in this section uses RL methods to train neural net models.
+2.2.
+Optimization of Public Transit
+The above work all concerns a small set of classical CO problems including the TSP
+and VRP. Like the NDP, some of these are NP-hard, and all can be described as
+graph problems. But the NDP resembles these classical problems much less than they
+do each other: transit routes can interact by transferring passengers, and the space
+of solutions for a problem instance of given size is much vaster in the NDP. For
+example, take the Mumford0 benchmark city described in Table 1. With 30 nodes
+there are 30! ≈2.7 × 1032 possible TSP tours, but for 12 routes with at least 2 and
+at most 15 stops each, there are approximately 2.3 × 1011 possible routes and so
+ 2.3×1011
+12
+
+≈4.3 × 10127 possible transit networks, a factor of 1095 more.
+The difference is further shown by the fact that the state-of-the-art on classic prob-
+lems like the TSP uses analytical and mathematical programming methods (such as
+Applegate et al. (2001)), but on the NDP, such methods are not used. These differ-
+ences necessitate a special treatment. Our work deals only with NDP, as does most
+other recent work on the problem (Mumford 2013a; John, Mumford, and Lewis 2014;
+6
+
+=== PAGE 7 ===
+Kılı¸c and G¨ok 2014; Islam et al. 2019; Ahmed, Mumford, and Kheiri 2019; Lin and
+Tang 2022; H¨usselmann, van Vuuren, and Andersen 2024; Zervas et al. 2024).
+While analytical and mathematical programming methods have been successful on
+small instances (van Nes 2003; Guan, Yang, and Wirasinghe 2006), they struggle to re-
+alistically represent the problem (Guihaire and Hao 2008; Kepaptsoglou and Karlaftis
+2009). Metaheuristic approaches, as defined by S¨orensen, Sevaux, and Glover (2018),
+have thus been more widely applied, both for the NDP and the related Frequency-
+Setting Problem (Aksoy and Mutlu 2024).
+The most widely-used metaheuristics for the NDP have been genetic algorithms,
+simulated annealing, and ant-colony optimization, along with hybrids of these meth-
+ods (Guihaire and Hao 2008; Kepaptsoglou and Karlaftis 2009; Dur´an-Micco and
+Vansteenwegen 2022; Yang and Jiang 2020; H¨usselmann, van Vuuren, and Ander-
+sen 2024). Recent work has also shown other metaheuristics can be used with success,
+such as sequence-based selection hyper-heuristics (Ahmed, Mumford, and Kheiri 2019),
+beam search (Islam et al. 2019), and particle swarms (Lin and Tang 2022). Many dif-
+ferent heuristics have been applied within these metaheuristic algorithms, but most
+have in common that they select among possible neighbourhood moves uniformly at
+random.
+An exception is H¨usselmann, van Vuuren, and Andersen (2024). For two heuristics,
+the authors design a simple model of how each change the heuristic could make would
+affect the network’s quality. The heuristics then weight the probability of making dif-
+ferent changes according to this model, with higher-quality changes being more likely.
+The resulting heuristics obtain state-of-the-art results. However, their simple model
+ignores passenger trips involving transfers and the impact of the user’s preferences
+over different parts of the cost function. By contrast, the method we propose learns a
+7
+
+=== PAGE 8 ===
+model of changes’ impacts to assign probabilities to those changes, and does so based
+on a richer set of inputs.
+While neural nets have been used for predictive problems in urban mobility (Xiong
+and Schneider 1992; Rodrigue 1997; Chien, Ding, and Wei 2002; Jeong and Rilett 2004;
+C¸odur and Tortum 2009; Li et al. 2020) and for other transit optimization problems
+such as scheduling, passenger flow control, and traffic signal control (Zou, Xu, and
+Zhu 2006; Ai et al. 2022; Yan et al. 2023; Jiang et al. 2018; Wang et al. 2024), they
+have not often been applied to the NDP, and neither has RL. Two recent examples
+are Darwish, Khalil, and Badawi (2020) and Yoo, Lee, and Han (2023). Both use RL
+to design routes and a schedule for the Mandl benchmark (Mandl 1980), a very small
+city, and both obtain good results. Darwish, Khalil, and Badawi (2020) use a GNN
+approach inspired by Kool, Hoof, and Welling (2019); in our own work we experimented
+with a nearly identical approach to Darwish, Khalil, and Badawi (2020), but we found
+it did not scale beyond very small instances. Meanwhile, Yoo, Lee, and Han (2023)
+use tabular RL, an approach that is practical only for small problem sizes. Both of
+these approaches also require a new model to be trained on each problem instance.
+Our approach, by contrast, finds good solutions for NDP instances of more than 600
+nodes, and can be applied to instances unseen during model training.
+3.
+The Transit Network Design Problem
+In the transit network design problem, a city is represented as an augmented graph:
+G = (N, Es, D)
+(1)
+8
+
+=== PAGE 9 ===
+Figure 1.: An example city graph with ten numbered nodes and three routes. Link
+edges (representing streets or railways) are black, routes are in colour, and demands
+are shown by dashed red lines. The edges of the three routes form a subgraph of the
+link graph (N, Es). All node-pairs are connected by this subgraph, so the three routes
+form a valid transit network. The demand between nodes 2 and 5 and between 0 and
+6 can be satisfied directly by riding on the blue line, and the demand from 7 to 4 by
+the orange line. The demand from 3 to 9 requires passengers to ride the orange line
+from node 3 to 8, and transfer to the green line to go from 8 to 9.
+9
+
+=== PAGE 10 ===
+This consists of a set N of n nodes, representing candidate stop locations; a set Es
+of link edges (i, j, τij) representing streets or railways that connect the nodes, with
+weights τij indicating drive times on those links; and an n × n matrix D giving the
+travel demand, in number of trips, between every pair of nodes in N. Our goal is to
+find a transit network R that minimizes a cost function C : G, R →R+. R is a set
+of routes where each route r ∈R is a sequence of nodes in N. R is subject to the
+following constraints:
+(1) R must satisfy all demand, providing some path over transit between every pair
+of nodes (i, j) ∈N for which Dij > 0.
+(2) R must contain exactly S routes (|R| = S), where S is given at the start.
+(3) All routes r ∈R must obey MIN ≤|r| ≤MAX, where MIN and MAX are
+parameters set by the user.
+(4) Routes r ∈R may not contain cycles; each node i ∈N can appear in r at most
+once.
+We deal here with the symmetric NDP, meaning that all demand, links, and routes
+are the same in both directions:
+D = D⊤
+(2)
+(i, j, τij) ∈Es iff. (j, i, τij) ∈Es
+(3)
+and all routes are traversed both forwards and backwards by vehicles on them. An
+example city graph with a transit network is shown in Figure 1.
+10
+
+=== PAGE 11 ===
+3.1.
+Cost Functions
+Work on the NDP usually considers two separate cost functions: the passenger cost
+Cp, and the operating cost Co (Nikoli´c and Teodorovi´c 2013; John, Mumford, and
+Lewis 2014; Kılı¸c and G¨ok 2014; Ahmed, Mumford, and Kheiri 2019; H¨usselmann,
+van Vuuren, and Andersen 2024). We present the standard definitions of these terms
+used in this work below.
+Cp is defined as the average time of passenger trips over the network:
+Cp(G, R) =
+P
+i,j DijτRij
+P
+i,j Dij
+(4)
+where τRij is the time of the shortest transit trip from i to j given R, including a time
+penalty for each transfer between routes.
+The operating cost is the total driving time of the routes:
+Co(G, R) =
+X
+r∈R
+τr
+(5)
+Where τr is the time needed to completely traverse a route r in one direction.
+We use these standard definitions in evaluating our algorithm. However, our meta-
+heuristic detailed in subsection 4.2 requires a single cost function to operate, and our
+DRL technique requires that this function not range much beyond [−1, 1], as numeri-
+cally large values can cause problems with neural net training. So we define a unified
+cost function C that combines passenger and operating costs and a third term that
+penalizes constraint violations that may occur during training.
+In C, we use a modified passenger cost C′
+p:
+11
+
+=== PAGE 12 ===
+C′
+p(G, R) =
+P
+i,j Dij(δRijτRij + (1 −δRij)2 maxk,l Tkl)
+P
+i,j Dij
+(6)
+δRij is a delta function with value 1 if R provides a path from i to j, and 0 if not. T is an
+n × n matrix of shortest-path drive times between every node pair. Each demand that
+is unsatisfied induces a penalty of 2 maxk,l Tkl, penalizing it. If R satisfies constraint
+1, then δRij = 1 ∀i, j and C′
+p reduces to the original Cp.
+The constraint-violation cost Cc is:
+Cc(G, R) = Fun + Fs + 0.1δv
+(7)
+Fun is the fraction of node-pairs (i, j) with Dij > 0 for which R provides no path.
+Fs is a smoothly-increasing function of the extent to which the routes in R violate
+constraint 3:
+Fs =
+P
+r∈R max(0, MIN −|r|, |r| −MAX)
+S ∗MAX
+(8)
+δv is a delta function that has value 1 if Fun > 0 or Fs > 0, and has value 0 otherwise.
+We use fractional measures Fun and Fs so that Cc will tend to fall in the range
+[0, 1] regardless of the number of nodes n. However, it has the drawback that if n is
+large, and if R violates only a few constraints, Fun and Fs may become vanishingly
+small compared to Co and Cp. This could lead to some constraint violations being
+permitted. To prevent this, we include the term 0.1δv, which ensures that even one
+violation will significantly increase overall cost C(G, R), no matter the size of the city
+12
+
+=== PAGE 13 ===
+graph.
+Cc does not penalize violations of constraints 2 and 4, because the Markov Decision
+Process (MDP) detailed in subsection 3.2 and the metaheuristic detailed in subsec-
+tion 4.2 are, by design, incapable of producing networks that violate these constraints.
+The unified cost function is:
+C(G, R) = αwpC′
+p + (1 −α)woCo + βCc
+(9)
+The weight α ∈[0, 1] controls the trade-off between passenger and operating costs,
+while β is the constraint violation weight. wp and wo are re-scaling constants chosen
+so that wpC′
+p and woCo both vary roughly over the range [0, 1) for different G and R.
+The values used are:
+wp = (max
+i,j Tij)−1
+(10)
+wo = (S max
+i,j Tij)−1
+(11)
+3.2.
+Markov Decision Process Formulation
+A Markov Decision Process (MDP) is a formalism used to define problems in RL (Sut-
+ton and Barto 2018, Chapter 3). In an MDP, an agent interacts with an environment
+over a series of timesteps t. At each timestep t, the environment is in a state st, and
+the agent observes the state and takes some action at ∈At, where At is the set of
+available actions at that timestep. The environment then transitions to a new state
+st+1 according to the state transition distribution P(st+1|st, at), and the agent receives
+a reward Rt ∈R according to the reward function Rt = fR(st, at, st+1). The agent
+chooses actions according to its policy π(at|st), which is a probability distribution
+13
+
+=== PAGE 14 ===
+over At given st. In RL, the goal is to find a policy π that maximizes the return Gt,
+defined as the time-discounted sum of rewards:
+Gt =
+tend
+X
+t′=t
+γt′−tRt′
+(12)
+Where γ ∈[0, 1] is a parameter that discounts rewards farther in the future, and
+tend is the final time-step of the MDP. The sequence of states visited, actions taken,
+and rewards received from t = 1 to tend constitutes one episode of the MDP.
+We here define an MDP that constructs a transit network for the transit network
+design problem. As shown in Equation 13, the state st is composed of the set of finished
+routes Rt, and an in-progress route rt which is currently being planned:
+st = (Rt, rt)
+(13)
+The starting state s1 is (R1 = {}, r1 = []). The MDP alternates at every timestep
+between two modes: on odd-numbered timesteps, the agent selects an extension to the
+route rt that it is currently planning; on even-numbered timesteps, the agent chooses
+whether or not to stop extending rt and add it to the set of finished routes.
+On odd-numbered timesteps, the available actions are drawn from SP, the set of
+shortest paths between all pairs of nodes in G. If rt = [], then:
+At =
+
+
+
+
+
+
+
+
+
+{a | a ∈SP, |a| ≤MAX}
+if rt = []
+EXrt
+otherwise
+(14)
+where EXrt is the set of paths a ∈SP that satisfy all of the following conditions:
+14
+
+=== PAGE 15 ===
+• (i, j, τij) ∈Es, where i is the first node of a and j is the last node of rt, or
+vice-versa
+• a and rt have no nodes in common
+• |a| ≤MAX −|rt|
+Once a path at ∈At is chosen, rt+1 is formed by appending at to the beginning or end
+of rt as appropriate.
+On even-numbered timesteps, the action space depends on the number of stops in
+rt:
+At =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+{continue}
+if |rt| < MIN
+{halt}
+if |rt| = MAX or |EXrt| = 0
+{continue, halt}
+otherwise
+(15)
+And the route set Rt+1 and current route rt+1 are determined by the chosen action
+as follows:
+(Rt+1, rt+1) =
+
+
+
+
+
+
+
+
+
+(Rt ∪{rt}, [])
+if at = halt
+(Rt, rt)
+if at = continue
+(16)
+The episode ends when the S-th route is added to R: that is, if |Rt+1| = S, the
+episode ends at timestep t, and Rt+1 is the final transit network. The reward function
+is defined as the decrease in cost between each consecutive pair of timesteps:
+Rt = C′(G, Rt ∪{rt}) −C′(G, Rt+1 ∪{rt+1})
+(17)
+15
+
+=== PAGE 16 ===
+Figure 2.: A flowchart of the transit network construction process defined by our MDP.
+Blue boxes indicate points where the timestep t is incremented and the agent selects
+an action. Red nodes are the beginning and ending of the process. Green nodes are
+hard-coded decision points. Orange nodes show updates to the state s and action space
+A.
+where C′((G, R) = C(G, R) −βFs; that is, C′ is the cost function without the Fs term
+that penalizes violations of constraint 3. We remove Fs because the MDP structure
+guarantees that the resulting networks satisfy constraint 3.
+This MDP formalization imposes some helpful biases on the space of solutions. First,
+it requires any route connecting i and j to stop at all nodes along some path between
+i and j, biasing planned routes towards covering more nodes. Second, it biases routes
+towards directness by forcing them to be composed of shortest paths. While an agent
+16
+
+=== PAGE 17 ===
+may construct indirect routes by choosing paths with length 2 at every step, this is
+unlikely because in realistic link graphs, the majority of paths in SP are longer than
+two nodes. Third, the alternation between deciding to continue or halt rt and deciding
+how to extend rt means that the probability of halting does not depend on how many
+different extensions are available; so a policy learned in environments with few possible
+extensions should generalize to environments with many, and vice versa.
+4.
+Neural Heuristics
+4.1.
+Learning to Construct a Network
+To build a neural heuristic, we first train a GNN policy πθ(a|s), parameterized by θ,
+to maximize the cumulative return Gt on the construction MDP described in subsec-
+tion 3.2. By following this learned policy on the MDP for some city G, stochastically
+sampling at from π(·|st) at each timestep, we obtain a transit network R for that city.
+We refer to this learned-policy-based construction algorithm as ‘learned construction’.
+Because learned construction samples actions stochastically, we can run it repeatedly
+to generate multiple networks for a city. ‘LC-100’ denotes the procedure whereby we
+run learned construction 100 times and choose the best of the resulting networks. As
+noted in subsection 2.2, the NDP has a much wider space of possible solutions than
+problems such as the TSP or VRP. To make this tractable, we found it necessary to
+‘factorize’ the computation of the policy on odd-numbered timesteps, since At may
+be very large. Our policy net outputs a scalar score oaij for each node pair (i, j) in
+the graph and each possible extension a. From these, a score oa for each extension is
+computed by summing over oaij for all (i, j) that would become directly connected by
+17
+
+=== PAGE 18 ===
+appending path a to the current route rt:
+oa =
+X
+i∈a,j∈a,i̸=j
+oaij +
+X
+i∈rt,j∈a
+oaij
+(18)
+where oaii = 0 for all i. With this factorization, the learning objective becomes
+estimating the benefit of directly connecting nodes i and j with travel time τ(rt|a)ij.
+This is an easier objective than directly estimating the merit of adding path a to rt.
+The central component of the policy net is a graph attention net (GAT) (Brody,
+Alon, and Yahav 2021) which treats the city G as a fully-connected graph with node
+set N. Each node i has a feature vector xi, and each pair of nodes (i, j) also has a
+feature vector eij. These contain information about location, demand, existing transit
+routes, and the link edge (if one exists) between i and j.
+The GAT takes the sets of node and node-pair feature vectors, and outputs a set
+of node embeddings Y = {yi ∀i ∈N}. These are used as input to one of two ‘head’
+neural nets, NNext or NNhalt, depending on the timestep. When the timestep t is odd,
+NNext takes Y and the driving time from i to j along rt|a (the concatenation of rt
+with a), and computes the node-pair scores oij ∀i, j ∈N ×N. When t is even, NNhalt
+takes Y and other statistics of G and Rt ∪{rt} and outputs a probability of choosing
+‘halt’ vs ‘continue’. The details of these components are presented in Appendix A,
+along with the details of the node and edge feature vectors. We have released the code
+for our method and experiments to the public2.
+4.1.1.
+Training
+In our prior work (Holliday and Dudek 2023, 2024), we trained the policy net using
+the ‘REINFORCE with Baseline’ method proposed by Williams (1992), with a reward
+2Available at https://github.com/aholliday/transit_learning
+18
+
+=== PAGE 19 ===
+function that gave a reward only at the end of the MDP.:
+Rt =
+
+
+
+
+
+
+
+
+
+−C(G, Rt)
+if t = tend
+0
+if t < tend
+(19)
+This was inspired by the similar approach taken by Kool, Hoof, and Welling (2019).
+However, sparse reward functions like this one, where Rt = 0 at most timesteps, convey
+little information about the effect of each action, making learning more difficult. So
+we here use the richer reward function we describe in section 3.2.
+REINFORCE has also been superseded by more recent policy gradient learning al-
+gorithms. So in this work we train the policy net using Proximal Policy Optimization
+with Generalized Advantage Estimation, a policy gradient method proposed by Schul-
+man et al. (2017) Proximal Policy Optimization (PPO) was chosen for its relative
+simplicity and for the fact that it still achieves state-of-the-art performance on many
+problems. PPO works by running H timesteps of an MDP episode (or multiple episodes
+in parallel), and then computing an ‘advantage’ At for each timestep:
+At =
+H−1
+X
+t′=0
+γt′Rt+t′ + γHV (st+H) −V (st)
+(20)
+From this we compute the generalized advantage, ˆAt, a weighted sum of At over a
+range of values of the horizon, H. ˆAt weights the updates to the policy, such that
+actions with a positive ˆAt are made more likely, and those with a negative ˆAt are
+made less so.
+The value function V (st) is itself a small Multi-Layer Perceptron (MLP) neural net
+that is trained in parallel with the policy net. It takes the the cost weight parameter
+19
+
+=== PAGE 20 ===
+α and statistics of the city G and of the current network Rt ∪{rt} as input, and is
+trained to predict the discounted return GH
+t :
+GH
+t =
+H−1
+X
+t′=0
+γt′Rt+t′ + γHV (st+H)
+(21)
+We train the policy and value nets on a dataset of synthetic cities. At each iteration,
+a full MDP episode is run in parallel on each city in a ‘batch’ of cities from the
+dataset. We sample a different α ∼[0, 1] for each training MDP episode, while holding
+S, MIN, MAX, and the constraint weight β constant. The values to which we set
+these hyperparameters are presented in Table B1. C(G, Rt ∪{rt}), V (st) and ˆAt are
+computed for each timestep of each episode in the batch, and the policy and value
+nets are updated accordingly via PPO.
+To construct a synthetic city for the training dataset, we first generate its nodes
+and link network using one of these processes chosen at random:
+• 4-nn: Create the node set N by sampling n 2D points uniformly at random over
+a square. Then create Es by making link edges between each node i and its four
+nearest neighbours.
+• 4-grid: Place n nodes in a rectangular grid as close to square as possible. Create
+Es by making link edges between all horizontal and vertical neighbours.
+• 8-grid: The same as 4-grid, but also make link edges between diagonal neighbours.
+• Voronoi: Sample m random 2D points in a square, and compute their Voronoi
+diagram (Fortune 1995). Let N and Es be the shared vertices and edges of the
+resulting Voronoi cells. m is chosen so |N| = n.
+In each process, we sample nodes (or the m points for Voronoi) in a 30km × 30km
+20
+
+=== PAGE 21 ===
+square, and assume a fixed vehicle speed of v = 15m/s to calculate link edge weights
+τij = ||(xi, yi) −(xj, yj)||2/v. After each process except Voronoi, we delete each edge
+in Es with probability ρ: if the resulting graph {N, Es} is not connected, we discard it
+and repeat the process.
+Finally, we generate the demand matrix D by setting diagonal demands Dii = 0,
+uniformly sampling above-diagonal elements Dij in the range [60, 800], and then setting
+below-diagonal elements Dji = Dij if i < j to make D symmetric.
+We generate a dataset of 215 = 32, 768 of these synthetic cities, setting n = 20 and
+ρ = 0.3. During training, we randomly choose 90% of these cities to form the training
+set, and set aside the remaining 10% as a validation set.
+In each iteration of training, we train on a batch of cities from the training set.
+After every ten iterations, we run learned construction with the current policy net
+on every city in the validation set, and record the average cost Cval of the resulting
+networks. At the end of training, we return the parameters θ that achieved the lowest
+Cval, giving the final policy πθ. Training proceeds for 200 iterations in batches of 256
+cities, as we found that the policy stopped improving after this.
+During training, all neural net inputs are normalized so as to have zero mean and
+unit variance across the entire dataset. The scaling and shifting parameters are saved
+as part of the policy net and are applied to new data presented to πθ after training.
+4.2.
+Evolutionary Algorithm
+To test the usefulness of a neural net policy for metaheuristic algorithms, we devised
+a ‘neural heuristic’ that makes use of such a policy, and compared a simple baseline
+evolutionary algorithm to a variant of the baseline that uses this neural heuristic.
+In this section, we describe these two evolutionary algorithms, as well as our neural
+21
+
+=== PAGE 22 ===
+heuristic.
+Our baseline evolutionary algorithm is based on that of Nikoli´c and Teodorovi´c
+(2013), with several modifications that we found improved its performance. We chose
+this algorithm because of its good performance for relatively little computational cost,
+but we note that our learned policies could be used as heuristics in a wide variety
+of metaheuristic algorithms. Nikoli´c and Teodorovi´c (2013) describe their algorithm
+as a ‘bee colony optimization’ algorithm. As noted in S¨orensen (2015), ‘bee colony
+optimization’ is mathematically identical to one kind of evolutionary algorithm, an
+older and well-established class of metaheuristic algorithms. To avoid confusion and
+the spread of unnecessary terminology, we here refer to as an evolutionary algorithm
+and avoid the ‘bee colony’ terminology.
+The algorithm operates on a population of B solutions B = {Rb|1 ≤b ≤B},
+and performs alternating stages of mutation and selection. In the mutation stage,
+the algorithm applies two heuristics, type 1 and type 2, to different subsets of the
+population chosen at random. If the modified network R′
+b has lower cost than its
+‘parent’ Rb, it replaces its parent in B: Rb ←R′
+b. This is repeated E times in the stage.
+Then, in the selection stage, solutions either ‘die’ or ‘reproduce’, with probabilities
+inversely related to their cost C(G, Rb). After IT repetitions of mutation and selection,
+the algorithm returns the network R with the lowest C(G, R) from all iterations.
+The type-1 and type-2 heuristics both begin by selecting, uniformly at random, a
+route r in Rb and a terminal node i on r. The type-1 heuristic then selects a random
+node j ̸= i in N, and replaces r with SPij, the shortest path between i and j. The
+probability of choosing each node j is proportional to the amount of demand directly
+satisfied by SPij. The type-2 heuristic does one of two things: with probability pd, it
+deletes i from r; otherwise, it adds a random node j in i’s link-graph neighbourhood
+22
+
+=== PAGE 23 ===
+to r, making j the new terminal. Following Nikoli´c and Teodorovi´c (2013), we set
+pd = 0.2 in our experiments.
+The initial population of solutions is obtained by making B copies of a single initial
+solution, R0. In our prior work (Holliday and Dudek 2023), we found that using LC-
+100 to obtain R0 outperformed Nikoli´c and Teodorovi´c (2013)’s own method, so that
+is what both baseline and variant evolutionary algorithms do here. The full procedure
+is given in Algorithm 1. We refer to this algorithm as ‘EA’.
+We refer to the variant algorithm as the neural evolutionary algorithm (NEA). NEA
+differs from EA only in that the type-1 heuristic is replaced with a heuristic based on
+our neural net policy. This neural heuristic selects a route r ∈Rb at random, and
+runs learned construction with πθ starting from Rb \ r. Because |Rb \ r| = S −1, this
+produces just one new route, r′, which then replaces r in Rb. We replace the type-
+1 heuristic because its space of changes (replacing one route by a shortest path) is
+similar to that of the neural heuristic (replacing one route by a new route composed
+of shortest paths), while the type-2 heuristic’s space of changes is quite different. In
+this way we leverage πθ, which was trained as a policy for a construction method, to
+aid in an improvement method.
+5.
+Benchmark Experiments
+We first evaluated our method on the Mandl (1980) and Mumford (2013b) city
+datasets, two popular benchmarks for evaluating NDP algorithms (Mumford 2013a;
+John, Mumford, and Lewis 2014; Kılı¸c and G¨ok 2014; Ahmed, Mumford, and Kheiri
+2019). Mandl is just one small synthetic city with fifteen nodes. The Mumford dataset
+consists of four synthetic cities, labeled Mumford0 through Mumford3, and it specifies
+values of S, MIN, and MAX to use when benchmarking on each city. The values
+23
+
+=== PAGE 24 ===
+Algorithm 1 Evolutionary Algorithm
+1: Input: G = (N, Es, D), SP, C, B, IT, E
+2: Construct initial network R0 ←LC-100(G, C)
+3: Rb ←R0 ∀b ∈integers 1 through B
+4: Rbest ←R0
+5: for i = 1 to IT do
+6:
+// Mutation stage
+7:
+for j = 1 to E do
+8:
+for b = 1 to B do
+9:
+if b ≤B/2 then
+10:
+R′
+b ←type 1 mut(Rb)
+11:
+else
+12:
+R′
+b ←type 2 mut(Rb)
+13:
+if C(G, R′
+b) < C(G, Rb) then
+14:
+Rb ←R′
+b
+15:
+Randomly shuffle network indices b
+16:
+// Selection stage
+17:
+Cmax ←maxb C(G, Rb)
+18:
+Cmin ←minb C(G, Rb)
+19:
+for b = 1 to B do
+20:
+if C(G, Rb) < C(G, Rbest) then
+21:
+Rbest ←Rb
+22:
+// Select surviving networks
+23:
+Ob ←
+Cmax−Cb
+Cmax−Cmin
+24:
+sb ∼Bernoulli(1 −e−Ob)
+25:
+// Set survivor reproduction probabilities
+26:
+pb ←
+Obsb
+P
+b′ Ob′sb′
+27:
+if ∃b ∈[1, B] s.t. sb = 1 then
+28:
+// Replace non-survivors with survivors’ offspring
+29:
+for b = 1 to B do
+30:
+if sb = 0 then
+31:
+k ∼P(K), where P(K = b′) = pb′
+32:
+Rb ←Rk
+33: return Rbest
+24
+
+=== PAGE 25 ===
+Table 1.: Statistics of the Mandl and Mumford benchmark cities.
+City
+# nodes n
+# link edges |Es|
+# routes S
+MIN
+MAX
+Area (km2)
+Mandl
+15
+20
+6
+2
+8
+352.7
+Mumford0
+30
+90
+12
+2
+15
+354.2
+Mumford1
+70
+210
+15
+10
+30
+858.5
+Mumford2
+110
+385
+56
+10
+22
+1394.3
+Mumford3
+127
+425
+60
+12
+25
+1703.2
+n, S, MIN, and MAX for Mumford1, Mumford2, and Mumford3 are taken from
+three different real-world cities and their existing transit networks, giving the dataset
+a degree of realism. More details of these benchmark cities are given in Table 1.
+In all of our experiments, we set the transfer time penalty used in computing the
+average trip time Cp to 300s (five minutes). This value is widely used in other work
+that reports results on these MDP benchmarks (Mumford 2013a), so using this value
+of the transfer time penalty allows us to directly compare our own results with these
+other results.
+5.1.
+Comparison with Baseline Evolutionary Algorithm
+We ran each algorithm under consideration on all five of these synthetic cities over
+eleven different values of α, ranging from 0.0 to 1.0 in increments of 0.1. This let us
+observe how well the different methods perform over a range of possible user prefer-
+ences, including the extremes of the operator perspective (α = 0.0, caring only about
+Co) and passenger perspective (α = 1.0, caring only about Cp) as well as a range of
+intermediate perspectives. In all of these experiments, we set the constraint weight β
+to 5.0, the same value used in training the policies. We found that this was sufficient
+to prevent any of the constraints listed in section 3 from being violated by any transit
+network produced in our experiments.
+25
+
+=== PAGE 26 ===
+Because these are stochastic algorithms, for each benchmark city we ran each al-
+gorithm ten times with ten different random seeds. For algorithms that make use of
+a learned policy, we trained ten separate policies with the same set of random seeds
+(but using the same training dataset), and used each policy when running algorithms
+with the corresponding random seed. The values we report are statistics averaged over
+these ten runs.
+We first compared our neural evolutionary algorithm (NEA) with our baseline evolu-
+tionary algorithm (EA). We also compared both with the initial networks from LC-100,
+to see how much improvement each algorithm makes over the initial networks. In the
+EA and NEA runs, the same parameter settings of B = 10, IT = 400, E = 10 were
+used, following the values used in Nikoli´c and Teodorovi´c (2013).
+Table 2 displays the cost C(G, R) achieved by each algorithm on the Mandl and
+Mumford benchmarks for the operator perspective (α = 0.0), the passenger perspective
+(α = 1.0), and a balanced perspective (α = 0.5). We see that on Mandl, the smallest
+of the five cities, EA and NEA perform virtually identically. But for the three largest
+cities, NEA performs considerably better than EA for both the operator and balanced
+perspectives. On Mumford3, the largest of the five cities, NEA solutions have 13% lower
+average cost for the operator perspective and 5% lower for the balanced perspective
+than EA. For the passenger perspective, NEA’s advantage over EA is smaller, but it
+still outperforms EA on all of the Mumford cities.
+Figure 3 displays the average trip time Cp and total route time Co achieved by each
+algorithm on the three largest Mumford cities, each of which are based on a real city’s
+statistics, at eleven α values evenly spaced over the range [0, 1] in increments of 0.1.
+We observe that there is a trade-off between Cp and Co: Co increases and Cp decreases
+as α increases. We also observe that for α < 1.0, NEA pushes Co much lower than
+26
+
+=== PAGE 27 ===
+Table 2.: Cost C(α, G, R) achieved by LC-100, EA, and NEA for three different α
+values. Costs are averaged over ten random seeds; the ± value is the standard deviation
+of C(α, G, R) over the seeds.
+α
+Method
+Mandl
+Mumford0
+Mumford1
+Mumford2
+Mumford3
+LC-100
+0.697 ± 0.011
+0.847 ± 0.025
+1.747 ± 0.034
+1.315 ± 0.049
+1.333 ± 0.064
+0.0
+EA
+0.687 ± 0.016
+0.776 ± 0.026
+1.637 ± 0.065
+1.067 ± 0.032
+1.052 ± 0.041
+NEA
+0.687 ± 0.016
+0.783 ± 0.027
+1.347 ± 0.033
+0.938 ± 0.024
+0.927 ± 0.014
+LC-100
+0.558 ± 0.003
+0.916 ± 0.006
+1.272 ± 0.018
+0.989 ± 0.021
+0.984 ± 0.026
+0.5
+EA
+0.549 ± 0.008
+0.841 ± 0.019
+1.203 ± 0.026
+0.866 ± 0.023
+0.851 ± 0.025
+NEA
+0.550 ± 0.006
+0.840 ± 0.021
+1.052 ± 0.013
+0.816 ± 0.008
+0.801 ± 0.008
+LC-100
+0.328 ± 0.001
+0.721 ± 0.004
+0.573 ± 0.004
+0.495 ± 0.002
+0.476 ± 0.001
+1.0
+EA
+0.315 ± 0.001
+0.590 ± 0.005
+0.523 ± 0.003
+0.480 ± 0.001
+0.464 ± 0.002
+NEA
+0.315 ± 0.001
+0.587 ± 0.004
+0.520 ± 0.004
+0.479 ± 0.002
+0.460 ± 0.003
+LC-100 and EA. Importantly, for any network R from LC-100 or EA, there is some
+value of α for which NEA produces a network R′ that strictly dominates R, having
+equal or lower Cp and Co. Figure 3 also shows results for an additional algorithm,
+LC-40k, which we discuss in subsection 5.2.
+On Mumford1, Mumford2, and Mumford3, we observe a common pattern: EA and
+NEA perform very similarly at α = 1.0 (the leftmost point on each curve), but a
+significant performance gap forms α decreases. We also observe that LC-100 favours
+reducing Cp over Co, with its points clustered at higher Co and lower Cp than the
+points with corresponding α values on the other curves. EA and NEA each achieve
+only very small decreases in Cp on LC-100’s initial solutions at α = 1.0, but much
+larger decreases in Co at lower α.
+5.2.
+Ablation Studies
+To better understand the contribution of various components of our method, we per-
+formed three sets of ablation studies. These were conducted over the three largest
+Mumford cities (1, 2, and 3), and over the same range of α values as in subsection 5.1.
+27
+
+=== PAGE 28 ===
+Figure 3.: Trade-offs between average trip time Cp (on the x-axis) and total route
+time Co (on the y-axis), across values of α over the range [0, 1] in increments of 0.1,
+from α = 0.0 at lower-right to 1.0 at upper-left, for transit networks from LC-100,
+LC-40k, EA, and NEA. Each point shows the mean Cp and Co over 10 random seeds
+for one value of α, and bars around each point indicate one standard deviation on each
+axis. Lines linking pairs of points indicate that they represent consecutive α values.
+Lower values of Co and Cp are better, so the down-and-leftward direction in each plot
+represents improvement.
+28
+
+=== PAGE 29 ===
+Figure 4.: Trade-offs between average trip time Cp (on the x-axis) and total route
+time Co (on the y-axis) achieved by all-1 NEA, plotted along with NEA (repeated
+from Figure 3) for comparison.
+5.2.1.
+Effect of number of samples
+Over the course of the evolutionary algorithm with our parameter settings (B =
+10, IT = 400, E = 10), a total of B × IT × E = 40, 000 different transit networks are
+considered. By comparison, LC-100 only considers 100 networks. To test how much
+of NEA’s superiority to LC-100 is due to this difference, we repeated our experiments
+with the LC-40k algorithm, which is the same as LC-100 except that it samples 40, 000
+networks from the learned-construction procedure instead of 100.
+Comparing LC-100 and LC-40k in Figure 3, we see that across all three cities and
+all values of α, LC-40k improves on LC-100 only slightly by comparison with EA or
+NEA. From this we conclude that the number of networks considered is not the main
+cause of EA’s and NEA’s advantage over LC-100: the evolutionary algorithm itself
+makes most of the difference.
+29
+
+=== PAGE 30 ===
+Figure 5.: Trade-offs between average trip time Cp (on the x-axis) and total route
+time Co (on the y-axis) achieved by RC-EA, plotted along with NEA (repeated from
+Figure 3) for comparison.
+5.2.2.
+Effect of type-2 heuristic
+The type-2 heuristic is the same between EA and NEA and is not a learned function.
+To understand how important this heuristic is to NEA’s performance, we ran ‘all-1
+NEA’, a variant of NEA in which the type-2 heuristic is dropped and only the neural
+heuristic is used. The results are shown in Figure 4, along with the curve for NEA
+(reproduced from Figure 3) for comparison.
+It is clear that NEA and all-1 NEA perform very similarly in most scenarios. The
+main difference is at α = 1.0, where we see that all-1 NEA under-performs NEA,
+achieving higher Cp (though it also achieves lower Co, due to the inherent trade-off
+between Cp and Co). It appears that the type-2 heuristic’s ability to extend existing
+routes is important at α = 1.0, where making routes longer cannot make the network
+worse, but otherwise at α < 1.0 the neural heuristic does just as well on its own,
+30
+
+=== PAGE 31 ===
+without the type-2 heuristic.
+5.2.3.
+Effect of reinforcement learning
+The type-1 heuristic used in EA and the neural heuristic used in NEA differ in the kind
+of routes they create. The type-1 heuristic can only add routes that are shortest paths
+in the link graph, while the neural heuristic may compose multiple shortest paths into
+a new route. We sought to determine how much of NEA’s advantage over EA is due
+to this structural difference, versus being due to the specific policy πθ that we trained
+using RL.
+To answer this question, we ran a variant of NEA in which πθ is replaced by a purely
+random policy πrandom:
+πrandom(a|st) =
+1
+|At| ∀a ∈At
+(22)
+We call this variant of NEA the randomly-combining evolutionary algorithm (RC-EA).
+In order to fully isolate RC-EA from the effects of RL, we also used πrandom in the
+LC-100 algorithm to generate the starting network R0 for RC-EA.
+The results are shown in Figure 5, again with the same NEA curve from Figure 3
+for comparison. For values of α < 1.0, the transit networks from RC-EA are domi-
+nated by some transit network from NEA. But at the extreme of α = 1.0, RC-EA’s
+network performs better than any of NEA’s networks in terms of average trip time
+Cp, decreasing it by about twenty seconds versus NEA’s lowest-Cp network on each
+city - an improvement of about 1%.
+RC-EA’s poor performance at α < 1 makes sense: the ability to replace routes with
+composites of shortest paths biases it towards making longer routes, and unlike πθ,
+31
+
+=== PAGE 32 ===
+πrandom cannot learn to prefer halting early in such cases. This is a clear disadvantage
+at α < 1.0. The advantage of NEA comes mainly from what the policy πθ learns during
+training. It is surprising, though, that RC-EA outperforms NEA at α = 1.0. We would
+expect that the neural net policy used in NEA should be able to equal the performance
+of RC-EA by learning to choose actions uniformly at random when α = 1.0, yet here
+it fails to do so.
+Nonetheless, NEA performs better overall than RC-EA, and so we leave answering
+this question to future work, while noting that composing shortest paths randomly is
+a good heuristic for minimizing Cp at the expense of Co, if that is one’s aim.
+5.3.
+Comparisons with prior work
+We next sought to compare NEA directly against other NDP algorithms from the
+literature. It is common practice in this literature to report results on the Mandl and
+Mumford benchmarks only for the operator perspective (α = 0.0) and the passenger
+perspective (α = 1.0), so in this section we compare NEA against other algorithms
+only on these two settings of α.
+While conducting the experiments of subsection 5.1, we observed that after 400
+iterations the cost of NEA’s best-so-far network Rbest was still decreasing from one
+iteration to the next. We thus performed a further set of experiments where we ran
+NEA with IT = 4, 000 instead of IT = 400. In addition, because we observed good
+results from RC-EA at α = 1.0, we ran RC-EA with IT = 4, 000 at α = 1.0, and
+we include these results in the comparison below. On a desktop computer with a 2.4
+GHz Intel i9-12900F processor and an NVIDIA RTX 3090 graphics processing unit
+(used to accelerate our neural net computations), NEA takes about 10 hours for each
+4,000-iteration run on Mumford3, the largest environment, while RC-EA takes about
+32
+
+=== PAGE 33 ===
+6 hours.
+By comparison, on Mumford3, Mumford (2013a) report no running times; Zervas
+et al. (2024) run their algorithm for 3 hours; Kılı¸c and G¨ok (2014) do not report
+total running time, but take 8 hours just to construct the initial network; Ahmed,
+Mumford, and Kheiri (2019) run their algorithm for 10 hours; and John, Mumford,
+and Lewis (2014) and H¨usselmann, van Vuuren, and Andersen (2024) run theirs for
+more than two days. So NEA with IT = 4, 000 falls near the middle of the distribution
+of computational costs of methods we compare it with, making this a fair comparison.
+Table 3 and Table 4 present the results of these IT = 4, 000 runs on the Mandl and
+Mumford benchmarks, alongside results reported on these benchmarks in comparable
+recent work. As elsewhere, the results we report for NEA and RC-EA are averaged
+over ten runs with different random seeds; the same set of ten trained policies used in
+the experiments of subsection 5.1 and subsection 5.2 are used here in NEA. In addition
+to the average trip time Cp and total route time Co, these tables present d0, d1, d2,
+and dun, which indicate how many transfers between routes passengers had to make
+when using the transit network: di with i ∈{0, 1, 2} is the percentage of all passenger
+trips that required i transfers, while dun is the percentage of trips that require more
+than two transfers:
+dun = 100 −(d0 + d1 + d2)
+(23)
+5.3.1.
+Note on omitted work
+In these comparisons, we exclude two recent papers that report results on the Mum-
+ford benchmark: these are Islam et al. (2019), and Wens and Vansteenwegen (2024).
+Both works report passenger-perspective results that are computed in non-standard
+33
+
+=== PAGE 34 ===
+ways: Islam et al. (2019) ignore passenger trips that take more than 2 transfers when
+computing Cp, while Wens and Vansteenwegen (2024) ignore constraint 1 from the
+constraints listed in section 3, allowing the network to fail to connect some pairs of
+nodes. This means that their reported Cp values are not directly comparable with our
+own, nor with those reported in other work on the NDP. We exclude them so that
+the differences between compared results are attributable only to the algorithms that
+produced them.
+5.3.2.
+Results
+Table 3 shows the passenger perspective results. On Mandl, Mumford0, and Mumford1,
+Ahmed, Mumford, and Kheiri (2019)’s method performs best. But on Mumford3 - the
+most challenging benchmark city - our NEA algorithm outperforms all other methods
+in the literature, improving on the previous best of H¨usselmann, van Vuuren, and
+Andersen (2024)’s NSGA-II by 0.3%. Meanwhile, RC-EA performs best of all on both
+Mumford2 and Mumford3, improving on Mumford3’s previous best Cp by 1.5%, and
+setting a new state-of-the-art on these two challenging benchmarks.
+Table 4 shows the operator-perspective results. Kılı¸c and G¨ok (2014) and Zervas
+et al. (2024) do not report results for the operator perspective, so are not included here.
+Similarly to the passenger perspective, NEA here underperforms on the smallest cities
+(Mandl and Mumford0), but outperforms all methods other than Ahmed, Mumford,
+and Kheiri (2019) on Mumford1 and Mumford2, including the more recent work of
+H¨usselmann, van Vuuren, and Andersen (2024). And on the most challenging city,
+Mumford3, NEA again outperforms all other methods, improving on the previous
+state-of-the-art Co by 4.8%.
+Despite NEA and RC-EA’s relatively simple metaheuristic, these two algorithms
+34
+
+=== PAGE 35 ===
+Table 3.: Passenger-perspective results. Cp is the average passenger trip time. Co is
+the total route time. di is the percentage of trips satisfied with number of transfers i,
+while dun is the percentage of trips satisfied with 3 or more transfers. Arrows next to
+each quantity indicate which of increase or decrease is desirable. Bold values in Cp,
+d0, and dun columns are the best for that city.
+City
+Method
+Cp ↓
+Co
+d0 ↑
+d1
+d2
+dun ↓
+Mandl
+Mumford (2013a)
+10.27
+221
+95.38
+4.56
+0.06
+0
+John, Mumford, and Lewis (2014)
+10.25
+212
+-
+-
+-
+-
+Kılı¸c and G¨ok (2014)
+10.29
+216
+95.5
+4.5
+0
+0
+Ahmed, Mumford, and Kheiri (2019)
+10.18
+212
+97.17
+2.82
+0.00
+0
+H¨usselmann, van Vuuren, and Andersen (2024) DBMOSA
+10.27
+179
+95.94
+3.93
+0.13
+0
+H¨usselmann, van Vuuren, and Andersen (2024) NSGA-II
+10.19
+197
+97.36
+2.64
+0
+0
+Zervas et al. (2024)
+10.19
+-
+97.94
+2.06
+0
+0
+NEA
+10.37
+181
+93.89
+5.93
+0.18
+0
+RC-EA
+10.27
+193
+95.83
+4.16
+0.01
+0
+Mumford0
+Mumford (2013a)
+16.05
+759
+63.2
+35.82
+0.98
+0
+John, Mumford, and Lewis (2014)
+15.4
+745
+-
+-
+-
+-
+Kılı¸c and G¨ok (2014)
+14.99
+707
+69.73
+30.03
+0.24
+0
+Ahmed, Mumford, and Kheiri (2019)
+14.09
+722
+88.74
+11.25
+0
+0
+H¨usselmann, van Vuuren, and Andersen (2024) DBMOSA
+15.48
+431
+65.5
+34.5
+0
+0
+H¨usselmann, van Vuuren, and Andersen (2024) NSGA-II
+14.34
+635
+86.94
+13.06
+0
+0
+Zervas et al. (2024)
+14.76
+-
+91.0
+9.0
+0
+0
+NEA
+15.26
+639
+68.35
+31.24
+0.41
+0
+RC-EA
+14.62
+735
+77.87
+22.13
+0.00
+0
+Mumford1
+Mumford (2013a)
+24.79
+2038
+36.6
+52.42
+10.71
+0.26
+John, Mumford, and Lewis (2014)
+23.91
+1861
+-
+-
+-
+-
+Kılı¸c and G¨ok (2014)
+23.25
+1956
+45.1
+49.08
+5.76
+0.06
+Ahmed, Mumford, and Kheiri (2019)
+21.69
+1956
+65.75
+34.18
+0.07
+0
+H¨usselmann, van Vuuren, and Andersen (2024) DBMOSA
+22.31
+1359
+57.14
+42.63
+0.23
+0
+H¨usselmann, van Vuuren, and Andersen (2024) NSGA-II
+21.94
+1851
+62.11
+37.84
+0.05
+0
+Zervas et al. (2024)
+22.73
+-
+55.26
+43.58
+1.16
+0
+NEA
+22.85
+1723
+49.28
+48.94
+1.78
+0
+RC-EA
+22.29
+2032
+53.47
+45.96
+0.57
+0
+Mumford2
+Mumford (2013a)
+28.65
+5632
+30.92
+51.29
+16.36
+1.44
+John, Mumford, and Lewis (2014)
+27.02
+5461
+-
+-
+-
+-
+Kılı¸c and G¨ok (2014)
+26.82
+5027
+33.88
+57.18
+8.77
+0.17
+Ahmed, Mumford, and Kheiri (2019)
+25.19
+5257
+56.68
+43.26
+0.05
+0
+H¨usselmann, van Vuuren, and Andersen (2024) DBMOSA
+25.65
+3583
+48.07
+51.29
+0.64
+0
+H¨usselmann, van Vuuren, and Andersen (2024) NSGA-II
+25.31
+4171
+52.56
+47.33
+0.11
+0
+Zervas et al. (2024)
+25.71
+-
+57.84
+42.0
+0.16
+0
+NEA
+25.25
+4937
+52.66
+47.05
+0.29
+0
+RC-EA
+24.92
+5655
+54.12
+45.85
+0.04
+0
+Mumford3
+Mumford (2013a)
+31.44
+6665
+27.46
+50.97
+18.79
+2.81
+John, Mumford, and Lewis (2014)
+29.5
+6320
+-
+-
+-
+-
+Kılı¸c and G¨ok (2014)
+30.41
+5834
+27.56
+53.25
+17.51
+1.68
+Ahmed, Mumford, and Kheiri (2019)
+28.05
+6119
+50.41
+48.81
+0.77
+0
+H¨usselmann, van Vuuren, and Andersen (2024) DBMOSA
+28.22
+4060
+45.07
+54.37
+0.56
+0
+H¨usselmann, van Vuuren, and Andersen (2024) NSGA-II
+28.03
+5018
+48.71
+51.1
+0.19
+0
+Zervas et al. (2024)
+28.1
+-
+61.59
+38.17
+0.24
+0
+NEA
+27.96
+6127
+49.36
+50.04
+0.60
+0
+RC-EA
+27.60
+6896
+50.90
+48.99
+0.11
+0
+35
+
+=== PAGE 36 ===
+set a new state of the art on the most challenging of NDP benchmarks shows that
+on large city graphs, our neural heuristic is superior to earlier non-neural heuristics.
+And in the passenger-perspective case, our non-neural heuristic of randomly concate-
+nating shortest paths performs even better. The pattern in these results, where the
+relative performance of our heuristics increases with the size of the city n, also suggests
+that their advantage may continue to grow for cities larger than those found in these
+benchmarks.
+When optimizing just one metric as in the above experiments, our method achieves
+low values of that metric by driving the other metric very high, as can be seen in the
+Co column of Table 3 and the Cp column of Table 4. This is because of the inherent
+trade-off between Cp and Co: shorter, more direct routes reduce operating cost but
+connect fewer pairs of nodes directly, requiring passengers to make more transfers and
+increasing the cost to passengers.
+The metrics d0 to dun reveal that at α = 0.0, NEA favours higher numbers of trans-
+fers relative to most of the other methods, particularly H¨usselmann, van Vuuren, and
+Andersen (2024). This matches our intuitions: shorter routes will deliver fewer passen-
+gers directly to their destinations and will require more transfers, so it is logical that
+the learned policies would tend to increase the number of transfers when rewarded for
+minimizing operating cost. Meanwhile, at α = 1.0, the numbers of transfers achieved
+by NEA and RC-EA are comparable to other recent methods, except for Zervas et al.
+(2024). Unlike our method and the others compared here, their algorithm directly in-
+corporates the number of transfers in the cost function that it minimizes, resulting in
+fewer transfers but less impressive Cp.
+36
+
+=== PAGE 37 ===
+Table 4.: Operator perspective results. Cp is the average passenger trip time. Co is
+the total route time. di is the percentage of trips satisfied with number of transfers i,
+while dun is the percentage of trips satsified with 3 or more transfers. Arrows next to
+each quantity indicate which of increase or decrease is desirable. Bold values in Co, d0
+and dun columns are the best for that city.
+City
+Method
+Co ↓
+Cp
+d0 ↑
+d1
+d2
+dun ↓
+Mandl
+Mumford (2013a)
+63
+15.13
+70.91
+25.5
+2.95
+0.64
+John, Mumford, and Lewis (2014)
+63
+13.48
+-
+-
+-
+-
+Ahmed, Mumford, and Kheiri (2019)
+63
+14.28
+62.23
+27.16
+9.57
+1.03
+H¨usselmann, van Vuuren, and Andersen (2024) DBMOSA
+63
+13.55
+70.99
+24.44
+4.00
+0.58
+H¨usselmann, van Vuuren, and Andersen (2024) NSGA-II
+63
+13.49
+71.18
+25.21
+2.97
+0.64
+NEA
+68
+13.89
+57.87
+33.77
+8.20
+0.15
+Mumford0
+Mumford (2013a)
+111
+32.4
+18.42
+23.4
+20.78
+37.40
+John, Mumford, and Lewis (2014)
+95
+32.78
+-
+-
+-
+-
+Ahmed, Mumford, and Kheiri (2019)
+94
+26.32
+14.61
+31.59
+36.41
+17.37
+H¨usselmann, van Vuuren, and Andersen (2024) DBMOSA
+98
+27.61
+22.39
+31.27
+18.82
+27.51
+H¨usselmann, van Vuuren, and Andersen (2024) NSGA-II
+94
+27.17
+24.71
+38.31
+26.77
+10.22
+NEA
+122
+30.20
+15.34
+30.77
+27.82
+26.08
+Mumford1
+Mumford (2013a)
+568
+34.69
+16.53
+29.06
+29.93
+24.66
+John, Mumford, and Lewis (2014)
+462
+39.98
+-
+-
+-
+-
+Ahmed, Mumford, and Kheiri (2019)
+408
+39.45
+18.02
+29.88
+31.9
+20.19
+H¨usselmann, van Vuuren, and Andersen (2024) DBMOSA
+511
+26.48
+25.17
+59.33
+14.54
+0.96
+H¨usselmann, van Vuuren, and Andersen (2024) NSGA-II
+465
+31.26
+19.70
+42.09
+33.87
+4.33
+NEA
+434
+47.07
+17.24
+26.85
+26.45
+29.46
+Mumford2
+Mumford (2013a)
+2244
+36.54
+13.76
+27.69
+29.53
+29.02
+John, Mumford, and Lewis (2014)
+1875
+32.33
+-
+-
+-
+-
+Ahmed, Mumford, and Kheiri (2019)
+1330
+46.86
+13.63
+23.58
+23.94
+38.82
+H¨usselmann, van Vuuren, and Andersen (2024) DBMOSA
+1979
+29.91
+22.77
+58.65
+18.01
+0.57
+H¨usselmann, van Vuuren, and Andersen (2024) NSGA-II
+1545
+37.52
+13.48
+36.79
+34.33
+15.39
+NEA
+1356
+54.82
+10.99
+22.41
+27.00
+39.60
+Mumford3
+Mumford (2013a)
+2830
+36.92
+16.71
+33.69
+33.69
+20.42
+John, Mumford, and Lewis (2014)
+2301
+36.12
+-
+-
+-
+-
+Ahmed, Mumford, and Kheiri (2019)
+1746
+46.05
+16.28
+24.87
+26.34
+32.44
+H¨usselmann, van Vuuren, and Andersen (2024) DBMOSA
+2682
+32.33
+23.55
+58.05
+17.18
+1.23
+H¨usselmann, van Vuuren, and Andersen (2024) NSGA-II
+2043
+35.97
+15.02
+48.66
+31.83
+4.49
+NEA
+1663
+61.25
+11.48
+19.86
+25.07
+43.59
+37
+
+=== PAGE 38 ===
+6.
+Case study: Laval
+To assess our method in a realistic case, we applied it to a simulation of the city of
+Laval in Quebec, Canada. Laval is a suburb of the major Canadian city of Montreal.
+As of the 2021 census, it had a total population of about 430,000 (Statistics Canada
+2023). Public transit in Laval is provided primarily by the bus network of the Soci´et´e
+de Transport de Laval; additionally, the Orange Line of the Montreal underground
+metro system has three stops in Laval.
+We constructed a city graph to represent Laval based on the 2021 census dissemi-
+nation areas (CDAs) obtained from Statistics Canada (Statistics Canada 2021), a GIS
+representation of the road network of Laval provided to us by the Soci´et´e de Trans-
+port de Laval, an Origin-Destination (OD) dataset (Agence m´etropolitaine de trans-
+port 2013) provided by Quebec’s Agence M´etropolitaine de Transport, and publicly-
+available GTFS data from 2013 (Soci´et´e de Transport de Laval n.d.) that describes
+Laval’s existing transit system.
+Each node in the graph represents the centroid of a CDA, with edges connecting
+it to the nodes of neighbouring CDAs, weighted by the average drive time between
+them over the road network. The demand matrix D was derived from the OD dataset,
+which gave an estimated number of trips between every pair of locations based on
+a large survey of Laval residents. Trips that went outside of Laval to Montreal were
+redirected to one of several points in the graph where a metro route or bus route in
+STL’s existing transit system crosses into Montreal. This yielded a graph with 632
+nodes. Table 5 contains the statistics of, and parameters used for, the Laval scenario.
+For the full details of how the graph was constructed from this data, we refer the
+reader to chapter 5 of Holliday (2024).
+38
+
+=== PAGE 39 ===
+Table 5.: Statistics and parameters of the Laval scenario
+# nodes n
+# link edges |Es|
+# demand trips
+# routes S
+MIN
+MAX
+Area (km2)
+632
+4,544
+548,159
+43
+2
+52
+520.1
+6.0.1.
+Existing transit
+Laval’s existing transit network has 43 daytime bus routes. To compare networks from
+our algorithm to this network, we mapped each stop on these routes to the nearest
+node in the node set N based on which CDA contains the stop; duplicate stops on the
+resulting routes were merged. We refer to this translation of the real transit network
+as the STL network.
+The Montreal metro system’s Orange Line has three stops in Laval. As with the
+bus routes, we mapped these stops to their containing CDAs to form an extra metro
+route m, which is treated as being present in all simulations. We also included this
+route in the MDP by setting R0 = {m}, so that our neural policies would take it as
+input and account for it.
+The numbers of stops on the routes in the STL network range from 2 to 52. To
+ensure a fair comparison, we set the constraint parameters to S = 44 (43 plus 1 for
+the metro line), MIN = 2 and MAX = 52 when running our algorithm. Unlike the
+routes in our algorithm’s networks, some of STL’s routes are asymmetric or unidirec-
+tional. We allowed this in our simulation of STL, while still requiring symmetry and
+bidirectionality for the transit networks from our algorithms. For this reason, when
+reporting total route time Co in this section, it is calculated by summing the travel
+times of bidirectional routes in both directions, instead of just one direction as we do
+elsewhere.
+39
+
+=== PAGE 40 ===
+(a) Census dissemination areas
+(b) Link graph
+Figure 6.: Figure 6a shows a map of the census dissemination areas of the city of Laval,
+with ‘crossover points’ used to remap inter-city demands shown as black circles, and
+the Montreal Metro Orange Line shown in orange. Figure 6b shows the link graph
+constructed from these dissemination areas.
+6.1.
+Enforcing constraint satisfaction
+In the experiments on the Mandl and Mumford benchmark cities described in sec-
+tion 5, the EA and NEA algorithms reliably produced networks that satisfied all of
+the constraints outlined in section 3. However, Laval’s city graph, with 632 nodes, is
+considerably larger than the largest Mumford city, which has only 127 nodes. In our
+initial experiments on Laval, we found that both EA and NEA consistently failed to
+satisfy constraint 1, producing networks that left some pairs of nodes disconnected.
+To remedy this, we modified the MDP described in subsection 3.2 to enforce reduc-
+tion of unsatisfied demand wherever possible. Let c1(G, R) be the number of node-pairs
+i, j with Dij > 0 for which network R provides no transit path, and let R′
+t = Rt ∪{rt}
+be the network formed from the finished routes and the in-progress route rt. We made
+the following changes to the action space At whenever c1(G, R′
+t) > 0:
+40
+
+=== PAGE 41 ===
+• When the timestep t is even and At = {continue, halt}, the ‘halt’ action is
+removed from At. This means that the current route must be extended if it is
+possible to do so without violating another constraint.
+• When t is odd, if At contains any paths that would reduce c1(G, R′
+t) if added
+to rt, then all paths that would not reduce c1(G, R′
+t) are removed from At. This
+means that if it is possible to meet some unmet demand by extending rt, then it
+must be done.
+With these changes to the MDP, we found that both LC-100 and NEA reliably
+produced networks that satisfied all constraints, even using policies πθ trained without
+these changes. The results reported in this section were obtained using this variant of
+the MDP.
+6.2.
+Experiments
+We evaluated both the NEA and RC-EA algorithms on the Laval city graph. We
+ran three sets of NEA experiments representing different perspectives: the operator
+perspective (α = 0.0), the passenger perspective (α = 1.0), and a balanced perspective
+(α = 0.5). We only ran RC-EA at α = 1.0 because as we observed previously in
+subsection 5.2.3, RC-EA performs poorly at α < 1.0. As in section 5, we perform ten
+runs of each experiment with ten different random seeds and the same ten different
+learned policies πθ as in our other experiments, and we report statistics over these ten
+runs.
+We kept the same parameters of NEA and RC-EA that we used in subsection 5.1:
+IT = 400, B = 10, E = 10, and a 300s transfer penalty. Although the computer
+memory requirements of running our algorithms on this very large graph were greater
+than for the Mumford benchmark datasets, the desktop machine used for our Mumford
+41
+
+=== PAGE 42 ===
+Table 6.: Performance of LC-100 and NEA’s networks at three α values, RC-EA’s net-
+works at α = 1.0, and the STL network. Bold values are the best for the corresponding
+α, except where STL performs best at that α, in which case no values are bold. Cp is
+the average passenger trip time. Co is the total route time. di is the percentage of trips
+satisfied with i transfers, while dun is the percentage of trips satisfied with 3 or more
+transfers. All values are averaged over ten random seeds, with one standard deviation
+following ‘±’ where relevant.
+α
+Method
+Cp ↓
+Co ↓
+d0 ↑
+d1
+d2
+dun ↓
+N/A
+STL
+123.52
+23954
+15.75
+25.86
+22.87
+35.51
+LC-100
+106.08 ± 6.74
+18797 ± 190
+15.45 ± 0.54
+22.98 ± 1.34
+23.71 ± 1.08
+37.86 ± 1.87
+0.0
+NEA
+113.33 ± 9.78
+18037 ± 302
+15.44 ± 0.47
+22.50 ± 1.72
+23.23 ± 1.27
+38.83 ± 2.67
+LC-100
+86.25 ± 3.88
+20341 ± 549
+15.04 ± 0.46
+26.46 ± 1.10
+26.76 ± 1.18
+31.74 ± 2.22
+0.5
+NEA
+86.14 ± 2.99
+19494 ± 389
+14.89 ± 0.62
+26.18 ± 1.53
+26.59 ± 1.69
+32.34 ± 2.90
+LC-100
+66.64 ± 2.56
+29286 ± 3815
+17.16 ± 1.27
+34.50 ± 3.49
+29.03 ± 1.00
+19.30 ± 4.81
+1.0
+NEA
+59.38 ± 0.52
+44314 ± 1344
+22.08 ± 0.71
+38.79 ± 2.03
+27.57 ± 0.75
+11.56 ± 2.22
+RC-EA
+57.40 ± 0.17
+48700 ± 1001
+23.73 ± 0.57
+44.31 ± 0.71
+25.20 ± 0.62
+6.76 ± 0.58
+experiments proved adequate for the Laval experiments as well, and no changes to our
+model or algorithm were required to reduce memory usage.
+6.2.1.
+Results
+The results of the Laval experiments are shown in Table 6. The results for the initial
+networks produced by LC-100 are presented as well, to show how much NEA improves
+on these initial networks. Figure 7 highlights the trade-offs each method achieves
+between average trip time Cp and total route time Co.
+For each value of α, NEA’s network outperforms the STL network: it achieves 52%
+lower passenger cost Cp at α = 1.0, 25% lower operating cost Co at α = 0.0, and at
+α = 0.5 it achieves 30% lower Cp and 19% lower Co. At both α = 0.0 and α = 0.5,
+NEA dominates the existing transit system, achieving both lower Cp and lower Co.
+Comparing NEA’s results to LC-100, we see that at α = 0.0, NEA decreases Co
+and increases Cp relative to LC-100, and for α = 1.0, the reverse is true. In both
+cases, NEA improves over the initial network on the objective being optimized, at the
+42
+
+=== PAGE 43 ===
+Figure 7.: Average trip time Cp versus total route time Co achieved by LC-100 and
+NEA at α = 0.0 (bottom-right), 0.5 (middle), and 1.0 (top-left), as well as for RC-EA
+at α = 1.0 and the STL network (independent of α). Except for STL, each point is a
+mean value over 10 random seeds, and bars show one standard deviation.
+cost of the other, as we would expect. In the balanced case (α = 0.5), we see that
+NEA decreases Co by 4% and Cp by 0.1% relative to LC-100. This matches what we
+observed in subsection 5.1: NEA’s improvements over LC-100 tend to be greater in Co
+than in Cp. RC-EA, meanwhile, improves on NEA in terms of Cp at α = 1.0, as it did
+in our other experiments. Here, it decreases Cp by two minutes on average, or about
+3.3%.
+Looking at the transfer percentages d0, d1, d2, and dun, we see that as α increases,
+the overall number of transfers shrinks, with d0, d1 and d2 growing and dun shrinking.
+At α = 1.0 RC-EA achieves the fewest transfers. But at both α = 0.5 and α = 1.0,
+NEA also decreases the overall number of transfers relative to the STL network.
+The likely aim of Laval’s transit agency is to reduce costs while improving service
+quality, so the ‘balanced’ case, where α = 0.5, is the most relevant in reality. Some
+simple calculations can give us a rough estimate of savings NEA offers in this case.
+The approximate cost of operating a Laval city bus is 200 Canadian dollars (CAD) per
+hour. If each route has the same headway (time between bus arrivals) h, the number
+43
+
+=== PAGE 44 ===
+of buses Nr required by route r is
+ τr
+h
+
+. The total number of buses NR required for a
+transit network R is then:
+NR =
+X
+r∈R
+Nr ≈1
+h
+X
+r∈R
+τr = Co
+h
+(24)
+The total cost of the system is then 200 CAD×NR. Assuming a headway of 15
+minutes on all routes, that gives a per-hour operating cost of 319,387 CAD for the
+STL network. By comparison, the networks from NEA with α = 0.5 cost 259,920 CAD
+per hour on average, saving the transit agency 59,500 CAD per hour.
+7.
+Discussion
+The choice of heuristics has a major impact on the effectiveness of a metaheuristic
+algorithm, and our results show that neural heuristics trained by deep reinforcement
+learning can outperform human-engineered heuristics on the transit network design
+problem. Neural heuristics can also be useful in complex real-world transit planning
+scenarios, where they can improve an existing transit system in multiple dimensions.
+Our heuristic-training method has several limitations. One is that the construction
+process on which our neural net policies are trained differs from the evolutionary
+algorithm - an improvement process - in which it is deployed. We would like to train
+our neural net policies directly in the context of an improvement process, which may
+make them better-suited to that process.
+Another limitation is that we only train neural net policies to make one kind of
+change to a transit network: concatenating multiple shortest paths into a new route
+and adding it to the network. In future, we wish to train a more diverse set of poli-
+cies, perhaps including route-lengthening and -shortening operators that also could be
+44
+
+=== PAGE 45 ===
+included as heuristics in a metaheuristic algorithm.
+It would also be worthwhile to apply our neural heuristics within other metaheuris-
+tics than just the evolutionary algorithm developed here. Multi-objective metaheuristic
+algorithms could use neural heuristics in tandem with Pareto optimal solution methods
+such as TOPSIS Papathanasiou et al. (2018) to find optimal transit networks.
+One remaining question is why the random path-combining heuristic used in the RC-
+EA experiments outperforms the neural net heuristic for the passenger perspective. As
+noted in subsection 5.2.3, in principle the neural net should be able to learn to imitate
+a random policy if that gives the best outcome. We wish to explore in more depth
+why this does not occur, and whether changes to the policy architecture or learning
+algorithm might allow the neural heuristic’s performance to match or exceed that of
+the random policy.
+Our aim in this paper was to show whether neural heuristics can be used in a
+lightweight metaheuristic algorithm to improve its performance. Our results show that
+they can, and in fact that they can allow a simple metaheuristic algorithm to set new
+state-of-the-art results on challenging benchmark cities. This is compelling evidence
+that they may help transit agencies substantially reduce operating costs while deliv-
+ering better service to riders in real-world scenarios.
+Acknowledgements
+This work was supported by NSERC under Grant 223292. We thank the Soci´et´e de
+Transport de Laval for the map data and transportation data they provided to us, and
+the Agence M´etropolitaine de Transport of Quebec for the origin-destination dataset
+that they provided. This data was essential to the experiments presented in this paper.
+And we thank Joshua Katz for acting as a sounding board for ideas and giving feedback
+45
+
+=== PAGE 46 ===
+on our experimental designs.
+References
+Agence m´etropolitaine de transport. 2013. “Enquˆete origine-destination 2013.” Montreal, QC.
+Ahmed, Leena, Christine Mumford, and Ahmed Kheiri. 2019. “Solving urban transit route
+design problem using selection hyper-heuristics.” European Journal of Operational Research
+274 (2): 545–559.
+Ai, Guanqun, Xingquan Zuo, Gang Chen, and Binglin Wu. 2022. “Deep reinforcement learning
+based dynamic optimization of bus timetable.” Applied Soft Computing 131: 109752.
+Aksoy, ˙Ilyas Cihan, and Mehmet Metin Mutlu. 2024. “Comparing the performance of meta-
+heuristics on the Transit Network Frequency Setting Problem.” Journal of Intelligent Trans-
+portation Systems 1–20.
+Applegate, David, Robert E. Bixby, Vaˇsek Chv´atal, and William J. Cook. 2001. “Concorde
+TSP solver.” https://www.math.uwaterloo.ca/tsp/concorde/index.html.
+Battaglia, Peter W, Jessica B Hamrick, Victor Bapst, Alvaro Sanchez-Gonzalez, Vinicius Zam-
+baldi, Mateusz Malinowski, Andrea Tacchetti, et al. 2018. “Relational inductive biases, deep
+learning, and graph networks.” arXiv preprint arXiv:1806.01261 .
+Bengio, Yoshua, Andrea Lodi, and Antoine Prouvost. 2021. “Machine learning for combi-
+natorial optimization: a methodological tour d’horizon.” European Journal of Operational
+Research 290 (2): 405–421.
+Brody, Shaked, Uri Alon, and Eran Yahav. 2021. “How Attentive are Graph Attention Net-
+works?” https://arxiv.org/abs/2105.14491.
+Bruna, Joan, Wojciech Zaremba, Arthur Szlam, and Yann LeCun. 2013. “Spectral networks
+and locally connected networks on graphs.” arXiv preprint arXiv:1312.6203 .
+Chen, Xinyun, and Yuandong Tian. 2019. “Learning to perform local rewriting for combina-
+torial optimization.” Advances in Neural Information Processing Systems 32.
+Chien, Steven I-Jy, Yuqing Ding, and Chienhung Wei. 2002. “Dynamic bus arrival time predic-
+46
+
+=== PAGE 47 ===
+tion with artificial neural networks.” Journal of transportation engineering 128 (5): 429–438.
+Choo, Jinho, Yeong-Dae Kwon, Jihoon Kim, Jeongwoo Jae, Andr´e Hottung, Kevin Tierney,
+and Youngjune Gwon. 2022. “Simulation-guided beam search for neural combinatorial op-
+timization.” Advances in Neural Information Processing Systems 35: 8760–8772.
+da Costa, Paulo, Jason Rhuggenaath, Yingqian Zhang, and Alp Akcay. 2020. “Learning 2-opt
+heuristics for the traveling salesman problem via deep reinforcement learning.” In Asian
+conference on machine learning, 465–480. PMLR.
+Dai, Hanjun, Elias B Khalil, Yuyu Zhang, Bistra Dilkina, and Le Song. 2017. “Learning com-
+binatorial optimization algorithms over graphs.” arXiv preprint arXiv:1704.01665 .
+Darwish, Ahmed, Momen Khalil, and Karim Badawi. 2020. “Optimising public bus transit
+networks using deep reinforcement learning.” In 2020 IEEE 23rd International Conference
+on Intelligent Transportation Systems (ITSC), 1–7. IEEE.
+Defferrard, Micha¨el, Xavier Bresson, and Pierre Vandergheynst. 2016. “Convolutional Neural
+Networks on Graphs with Fast Localized Spectral Filtering.” CoRR abs/1606.09375. http:
+//arxiv.org/abs/1606.09375.
+Dur´an-Micco, Javier, and Pieter Vansteenwegen. 2022. “A survey on the transit network design
+and frequency setting problem.” Public Transport 14 (1): 155–190.
+Duvenaud, David K, Dougal Maclaurin, Jorge Iparraguirre, Rafael Bombarell, Timothy Hirzel,
+Al´an Aspuru-Guzik, and Ryan P Adams. 2015. “Convolutional networks on graphs for
+learning molecular fingerprints.” Advances in neural information processing systems 28.
+Fortune, Steven. 1995. “Voronoi diagrams and Delaunay triangulations.” Computing in Eu-
+clidean geometry 225–265.
+Fu, Zhang-Hua, Kai-Bin Qiu, and Hongyuan Zha. 2021. “Generalize a small pre-trained model
+to arbitrarily large TSP instances.” In Proceedings of the AAAI conference on artificial
+intelligence, Vol. 35, 7474–7482.
+Gilmer, Justin, Samuel S. Schoenholz, Patrick F. Riley, Oriol Vinyals, and George E. Dahl.
+2017. “Neural Message Passing for Quantum Chemistry.” In Proceedings of the 34th Inter-
+47
+
+=== PAGE 48 ===
+national Conference on Machine Learning, edited by Doina Precup and Yee Whye Teh,
+Vol. 70 of Proceedings of Machine Learning Research, 06–11 Aug, 1263–1272. PMLR.
+https://proceedings.mlr.press/v70/gilmer17a.html.
+Guan, J.F., Hai Yang, and S.C. Wirasinghe. 2006. “Simultaneous optimization of transit line
+configuration and passenger line assignment.” Transportation Research Part B: Methodolog-
+ical 40: 885–902. https://doi.org/10.1016/j.trb.2005.12.003.
+Guihaire, Val´erie, and Jin-Kao Hao. 2008. “Transit network design and scheduling: A global
+review.” Transportation Research Part A: Policy and Practice 42 (10): 1251–1273.
+Holliday, Andrew. 2024. “Applications of deep reinforcement learning to urban transit network
+design.” PhD diss., McGill University. https://arxiv.org/abs/2502.17758.
+Holliday, Andrew, and Gregory Dudek. 2023. “Augmenting Transit Network Design Algo-
+rithms with Deep Learning.” In 2023 26th IEEE International Conference on Intelligent
+Transportation Systems (ITSC), IEEE.
+Holliday, Andrew, and Gregory Dudek. 2024. “A Neural-Evolutionary Algorithm for Au-
+tonomous Transit Network Design.” In presented at 2024 IEEE International Conference
+on Robotics and Automation (ICRA), IEEE.
+Hottung, Andr´e, and Kevin Tierney. 2019. “Neural large neighborhood search for the capaci-
+tated vehicle routing problem.” arXiv preprint arXiv:1911.09539 .
+H¨usselmann, G¨unther, Jan Harm van Vuuren, and Simen Johann Andersen. 2024. “An im-
+proved solution methodology for the urban transit routing problem.” Computers & Op-
+erations Research 163: 106481. https://doi.org/https://doi.org/10.1016/j.cor.2023.106481,
+https://www.sciencedirect.com/science/article/pii/S0305054823003453.
+Islam, Kazi Ashik, Ibraheem Muhammad Moosa, Jaiaid Mobin, Muhammad Ali Nayeem, and
+M Sohel Rahman. 2019. “A heuristic aided Stochastic Beam Search algorithm for solving
+the transit network design problem.” Swarm and Evolutionary Computation 46: 154–170.
+Jeong, Ranhee, and R Rilett. 2004. “Bus arrival time prediction using artificial neural network
+model.” In Proceedings. The 7th international IEEE conference on intelligent transportation
+48
+
+=== PAGE 49 ===
+systems (IEEE Cat. No. 04TH8749), 988–993. IEEE.
+Jiang, Zhibin, Wei Fan, Wei Liu, Bingqin Zhu, and Jinjing Gu. 2018. “Reinforce-
+ment learning approach for coordinated passenger inflow control of urban rail tran-
+sit in peak hours.” Transportation Research Part C: Emerging Technologies 88: 1–16.
+https://doi.org/https://doi.org/10.1016/j.trc.2018.01.008, https://www.sciencedirect.
+com/science/article/pii/S0968090X18300111.
+John, Matthew P., Christine L. Mumford, and Rhyd Lewis. 2014. “An Improved Multi-
+objective Algorithm for the Urban Transit Routing Problem.” In Evolutionary Computation
+in Combinatorial Optimisation, edited by Christian Blum and Gabriela Ochoa, Berlin, Hei-
+delberg, 49–60. Springer Berlin Heidelberg.
+Kar, Armita, Andre L Carrel, Harvey J Miller, and Huyen TK Le. 2022. “Public transit cuts
+during COVID-19 compound social vulnerability in 22 US cities.” Transportation Research
+Part D: Transport and Environment 110: 103435.
+Kepaptsoglou, Konstantinos, and Matthew Karlaftis. 2009. “Transit Route Network De-
+sign
+Problem:
+Review.”
+Journal
+of
+Transportation
+Engineering
+135
+(8):
+491–505.
+https://doi.org/10.1061/(ASCE)0733-947X(2009)135:8(491).
+Kim, Minsu, Jinkyoo Park, et al. 2021. “Learning collaborative policies to solve NP-hard
+routing problems.” Advances in Neural Information Processing Systems 34: 10418–10430.
+Kingma, Diederik P., and Jimmy Ba. 2015. “Adam: A method for Stochastic Optimization.”
+In ICLR, .
+Kipf, Thomas N, and Max Welling. 2016. “Semi-supervised classification with graph convolu-
+tional networks.” arXiv preprint arXiv:1609.02907 .
+Kool, W., H. V. Hoof, and M. Welling. 2019. “Attention, Learn to Solve Routing Problems!”
+In ICLR, .
+Kılı¸c, Fatih, and Mustafa G¨ok. 2014. “A demand based route generation algorithm
+for public transit network design.” Computers & Operations Research
+51: 21–29.
+https://doi.org/https://doi.org/10.1016/j.cor.2014.05.001, https://www.sciencedirec
+49
+
+=== PAGE 50 ===
+t.com/science/article/pii/S0305054814001300.
+Li, Can, Lei Bai, Wei Liu, Lina Yao, and S Travis Waller. 2020. “Graph neural network for
+robust public transit demand prediction.” IEEE Transactions on Intelligent Transportation
+Systems .
+Lin, Haifeng, and Chengpei Tang. 2022. “Analysis and Optimization of Urban Pub-
+lic
+Transport
+Lines
+Based
+on
+Multiobjective
+Adaptive
+Particle
+Swarm
+Optimiza-
+tion.” IEEE Transactions on Intelligent Transportation Systems 23 (9): 16786–16798.
+https://doi.org/10.1109/TITS.2021.3086808.
+Liu, Luyu, Harvey J Miller, and Jonathan Scheff. 2020. “The impacts of COVID-19 pandemic
+on public transit demand in the United States.” Plos one 15 (11): e0242476.
+Ma, Yining, Jingwen Li, Zhiguang Cao, Wen Song, Le Zhang, Zhenghua Chen, and Jing
+Tang. 2021. “Learning to iteratively solve routing problems with dual-aspect collaborative
+transformer.” Advances in Neural Information Processing Systems 34: 11096–11107.
+Mandl, Christoph E. 1980. “Evaluation and optimization of urban public transportation net-
+works.” European Journal of Operational Research 5 (6): 396–404.
+Mirhoseini, Azalia, Anna Goldie, Mustafa Yazgan, Joe Wenjie Jiang, Ebrahim Songhori, Shen
+Wang, Young-Joon Lee, et al. 2021. “A graph placement methodology for fast chip design.”
+Nature 594 (7862): 207–212.
+Mumford, Christine L. 2013a. “New heuristic and evolutionary operators for the multi-
+objective urban transit routing problem.” In 2013 IEEE congress on evolutionary com-
+putation, 939–946. IEEE.
+Mumford, Christine L. 2013b. “Supplementary Material for: New Heuristic and Evolutionary
+Operators for the Multi-Objective Urban Transit Routing Problem, CEC 2013.” https:
+//users.cs.cf.ac.uk/C.L.Mumford/Research%20Topics/UTRP/CEC2013Supp.zip.
+Accessed: 2023-03-24.
+Mundhenk, T Nathan, Mikel Landajuela, Ruben Glatt, Claudio P Santiago, Daniel M Faissol,
+and Brenden K Petersen. 2021. “Symbolic regression via neural-guided genetic programming
+50
+
+=== PAGE 51 ===
+population seeding.” arXiv preprint arXiv:2111.00053 .
+Nikoli´c, Miloˇs, and Duˇsan Teodorovi´c. 2013. “Transit network design by bee colony optimiza-
+tion.” Expert Systems with Applications 40 (15): 5945–5955.
+Papathanasiou, Jason, Nikolaos Ploskas, Jason Papathanasiou, and Nikolaos Ploskas. 2018.
+Topsis. Springer.
+Rodrigue, Jean-Paul. 1997. “Parallel modelling and neural networks: An overview for trans-
+portation/land use systems.” Transportation Research Part C: Emerging Technologies 5
+(5): 259–271. https://doi.org/https://doi.org/10.1016/S0968-090X(97)00014-4, https://
+www.sciencedirect.com/science/article/pii/S0968090X97000144.
+Schulman, John, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. 2017. “Prox-
+imal policy optimization algorithms.” arXiv preprint arXiv:1707.06347 .
+Soci´et´e de Transport de Laval. n.d. “GTFS data for the Soci´et´e de Transport de Laval bus
+network.” Retreived 2020, https://transitfeeds.com/p/societe-de-transport-de-l
+aval/38/1383528159.
+S¨orensen, Kenneth. 2015. “Metaheuristics—the metaphor exposed.” International Transac-
+tions in Operational Research 22 (1): 3–18.
+S¨orensen, Kenneth, Marc Sevaux, and Fred Glover. 2018. “A history of metaheuristics.” In
+Handbook of heuristics, 791–808. Springer.
+Statistics Canada. 2021. “Census Dissemination Area boundary files.” Accessed: 2023-07-01,
+https://www150.statcan.gc.ca/n1/en/catalogue/92-169-X.
+Statistics Canada. 2023. “Census Profile, 2021 Census of Population.” Accessed: 2023-10-25,
+https://www12.statcan.gc.ca/census-recensement/2021/dp-pd/prof/details/pag
+e.cfm.
+Sutton, Richard S, and Andrew G Barto. 2018. Reinforcement learning: An introduction. MIT
+press.
+Sykora, Quinlan, Mengye Ren, and Raquel Urtasun. 2020. “Multi-agent routing value iteration
+network.” In International Conference on Machine Learning, 9300–9310. PMLR.
+51
+
+=== PAGE 52 ===
+van Nes, Rob. 2003. “Multiuser-Class Urban Transit Network Design.” Transportation Re-
+search Record 1835 (1): 25–33. https://doi.org/10.3141/1835-04, https://doi.org/10.3
+141/1835-04.
+Vinyals, Oriol, Meire Fortunato, and Navdeep Jaitly. 2015. “Pointer networks.” arXiv preprint
+arXiv:1506.03134 .
+Wang, Tao, Zhipeng Zhu, Jing Zhang, Junfang Tian, and Wenyi Zhang. 2024. “A
+large-scale traffic signal control algorithm based on multi-layer graph deep reinforce-
+ment learning.” Transportation Research Part C: Emerging Technologies 162: 104582.
+https://doi.org/https://doi.org/10.1016/j.trc.2024.104582, https://www.sciencedirec
+t.com/science/article/pii/S0968090X24001037.
+Wens, Maarten, and Pieter Vansteenwegen. 2024. “A Decentralised Genetic Algorithm with
+Sub-Objectives for the Transit Network Design Problem.” Available at SSRN 4861169 .
+Williams, Ronald J. 1992. “Simple statistical gradient-following algorithms for connectionist
+reinforcement learning.” Machine learning 8 (3): 229–256.
+Wu, Yaoxin, Wen Song, Zhiguang Cao, Jie Zhang, and Andrew Lim. 2021. “Learning improve-
+ment heuristics for solving routing problems.” IEEE transactions on neural networks and
+learning systems 33 (9): 5057–5069.
+Xiong, Yihua, and Jerry B Schneider. 1992. “Transportation network design using a cumulative
+genetic algorithm and neural network.” Transportation Research Record 1364.
+Yan, Haoyang, Zhiyong Cui, Xinqiang Chen, and Xiaolei Ma. 2023. “Distributed Multiagent
+Deep Reinforcement Learning for Multiline Dynamic Bus Timetable Optimization.” IEEE
+Transactions on Industrial Informatics 19: 469–479.
+Yang, Jie, and Yangsheng Jiang. 2020. “Application of modified NSGA-II to the transit net-
+work design problem.” Journal of Advanced Transportation 2020: 1–24.
+Ye, Haoran, Jiarui Wang, Zhiguang Cao, Helan Liang, and Yong Li. 2024. “DeepACO: neural-
+enhanced ant systems for combinatorial optimization.” Advances in Neural Information
+Processing Systems 36.
+52
+
+=== PAGE 53 ===
+Ying, Rex, Ruining He, Kaifeng Chen, Pong Eksombatchai, William L. Hamilton, and Jure
+Leskovec. 2018. “Graph Convolutional Neural Networks for Web-Scale Recommender Sys-
+tems.” CoRR abs/1806.01973. http://arxiv.org/abs/1806.01973.
+Yoo, Sunhyung, Jinwoo Brian Lee, and Hoon Han. 2023. “A Reinforcement Learning approach
+for bus network design and frequency setting optimisation.” Public Transport 1–32.
+Zervas, Alexandros, Christina Iliopoulou, Ioannis Tassopoulos, and Grigorios Beligiannis. 2024.
+“Solving large-scale instances of the urban transit routing problem with a parallel artifi-
+cial bee colony-hill climbing optimization algorithm.” Applied Soft Computing 167: 112335.
+https://doi.org/https://doi.org/10.1016/j.asoc.2024.112335, https://www.sciencedirec
+t.com/science/article/pii/S1568494624011098.
+Zou, Liang, Jian-min Xu, and Ling-xiang Zhu. 2006. “Light Rail Intelligent Dispatching System
+Based on Reinforcement Learning.” In 2006 International Conference on Machine Learning
+and Cybernetics, 2493–2496.
+C¸odur, Muhammed Yasin, and Ahmet Tortum. 2009. “An artificial intelligent approach to
+traffic accident estimation: Model development and application.” Transport 24 (2): 135–
+142. https://doi.org/10.3846/1648-4142.2009.24.135-142.
+Appendix A. Neural Net Architecture
+In this appendix, we give a detailed description of the architecture of the neural net
+policy that is used in our neural heuristic. The policy πθ is a neural net with three
+components: a GAT ‘backbone’, a halting module NNhalt, and an extension module
+NNext. The halting and extension modules both operate on the outputs from the GNN.
+All nonlinearities are ReLU functions. A common embedding dimension of dembed = 64
+is used throughout; unless otherwise specified, each component of the system outputs
+vectors of this dimension.
+53
+
+=== PAGE 54 ===
+A.1.
+Input Features
+The policy net operates on three inputs: an n × 4 matrix of node feature vectors X,
+an n × n × 13 tensor of edge features E, and a global state vector s.
+A node feature xi is composed of the (x, y) coordinates of the node and its in-degree
+and out-degree in the link graph.
+An edge feature eij is composed of the following elements:
+(1) Dij, the demand between the nodes
+(2) sij = 1 if (i, j, τij) ∈Es, 0 otherwise
+(3) τij if (i, j, τij) ∈Es, 0 otherwise
+(4) cij = 1 if R links i to j, 0 otherwise
+(5) c0ij = 1 if j can be reached from i over R with no transfers, 0 otherwise
+(6) c1ij = 1 if one transfer is needed to reach j from i over R, 0 otherwise
+(7) c2ij = 1 if two transfers are needed to reach j from i over R, 0 otherwise
+(8) qij = 1 if i = j, 0 otherwise
+(9) τRij if R links i to j, 0 otherwise
+(10) τrij if j can be reached from i over R with no transfers, where r is the route that
+provides the shortest direct trip between i and j. If i and j are not linked with
+no transfers, has value 0
+(11) Tij, the shortest-path driving time between i and j
+(12) α
+(13) 1 −α
+The global state vector st at timestep t is composed of:
+(1) Cp(G, Rt ∪{rt}), the average passenger trip time for the current route set
+(2) Co(G, Rt ∪{rt}), the total route time for the current route set
+54
+
+=== PAGE 55 ===
+(3) |Rt|, the number of routes planned so far
+(4) S −|Rt|, the number of routes left to plan
+(5) Fun, the fraction of node pairs with demand dij > 0 that are not connected by
+Rt ∪{rt})
+(6) α
+(7) 1 −α
+Note that α and 1 −α are included in both s and eij.
+A.2.
+Backbone network
+The backbone is a graph attention net composed of five GATv2(Brody, Alon, and
+Yahav 2021) multi-head graph attention layers separated by ReLU nonlinearities. 4
+heads are used in each multi-head attention layer. The network takes as input the node
+feature collection X and the edge features E, and the final layer outputs an n×dembed
+matrix of node embeddings Y . These node embeddings are used by the two policy
+heads to compute action probabilities.
+A.3.
+Halting module
+NNhalt is a simple feed-forward MLP with 2 hidden layers. It takes as input st, τrt,
+and yi and yj, where i and j are the first and last nodes on rt. It outputs a scalar h,
+to which we apply the sigmoid function to get the halting policy:
+π(halt|st) = σ(h) =
+1
+1 + e−h
+(A1)
+π(continue|st) = 1 −π(halt|st)
+(A2)
+55
+
+=== PAGE 56 ===
+A.4.
+Extension module
+The extension module NNext computes the policy on odd-numbered timesteps, when
+extensions are selected for routes. It consists of two components. The first is an MLP
+called MLPext1, that computes the node-pair scores oaij that are used to calculate
+the probability of selecting each extension path a to the current route rt. It takes
+as input the time between i and j along the path p being considered, τpij; the node
+embeddings yi and yj, and the edge feature eij, and outputs a score opij. When
+considering extending an existing route rt by a path a, that act would connect each
+pair of nodes on a, as well as each node already on rt to each node on a. So the score
+oa is just the sum of the node-pair scores for the node pairs that this choice would
+link together on the route:
+o(rt|a) =
+X
+i∈a,j∈a,i̸=j
+oaij +
+X
+i∈rt,j∈a
+o(rt|a)ij
+(A3)
+If α = 0, then the benefit of choosing a path a to start or extend a route depends on
+its driving time τa, and generally on the state s. And if 0 < α < 1, then the benefit of
+a depends on these as well as on the edges it adds to ER, and so depends on o(r|a). We
+account for this with a second MLP, called MLPext2, that takes as input st, τa, and
+the previous score o(r|a), and outputs a final scalar score ˆoa for each candidate path.
+The extension policy is then the softmax of these values:
+πθ(a|s) =
+eˆoa
+P
+a′∈A eˆoa′
+(A4)
+We thus treat the outputs of NNext as un-normalized log-probabilities of the possible
+actions during an extension step.
+56
+
+=== PAGE 57 ===
+A.5.
+Value Network
+The PPO training algorithm requires a learnable value function V (st) to compute the
+advantage At = GH
+t −V (st) during training. We parameterize V (st) as an MLP with 2
+hidden layers of dimension 36. The inputs to V (st) are the average of the node feature
+vectors
+P
+i xi
+n
+, the total demand P
+i,j Dij, the means and standard deviations of the
+elements of D and T, the cost component weight α, and the state vector st.
+We experimented with using an additional neural net head that would compute the
+value estimate V (st) based on the same node embeddings Y as NNext and NNhalt, but
+found that this offered no benefit over the version described here.
+Appendix B. Training Hyper-Parameters
+Training of the neural net policies is performed using the PPO reinforcement learning
+algorithm in conjunction with the well-known Adam optimizer (Kingma and Ba 2015)
+to update the neural net’s parameters based on the losses given by PPO. Table B1
+gives the hyper-parameters used during training. We augment the training dataset
+by applying a set of random transformations In each iteration of training. These in-
+clude rescaling the node positions by a random factor uniformly sampled in the range
+[0.4, 1.6], rescaling the demand magnitudes by a random factor uniformly sampled in
+the range [0.8, 1.2], mirroring node positions about the y axis with probability 0.5,
+and revolving the node positions by a random angle in [0, 2π) about their geometric
+center.
+We also randomly sample α separately for each training city in each batch. Each
+time alpha is sampled, it has equal probability of being set to 0.0, set to 1.0, or sampled
+uniformly in the range [0, 1]. This is to encourage the policy to learn to handle not
+57
+
+=== PAGE 58 ===
+Table B1.: Training Hyper-Parameters
+Hyper-Parameter
+Value
+Baseline model learning rate
+5 × 10−4
+Baseline model weight decay
+0.01
+Policy learning rate
+0.0016
+Policy weight decay
+8.4 × 10−4
+Number of training iterations
+200
+Discount rate γ
+0.95
+PPO CLIP threshold ϵ
+0.2
+Generalized Advantage Estimation λ
+0.95
+Batch size
+256
+Horizon
+120
+Num. epochs
+1
+Constraint weight β
+5.0
+S
+10
+MIN
+2
+MAX
+12
+Adam α
+0.001
+Adam β1
+0.9
+Adam β2
+0.999
+only intermediate cases, but also the extreme cases where only Cp or only Co matters.
+Although it is typical to use an entropy-maximization term in the loss function
+when using PPO, we found better results by dropping this term, so we do not use it
+when training out policies.
+A set of preliminary experiments with a range of values for the discount rate γ led
+us to set this parameter to γ = 0.95.
+58
