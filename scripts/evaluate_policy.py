@@ -258,7 +258,7 @@ def pareto_figures(out, per_city, test_indices, ks, *, complete):
     labels = list(dict.fromkeys(r['model'] for r in per_city))
     styles = {label: (f'C{i}', ['o', '^', 's', 'D'][i % 4]) for i, label in enumerate(labels)}
     cities = sorted({r['graph'] for r in rows})
-    modes = ['greedy', f'best_of_{max(ks)}']
+    modes = list(dict.fromkeys(['greedy', 'best_of_1', f'best_of_{max(ks)}']))
     if 8 in ks and max(ks) != 8:
         modes.insert(1, 'best_of_8')
     modes = [mode for mode in modes if any(r['mode'] == mode for r in rows)]
