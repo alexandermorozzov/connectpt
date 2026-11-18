@@ -68,6 +68,12 @@ class TensorBoardLogger(Logger):
     def close(self):
         self.writer.close()
 
+    def resume(self, step):
+        from torch.utils.tensorboard import SummaryWriter
+        log_dir = self.writer.log_dir
+        self.writer.close()
+        self.writer = SummaryWriter(log_dir, purge_step=step)
+
 
 class CsvLogger(Logger):
     """``<run_dir>/history.csv``: one row per step, one column per tag."""

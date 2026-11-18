@@ -206,7 +206,7 @@ class TrainingRun(ExperimentRun):
             self.run_params.name,
         )
         result = train(self.env, self.policy, self.algorithm, critic, optimizer, self.logger_list, data, budget,
-                       validation=validation)
+                       validation=validation, recovery=getattr(self, 'training_recovery', None))
         checkpoint_config = OmegaConf.to_container(self.cfg, resolve=True)
         save_model_weights(self.policy, self.checkpoint, checkpoint_config)
         save_model_weights(result.best_policy, self.best_checkpoint, checkpoint_config)

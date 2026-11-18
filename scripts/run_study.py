@@ -403,7 +403,7 @@ def evaluation_tasks(spec):
     """The S5/S10 pair and five benchmark tasks share one trained actor."""
     tasks = [dict(suite=f'synthetic_s{routes}', routes=routes, length=12, minimum=2)
              for routes in (10, 5)]
-    for city in ('mandl', 'mumford0', 'mumford1', 'mumford2', 'mumford3'):
+    for city in ('mandl', 'mumford0'):
         from connectpt.routes_generator.run.instances import instance_spec
         cfg = instance_spec(city)
         tasks.append(dict(suite=city, routes=int(cfg.n_routes), length=int(cfg.max_route_len),
@@ -412,7 +412,22 @@ def evaluation_tasks(spec):
                  training_routes=spec.get('training_routes', spec['routes'])) for task in tasks]
 
 
+def skip_evaluation(root, spec, checkpoint_label):
+    """Cooperative cancellation for new workers, checked between candidate chunks."""
+    actor = spec.get('actor_id', spec['id'])
+    markers = (root / 'SKIP_EVALUATION', root / 'runs' / actor / 'SKIP_EVALUATION')
+    if not any(p.exists() for p in markers):
+        return False
+    record = dict(phase='evaluation_skipped', checkpoint=checkpoint_label,
+                  suite=spec.get('suite'), updated_at=now(), reason='SKIP_EVALUATION marker')
+    save_json(root / 'evaluation' / spec['id'] / checkpoint_label / 'skipped.json', record)
+    save_json(root / 'runs' / spec['id'] / 'progress.json', record)
+    return True
+
+
 def evaluate_run(root, spec, *, checkpoint_label='best'):
+    if skip_evaluation(root, spec, checkpoint_label):
+        return dict(skipped=True)
     import torch
     from omegaconf import OmegaConf
     from connectpt.routes_generator.run.training import TrainingRun
@@ -458,6 +473,8 @@ def evaluate_run(root, spec, *, checkpoint_label='best'):
             for sample in range(1 if mode == 'greedy' else max(ks)):
                 count = len(graphs) if mode == 'greedy' else k_count
                 for start in range(0, count, cfg.evaluation.batch_size):
+                    if skip_evaluation(root, spec, checkpoint_label):
+                        return dict(skipped=True)
                     end = min(start + cfg.evaluation.batch_size, count)
                     path = out / 'candidates' / f'{mode}_a{ai:02d}_s{sample:03d}_g{start:04d}.json.gz'
                     if path.exists():
@@ -487,12 +504,17 @@ def evaluate_run(root, spec, *, checkpoint_label='best'):
                             json.dump(chunk, stream, allow_nan=False)
                         atomic_replace(temporary, path)
                     all_rows.extend(chunk['rows'])
-                    save_json(root / 'runs' / spec['id'] / 'progress.json', dict(phase=mode,
+                    progress = dict(phase='evaluation', mode=mode, suite=suite, checkpoint=checkpoint_label,
                         alpha=alpha, sample=sample+1, samples=1 if mode == 'greedy' else max(ks),
-                        graph=end, graphs=count, updated_at=now()))
+                        graph=end, graphs=count, updated_at=now())
+                    save_json(root / 'runs' / spec['id'] / 'progress.json', progress)
+                    save_json(root / 'runs' / actor_id / 'progress.json', progress)
     for key, value in actor.policy.state_dict().items():
         torch.testing.assert_close(value, before[key], rtol=0, atol=0, equal_nan=True)
+    if skip_evaluation(root, spec, checkpoint_label):
+        return dict(skipped=True)
     rebuild_run(root, spec, checkpoint_label)
+    (out / 'skipped.json').unlink(missing_ok=True)
     return protocol
 
 
@@ -504,6 +526,7 @@ def study_training_run(cfg, comparison_updates=None):
     from connectpt.routes_generator.training.validate import ConstructionValidation
     from connectpt.routes_generator.training.data import ConstructionDataset
     from connectpt.routes_generator.policy.checkpoints import save_model_weights
+    from connectpt.routes_generator.training.checkpoints import TrainingRecovery, preserve_rng
     from omegaconf import OmegaConf
 
     owner = None
@@ -532,6 +555,7 @@ def study_training_run(cfg, comparison_updates=None):
 
                 data.prepare_step, data.record_step = step, record
                 owner.preference_histograms = histograms
+                data.checkpoint_extra = histograms
             return prepared
 
     class StudyValidation(ConstructionValidation):
@@ -567,10 +591,11 @@ def study_training_run(cfg, comparison_updates=None):
                     root = owner.run_dir.parent.parent
                     spec = read_json(root / 'protocols/jobs' / f'{cfg.run.name}.json')
                     # These held-out observations never select the best checkpoint.
-                    with torch.random.fork_rng(devices=[]):
+                    with preserve_rng():
                         for task in evaluation_tasks(spec):
                             task['id'] = spec['id'] + '__' + task['suite']
                             evaluate_run(root, task, checkpoint_label=label)
+                    save_json(owner.run_dir / 'progress.json', dict(phase='training', updated_at=now()))
 
     class StudyTrainingRun(TrainingRun):
         def setup(self):
@@ -579,6 +604,11 @@ def study_training_run(cfg, comparison_updates=None):
             owner = self
             self.task = replace(self.task, validation_factory=StudyValidation)
             self.dataset = StudyDataset(**vars(self.dataset))
+            definition = OmegaConf.to_container(self.cfg, resolve=True)
+            definition.pop('paths', None)
+            self.training_recovery = TrainingRecovery(
+                self.best_checkpoint.with_name('training_state.pt'), identity(definition),
+                milestone_period=comparison_updates or self.loop_params.val_period)
             if getattr(self, 'run_dir', None) is not None:
                 digest = hashlib.sha256()
                 for key, value in self.policy.state_dict().items():
@@ -611,8 +641,9 @@ def worker(root, job_id):
         if read_json(result)['iterations'] != spec['updates']:
             raise ValueError('Incomplete training has no exact optimizer/RNG resume; artifacts are preserved')
     else:
-        if (directory / 'history.csv').exists():
-            raise ValueError('Interrupted training is preserved; actor-only weights cannot resume it exactly')
+        if ((directory / 'history.csv').exists()
+                and not (directory / 'checkpoints/training_state.pt').exists()):
+            raise ValueError('No full training checkpoint exists; actor-only weights cannot resume training exactly')
         save_json(directory / 'progress.json', dict(phase='training', updated_at=now()))
         study_training_run(cfg, spec['comparison_updates']).run()
     save_json(directory / 'progress.json', dict(phase='completed', updated_at=now()))
@@ -745,7 +776,11 @@ class Coordinator:
                         continue
                     running['console'].close()
                     entry = self.state['jobs'][job_id]
-                    entry.update(status='completed' if exit_code == 0 else 'failed', exit_code=exit_code,
+                    progress_path = self.root / 'runs' / job_id / 'progress.json'
+                    progress = read_json(progress_path) if progress_path.exists() else {}
+                    skipped = (exit_code == 0 and running['spec']['kind'] == 'evaluation'
+                               and progress.get('phase') == 'evaluation_skipped')
+                    entry.update(status='skipped' if skipped else 'completed' if exit_code == 0 else 'failed', exit_code=exit_code,
                         finished=now(), seconds=time.monotonic()-running['started'], peak_memory_bytes=running['peak'])
                     finished.append(job_id)
                     self.save()
@@ -921,9 +956,10 @@ def evaluation_inputs(root, spec, actor):
         return graphs, [source], [0]
     path = root / 'data' / variant_name(spec) / 'test'
     data = load_dataset(path, kind='construction')
-    indices = list(range(len(data.graphs)))
+    settings = read_json(root / 'manifest.json')['settings']
+    indices = list(range(min(len(data.graphs), settings.get('synthetic_eval_graphs', 10))))
     graphs = [actor.dataset.evaluation_pipeline.graph(data.graphs[i]) for i in indices]
-    return graphs, list(data.params.source_ids), indices
+    return graphs, [data.params.source_ids[i] for i in indices], indices
 
 
 def import_data(root, source):
@@ -971,7 +1007,7 @@ def import_data(root, source):
     if set(splits['train']) & set(splits['validation']):
         raise ValueError('Training/validation indices overlap')
     save_json(root / 'protocols/splits.json', splits)
-    benchmarks = ('mandl', 'mumford0', 'mumford1', 'mumford2', 'mumford3')
+    benchmarks = ('mandl', 'mumford0')
     for city in benchmarks:
         shutil.copytree(REPO / 'datasets/instances' / city, root / 'data/benchmark' / city)
         load_instance(city, instances_dir=root / 'data/benchmark', require_routes=False)
@@ -1017,8 +1053,9 @@ def register_plan(root, state):
     save_json(root / 'protocols/plan.json', dict(
         schema=SCHEMA, training=training, training_count=len(training), workers=state['settings']['workers'],
         time_limit_seconds=None, checkpoints=['best', 'at_200', 'at_400', 'best_at_200', 'last'],
-        periodic_evaluation='at_200 and at_400: synthetic S10/S5 and all five benchmarks',
-        final_evaluation='best sample-validation checkpoint, all seven tasks',
+        training_recovery=['training_state.pt', 'training_at_200.pt', 'training_at_400.pt'],
+        periodic_evaluation='at_200 and at_400: 10 fixed synthetic cities S10/S5, Mandl and Mumford0',
+        final_evaluation='best sample-validation checkpoint, the same four tasks',
         checkpoint_selection='minimum mean sample cost on complete synthetic validation; benchmark/test never select',
         evaluation_modes=['Greedy', 'Sample / LC1', 'LC100'],
         pareto_rule='one actual selected network per city/alpha/mode, feasible nondominated subset; then mean city metrics',
@@ -1036,6 +1073,8 @@ def write_instructions(root):
 Максимум 3 worker-процесса по 4 CPU-потока. Ограничений времени нет.
 Нормировка модели сохранена. Старые веса и калибровочные замеры не нужны.
 Данные и бенчмарки включены; внешние пути к прошлым сериям не используются.
+Тяжёлая оценка использует 10 фиксированных synthetic test городов при S5/S10,
+а из бенчмарков только Mandl и Mumford0. Обычная sample validation не сокращается.
 
 Сервер: архив распаковывается в корень проекта connectpt, с сохранением путей.
 Запуск из корня проекта через существующее окружение .venv:
@@ -1056,6 +1095,8 @@ Windows: окружение source/.venv; запуск существующим 
 protocols/plan.json — полный план; protocols/configs — семь эффективных конфигов.
 status.txt / status.json — прогресс; resources.csv — фактические ресурсы.
 runs/<model>/checkpoints — best.pt, last.pt, best_at_200.pt, at_200.pt, at_400.pt.
+training_state.pt — полное состояние после каждого обновления;
+training_at_200.pt / training_at_400.pt — полное состояние перед оценкой границы.
 Выбор best: минимальный sample validation cost, не результаты бенчмарков.
 evaluation/<model>__<task>/<checkpoint> — synthetic S5/S10 либо один бенчмарк.
 Для каждого города и alpha сохранены все 100 stochastic кандидатов и greedy.
@@ -1068,7 +1109,13 @@ summary/metrics.csv — раздельные режимы; common_reference10 �
   python source/scripts/run_study.py --out-dir "$PWD" --replot
 
 --resume продолжает очередь и прерванную оценку по сохранённым чанкам.
-Прерванное обучение не продолжается из actor-only весов: требуется отдельный новый прогон.
+Прерванное новое обучение продолжается из полного training_state.pt.
+Старые actor-only checkpoint не обеспечивают точного продолжения.
+Пропуск тяжёлой оценки: --skip-evaluation либо файл SKIP_EVALUATION в корне серии.
+Файл runs/<model>/SKIP_EVALUATION пропускает оценку только этой модели.
+Маркер проверяется между чанками кандидатов. Удаление маркера возвращает оценку.
+Sample validation для выбора best не пропускается.
+Уже запущенные старые процессы не получают эти возможности от изменения файлов.
 Все существующие артефакты при ошибке сохраняются. Для переноса копируется вся папка.
 ''', encoding='utf-8')
 
@@ -1081,6 +1128,8 @@ def main(argv=None):
     parser.add_argument('--data-from', help='Directory containing r10_l12 and r5_l12 immutable datasets; copied into package')
     parser.add_argument('--prepare-only', action='store_true', help='Package configs, source and data; never starts workers')
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--skip-evaluation', action='store_true',
+                        help='Skip heavy monitoring/final evaluation; retain sample validation and full checkpoints')
     parser.add_argument('--replot', action='store_true')
     parser.add_argument('--log')
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
@@ -1118,12 +1167,12 @@ def main(argv=None):
             (root / name).mkdir(parents=True, exist_ok=True)
         settings = dict(memory_gb=args.memory_gb, workers=args.workers, smoke=False,
             pool_graphs=32768, nodes=20, routes=10, length=12,
-            validation_graphs=None, selection_graphs=16, test_graphs=64, k_graphs=64,
+            validation_graphs=None, selection_graphs=16, test_graphs=64, k_graphs=10, synthetic_eval_graphs=10,
             preference_count=11, ks=[1, 100], batches=[128], minibatch=128, horizon=120,
             main_updates=400, monitor_period=200, val_period=20, threads=4, poll_seconds=5)
         counts = import_data(root, args.data_from)
         if counts != dict(train=29491, validation=3277, selection=16, test=64,
-                          benchmarks=['mandl', 'mumford0', 'mumford1', 'mumford2', 'mumford3'], nodes=20):
+                          benchmarks=['mandl', 'mumford0'], nodes=20):
             raise ValueError(f'v4 requires the agreed synthetic dataset sizes: {counts}')
         state = dict(schema=SCHEMA, created=now(), settings=settings, jobs={}, choices={},
                      status='prepared', workers=args.workers, peak_memory_bytes=0, data_counts=counts)
@@ -1132,6 +1181,8 @@ def main(argv=None):
         state['source_hashes'] = snapshot(root)
         save_json(root / 'manifest.json', state)
         write_instructions(root)
+        if args.skip_evaluation:
+            (root / 'SKIP_EVALUATION').touch()
         (root / 'status.txt').write_text('Prepared v4; no training, inference or worker processes started.\n', encoding='utf-8')
         print(f'Portable v4 prepared, no workers started: {root}', flush=True)
         return
@@ -1161,6 +1212,8 @@ def main(argv=None):
             pass
         lock.unlink()
     save_json(lock, dict(pid=os.getpid(), created=psutil.Process().create_time()))
+    if args.skip_evaluation:
+        (root / 'SKIP_EVALUATION').touch()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s',
         handlers=[logging.StreamHandler(), logging.FileHandler(root / 'controller.log', encoding='utf-8')], force=True)
     state.pop('error', None)

@@ -130,11 +130,13 @@ class EditValidation(Validation):
 class ValidationTracker:
     """One validation/monitor/best sequence before, after and at training end."""
 
-    def __init__(self, validation, *, on_best=None):
+    def __init__(self, validation, *, on_best=None, before_monitor=None, after_monitor=None):
         self.validation = validation
         self.on_best = on_best
+        self.before_monitor, self.after_monitor = before_monitor, after_monitor
         self.best_cost, self.best_policy = float('inf'), None
         self.last_step, self.last_cost = None, None
+        self.monitor_final, self.final_monitor_step = False, None
 
     def _best(self, policy, cost):
         if cost < self.best_cost:
@@ -148,15 +150,24 @@ class ValidationTracker:
         if freeze:
             policy.update_and_freeze_feature_norms()
         self._best(policy, self.last_cost)
+        self.monitor(policy, logger_list, step, final=final)
+
+    def monitor(self, policy, logger_list, step, *, final=False):
+        self.monitor_final = final
+        if self.before_monitor is not None:
+            self.before_monitor(step)
         self.validation.monitor(policy, logger_list, step,
                                 batches=self.validation.monitor_batches(), final=final)
+        if final:
+            self.final_monitor_step = step
+        if self.after_monitor is not None:
+            self.after_monitor(step)
 
     def finish(self, policy, logger_list, step):
         if self.last_step != step:
             self.run(policy, logger_list, step, final=True)
         else:
-            self.validation.monitor(policy, logger_list, step,
-                                    batches=self.validation.monitor_batches(), final=True)
+            self.monitor(policy, logger_list, step, final=True)
             self._best(policy, self.last_cost)
 
 

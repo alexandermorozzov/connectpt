@@ -117,35 +117,63 @@ def collect(env, policy, algorithm, critic, data, horizon):
     return batch, terminal, torch.cat(completed_rewards), torch.cat(completed_lengths)
 
 
-def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget, *, validation):
+def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget, *, validation, recovery=None):
     if budget.n_iterations < 1 or budget.horizon < 1 or budget.val_period < 1:
         raise ValueError("training budgets must be positive")
     if budget.max_rollout_samples is not None and data.batch_size * budget.horizon > budget.max_rollout_samples:
         raise ValueError("rollout exceeds max_rollout_samples")
     if data.batch_size > algorithm.params.minibatch_size:
         raise ValueError("graph batch size exceeds minibatch_size")
-    if budget.action_seed is not None:
+    if recovery is not None:
+        recovery.prepare(data)
+    resuming = recovery is not None and recovery.path.exists()
+    if budget.action_seed is not None and not resuming:
         torch.manual_seed(budget.action_seed)
     policy.train()
     with torch.no_grad():
-        for graphs, seeds in data.warmup(budget.warmup_batches):
+        for graphs, seeds in (() if resuming else data.warmup(budget.warmup_batches)):
             env.reset(graphs, env.cost.get_weights(), seeds)
             predict(policy, graphs, env.state.cost_weights, env.cost, type(env), env.params,
                     "sample", seed_networks=seeds, mask=env.mask_override)
-    if budget.warmup_batches:
+    if budget.warmup_batches and not resuming:
         policy.update_and_freeze_feature_norms()
     policy.eval()
-    data.initialize()
+    if not resuming:
+        data.initialize()
     checkpoint_dir = budget.output_dir / f"{budget.run_name}_checkpoints"
     tracker = ValidationTracker(validation, on_best=lambda best:
                                 save_model_weights(best, checkpoint_dir / 'best.pt'))
     started = time.monotonic()
     iterations = 0
-    for iteration in range(budget.n_iterations):
+    stats = None
+    restored = None
+    if resuming:
+        restored = recovery.load(env=env, policy=policy, critic=critic, optimizer=optimizer,
+                                 data=data, tracker=tracker, logger_list=logger_list)
+        iterations, stats = restored['iteration'], restored['stats']
+        if not 0 <= iterations <= budget.n_iterations:
+            raise ValueError('Recovery iteration is outside the configured training budget')
+        started -= restored['elapsed']
+
+    def checkpoint(step, phase):
+        flush(logger_list)
+        recovery.save(env=env, policy=policy, critic=critic, optimizer=optimizer,
+                      data=data, tracker=tracker, logger_list=logger_list,
+                      iteration=step, phase=phase, stats=stats, elapsed=time.monotonic()-started)
+
+    if recovery is not None:
+        tracker.before_monitor = lambda step: checkpoint(step, 'monitor')
+        tracker.after_monitor = lambda step: checkpoint(step, 'train')
+        if restored is not None and restored['phase'] == 'monitor':
+            tracker.monitor(policy, logger_list, iterations, final=restored['tracker']['monitor_final'])
+        elif restored is not None and restored['phase'] == 'validate':
+            tracker.run(policy, logger_list, iterations)
+    for iteration in range(iterations, budget.n_iterations):
         if iteration and budget.max_seconds is not None and time.monotonic() - started >= budget.max_seconds:
             break
         progress = iteration / budget.n_iterations
-        if budget.validate_before_update and iteration % budget.val_period == 0:
+        if (budget.validate_before_update and iteration % budget.val_period == 0
+                and (not resuming or tracker.last_step != iteration)):
             if iteration == 0 and budget.calibrate_before_validation:
                 validation.run(policy, (), iteration)
                 policy.update_and_freeze_feature_norms()
@@ -164,9 +192,12 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget, 
         if iteration % budget.val_period == 0:
             save_model_weights(policy, checkpoint_dir / f"iter{iteration}.pt")
         iterations = iteration + 1
-        if not budget.validate_before_update and (
+        validate_after = not budget.validate_before_update and (
             (iteration > 0 and iterations % budget.val_period == 0) or iterations == budget.n_iterations
-        ):
+        )
+        if recovery is not None:
+            checkpoint(iterations, 'validate' if validate_after else 'train')
+        if validate_after:
             tracker.run(policy, logger_list, iterations)
         flush(logger_list)
     # Preserve completed training before the potentially expensive final evaluation.
@@ -177,5 +208,6 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget, 
         "targets": stats.targets.detach().cpu(),
     }
     torch.save(snapshot, checkpoint_dir / 'critic_snapshot.pt')
-    tracker.finish(policy, logger_list, iterations)
+    if not (recovery is not None and tracker.final_monitor_step == iterations):
+        tracker.finish(policy, logger_list, iterations)
     return TrainingResult(tracker.best_policy, tracker.best_cost, iterations, snapshot)
