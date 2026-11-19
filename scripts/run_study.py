@@ -1,4 +1,4 @@
-"""Prepare and coordinate the fixed, self-contained seven-training v4 study."""
+"""Prepare and coordinate the self-contained seven-training v5 study."""
 from __future__ import annotations
 
 import argparse
@@ -22,7 +22,7 @@ import psutil
 
 
 REPO = Path(__file__).resolve().parents[1]
-SCHEMA = 4
+SCHEMA = 5
 GB = 1_000_000_000
 
 
@@ -200,7 +200,9 @@ def worker_config(root, spec):
     cfg.train_loop.cpu_threads = spec['threads']
     cfg.train_loop.preference_distribution = spec['sampler']
     cfg.train_loop.resample_preferences_on_terminal = spec['resample']
-    cfg.algorithm.gamma, cfg.algorithm.n_epochs = .95, 1
+    cfg.algorithm.gamma, cfg.algorithm.n_epochs = settings.get('gamma', .95), 1
+    if 'gae_lambda' in settings:
+        cfg.algorithm.gae_lambda = settings['gae_lambda']
     cfg.algorithm.minibatch_size = spec['minibatch']
     cfg.algorithm.diversity_weight = spec['weight']
     cfg.algorithm.diversity_detach_neighbor = spec['detach']
@@ -275,6 +277,8 @@ def rebuild_run(root, spec, checkpoint_label='best'):
     out = root / 'evaluation' / spec['id'] / checkpoint_label
     protocol = read_json(out / 'protocol.json')
     label = spec['id'] if checkpoint_label == 'best' else f"{spec['id']}@{protocol['updates']}"
+    if 'balanced' in checkpoint_label:
+        label=f"{spec['id']}@{checkpoint_label}"
     pools = []
     for path in sorted((out / 'candidates').glob('*.json.gz')):
         with gzip.open(path, 'rt', encoding='utf-8') as stream:
@@ -293,7 +297,8 @@ def rebuild_run(root, spec, checkpoint_label='best'):
     if len(sampled) != expected:
         raise ValueError(f'Incomplete K pool: {spec["id"]}: {len(sampled)}/{expected}')
     k_greedy = [r for r in greedy if r['graph'] < protocol['k_graph_count']]
-    record = dict(label=label, training_spec=dict(spec, updates=protocol['updates']),
+    record = dict(label=label, checkpoint=checkpoint_label, checkpoint_updates=protocol.get('checkpoint_updates'),
+                  training_spec=dict(spec, updates=protocol['updates']),
                   identity=protocol['identity'], completed_alphas=len(protocol['alphas']),
                   overall=[], by_alpha=[], per_city=[])
     modes = [('greedy', k_greedy)] + [(f'best_of_{k}', select_rows(k_greedy, sampled, k)) for k in protocol['ks']]
@@ -400,7 +405,7 @@ def mode_front_figures(out, rows, ks):
 
 
 def evaluation_tasks(spec):
-    """The S5/S10 pair and five benchmark tasks share one trained actor."""
+    """The S5/S10 pair, Mandl and Mumford0 share one trained actor."""
     tasks = [dict(suite=f'synthetic_s{routes}', routes=routes, length=12, minimum=2)
              for routes in (10, 5)]
     for city in ('mandl', 'mumford0'):
@@ -423,6 +428,22 @@ def skip_evaluation(root, spec, checkpoint_label):
     save_json(root / 'evaluation' / spec['id'] / checkpoint_label / 'skipped.json', record)
     save_json(root / 'runs' / spec['id'] / 'progress.json', record)
     return True
+
+
+def checkpoint_updates(directory, label, budget):
+    """Actual selected weight age, distinct from the campaign training budget."""
+    if label.startswith('at_'):
+        return int(label.removeprefix('at_'))
+    selection = ('checkpoint_selection_at_' + label.removeprefix('best_balanced_at_') + '.json'
+                 if label.startswith('best_balanced_at_') else
+                 'checkpoint_selection.json' if label == 'best_balanced' else
+                 'comparison_checkpoint.json' if label.startswith('best_at_') else None)
+    if selection is not None:
+        return read_json(directory / selection)['best_step']
+    if label == 'best':
+        rows = csv_rows(directory / 'validation.csv')
+        return int(min(rows, key=lambda row: float(row['cost']))['step']) if rows else None
+    return budget if label == 'last' else None
 
 
 def evaluate_run(root, spec, *, checkpoint_label='best'):
@@ -461,6 +482,7 @@ def evaluate_run(root, spec, *, checkpoint_label='best'):
                     split='benchmark' if spec.get('benchmark') else 'independent synthetic test', suite=suite,
                     source_ids=source_ids,
                     checkpoint_label=checkpoint_label,
+                    checkpoint_updates=checkpoint_updates(directory, checkpoint_label, spec['updates']),
                     updates=int(checkpoint_label.split('_')[-1]) if checkpoint_label.startswith(('at_', 'best_at_')) else spec['updates'],
                     k_graph_count=k_count, alphas=alphas, ks=ks, seed=9001)
     save_json(out / 'protocol.json', protocol)
@@ -556,6 +578,8 @@ def study_training_run(cfg, comparison_updates=None):
                 data.prepare_step, data.record_step = step, record
                 owner.preference_histograms = histograms
                 data.checkpoint_extra = histograms
+                if getattr(owner, 'training_diagnostics', None) is not None:
+                    owner.training_diagnostics.attach(data)
             return prepared
 
     class StudyValidation(ConstructionValidation):
@@ -577,6 +601,33 @@ def study_training_run(cfg, comparison_updates=None):
 
         def monitor(self, policy, logger_list, step, **kwargs):
             super().monitor(policy, logger_list, step, **kwargs)
+            diagnostics = getattr(owner, 'training_diagnostics', None)
+            if diagnostics is not None:
+                balanced=diagnostics.validation(policy, logger_list, step, data=self.data,
+                                                cost=owner.cost, env_factory=type(owner.env))
+                if balanced is not None:
+                    improved=balanced<getattr(self,'balanced_best_cost',math.inf)
+                    if improved:
+                        self.balanced_best_cost=balanced
+                        self.balanced_best_step=step
+                        save_model_weights(policy,owner.best_checkpoint.with_name('best_balanced.pt'),
+                                           OmegaConf.to_container(cfg,resolve=True))
+                        save_json(owner.run_dir/'checkpoint_selection.json',dict(
+                            criterion='mean Sample final cost, equally weighted validation cities and uniform alpha grid',
+                            best_step=step,best_cost=balanced,alphas=list(diagnostics.params.selection_alphas),
+                            validation_indices=self.data.validation_indices[:diagnostics.params.validation_graphs],
+                            samples=diagnostics.params.validation_samples,seed=diagnostics.params.seed,
+                            baseline_checkpoint='best.pt retains v4 full sample-validation selection',
+                            test_and_benchmarks_used=False))
+                    for logger in logger_list:
+                        logger.scalar('diag/validation/best_balanced_cost',self.balanced_best_cost,step)
+                        logger.scalar('diag/validation/best_balanced_step',self.balanced_best_step,step)
+                    if comparison_updates is not None and step<=comparison_updates and balanced<getattr(self,'balanced_prefix_best',math.inf):
+                        self.balanced_prefix_best=balanced
+                        save_model_weights(policy,owner.best_checkpoint.with_name(f'best_balanced_at_{comparison_updates}.pt'),
+                                           OmegaConf.to_container(cfg,resolve=True))
+                        save_json(owner.run_dir/f'checkpoint_selection_at_{comparison_updates}.json',
+                                  dict(best_step=step,best_cost=balanced,criterion='uniform validation alpha grid'))
             if comparison_updates is not None:
                 if step <= comparison_updates and self.validated_cost < getattr(self, 'prefix_best', math.inf):
                     self.prefix_best = self.validated_cost
@@ -604,8 +655,18 @@ def study_training_run(cfg, comparison_updates=None):
             owner = self
             self.task = replace(self.task, validation_factory=StudyValidation)
             self.dataset = StudyDataset(**vars(self.dataset))
+            root = self.run_dir.parent.parent
+            manifest = root / 'manifest.json'
+            profile = read_json(manifest)['settings'].get('scalar_diagnostics') if manifest.exists() else None
+            if profile:
+                from connectpt.routes_generator.training.diagnostics import ScalarDiagnostics, ScalarDiagnosticParams
+                self.training_diagnostics = ScalarDiagnostics(ScalarDiagnosticParams(**profile),
+                    gamma=self.algorithm.params.gamma, objective_names=self.cost.objectives, env_params=self.env_params)
+                self.metadata['scalar_diagnostics'] = profile
             definition = OmegaConf.to_container(self.cfg, resolve=True)
             definition.pop('paths', None)
+            if profile:
+                definition['scalar_diagnostics'] = profile
             self.training_recovery = TrainingRecovery(
                 self.best_checkpoint.with_name('training_state.pt'), identity(definition),
                 milestone_period=comparison_updates or self.loop_params.val_period)
@@ -632,7 +693,9 @@ def worker(root, job_id):
     os.chdir(root / 'source')
     spec = read_json(root / 'protocols/jobs' / f'{job_id}.json')
     if spec['kind'] == 'evaluation':
-        evaluate_run(root, spec)
+        labels=read_json(root/'manifest.json')['settings'].get('final_checkpoint_labels',['best'])
+        for label in labels:
+            evaluate_run(root, spec, checkpoint_label=label)
         return
     cfg = worker_config(root, spec)
     directory = root / 'runs' / job_id
@@ -836,7 +899,7 @@ def summary(root):
                 spec = model['training_spec']
                 metadata = {k: spec[k] for k in ('algorithm', 'weight', 'sampler', 'resample', 'routes', 'updates', 'seed',
                                                 'batch', 'horizon', 'alpha')}
-                metadata.update(suite=spec.get('suite'), training_routes=spec.get('training_routes', spec['routes']), kind=spec['kind'], training_transitions=spec['updates']*spec['batch']*spec['horizon'])
+                metadata.update(suite=spec.get('suite'), training_routes=spec.get('training_routes', spec['routes']), kind=spec['kind'], training_transitions=spec['updates']*spec['batch']*spec['horizon'],checkpoint=model.get('checkpoint',result_path.parent.name),checkpoint_updates=model.get('checkpoint_updates'))
                 rows.extend(dict(row, **metadata) for row in model['overall'])
                 common_rows.extend(dict(row, **metadata) for row in model['common_reference10']['overall'])
     from scripts.evaluate_policy import write_csv, pareto_figures
@@ -1052,24 +1115,69 @@ def register_plan(root, state):
             state['jobs'][task['id']] = dict(spec=task, status='pending')
     save_json(root / 'protocols/plan.json', dict(
         schema=SCHEMA, training=training, training_count=len(training), workers=state['settings']['workers'],
-        time_limit_seconds=None, checkpoints=['best', 'at_200', 'at_400', 'best_at_200', 'last'],
+        time_limit_seconds=None, checkpoints=['best', 'best_balanced', 'at_200', 'at_400', 'best_at_200', 'best_balanced_at_200', 'last'],
         training_recovery=['training_state.pt', 'training_at_200.pt', 'training_at_400.pt'],
         periodic_evaluation='at_200 and at_400: 10 fixed synthetic cities S10/S5, Mandl and Mumford0',
-        final_evaluation='best sample-validation checkpoint, the same four tasks',
-        checkpoint_selection='minimum mean sample cost on complete synthetic validation; benchmark/test never select',
+        final_evaluation='best and best_balanced checkpoints separately, the same four tasks',
+        checkpoint_selection='best: original v4 validation; best_balanced: uniform-alpha mean Sample cost on validation only; benchmark/test never select',
         evaluation_modes=['Greedy', 'Sample / LC1', 'LC100'],
         pareto_rule='one actual selected network per city/alpha/mode, feasible nondominated subset; then mean city metrics',
-        candidate_pool='100 stochastic networks per city/alpha; LC1 is the first, no greedy mixed into LC100'))
+        candidate_pool='100 stochastic networks per city/alpha; LC1 is the first, no greedy mixed into LC100',
+        algorithm_change=dict(gamma=state['settings'].get('gamma', .95),
+                              gae_lambda=state['settings'].get('gae_lambda', .95)),
+        scalar_diagnostics=state['settings'].get('scalar_diagnostics'),
+        checkpoint_selection_change='additional best_balanced selection; legacy best and training updates preserved'))
+
+
+def verify_v4_mirror(root, source):
+    """Require every effective config to differ from v4 in exactly gamma/lambda."""
+    from omegaconf import OmegaConf
+    source = Path(source).expanduser().resolve()
+    reference = root / 'protocols/reference_v4'
+    reference.mkdir(exist_ok=True)
+    allowed = {'algorithm.gamma', 'algorithm.gae_lambda'}
+    def differences(left, right, prefix=''):
+        if isinstance(left, dict) and isinstance(right, dict):
+            return [item for key in sorted(set(left) | set(right))
+                    for item in differences(left.get(key), right.get(key), f'{prefix}.{key}' if prefix else key)]
+        return [] if left == right else [dict(key=prefix, v4=left, v5=right)]
+    rows=[]
+    for config in sorted((root / 'protocols/configs').glob('*.yaml')):
+        original = source / 'protocols/configs' / config.name
+        if not original.exists():original = source / 'runs' / config.stem / 'config.yaml'
+        if not original.exists():raise ValueError(f'Missing v4 reference config: {config.stem}')
+        old = OmegaConf.to_container(OmegaConf.load(original), resolve=True)
+        new = OmegaConf.to_container(OmegaConf.load(config), resolve=True)
+        diff=differences(old,new)
+        if {r['key'] for r in diff} != allowed:
+            raise ValueError(f'Unexpected v4/v5 configuration difference for {config.stem}: {diff}')
+        if any(r['v4'] != .95 or r['v5'] != 1. for r in diff):
+            raise ValueError(f'Expected .95 -> 1 for gamma and GAE lambda: {diff}')
+        shutil.copy2(original,reference/config.name)
+        initialization=source/'runs'/config.stem/'initialization.json'
+        rows.append(dict(model=config.stem,differences=diff,reference_sha256=file_hash(original),
+            initial_actor_sha256=read_json(initialization)['actor_sha256'] if initialization.exists() else None))
+    old_data=read_json(source/'protocols/data-hashes.json')
+    new_data=read_json(root/'protocols/data-hashes.json')
+    for name,expected in new_data.items():
+        if old_data.get(name)!=expected:raise ValueError(f'Dataset differs from v4: {name}')
+    save_json(root/'protocols/v4-parity.json',dict(reference_manifest_sha256=file_hash(source/'manifest.json'),
+        allowed_training_differences=sorted(allowed),models=rows,data_hashes_identical=True,
+        evaluation_change='10 fixed synthetic test cities S10/S5, Mandl and Mumford0; ordinary validation unchanged',
+        logging_change='scalar-only observers; no gradient diagnostics or tensor/histogram dumps',
+        checkpoint_selection_change='additional best_balanced using uniform validation alpha grid; original best retained'))
 
 
 def write_instructions(root):
     torch_requirement = next(line for line in (root / 'environment/runtime-requirements.txt').read_text().splitlines()
                              if line.startswith('torch=='))
-    (root / 'START_HERE.txt').write_text(f'''Самостоятельный пакет PPO/D3PO v4. Обучение ещё не запускалось при сборке.
+    (root / 'START_HERE.txt').write_text(f'''Самостоятельный пакет PPO/D3PO v5. Обучение ещё не запускалось при сборке.
 
 7 обучений: PPO / D3PO lambda=0 / D3PO lambda=.1, каждый с Holliday и simplex;
 дополнительно D3PO lambda=.1 Holliday с 5 маршрутами. Seed=0 у всех.
 400 обновлений, batch=minibatch=128, horizon=120, resample=false.
+Единственные изменения обучения относительно v4: gamma=1 и GAE lambda=1.
+D3PO diversity_weight остаётся 0/.1. Метрики диагностики — только скаляры.
 Максимум 3 worker-процесса по 4 CPU-потока. Ограничений времени нет.
 Нормировка модели сохранена. Старые веса и калибровочные замеры не нужны.
 Данные и бенчмарки включены; внешние пути к прошлым сериям не используются.
@@ -1078,7 +1186,7 @@ def write_instructions(root):
 
 Сервер: архив распаковывается в корень проекта connectpt, с сохранением путей.
 Запуск из корня проекта через существующее окружение .venv:
-  bash scripts/launch.sh run_study.py --out-dir "$PWD/artifacts/studies/ppo_d3po_v4" --resume --log "$PWD/artifacts/studies/ppo_d3po_v4/controller-console.log"
+  bash scripts/launch.sh run_study.py --out-dir "$PWD/artifacts/studies/ppo_d3po_v5" --resume --log "$PWD/artifacts/studies/ppo_d3po_v5/controller-console.log"
 Дочерние workers используют launcher и Python того же корня проекта.
 
 Альтернатива: отдельное окружение пакета, из корня этой папки:
@@ -1093,15 +1201,24 @@ Windows: окружение source/.venv; запуск существующим 
 с теми же аргументами --out-dir, --resume и --log.
 
 protocols/plan.json — полный план; protocols/configs — семь эффективных конфигов.
+protocols/v4-parity.json — проверка двух изменений и идентичности данных v4.
+diag/episode, diag/critic, diag/update, diag/validation — компактные скаляры TB.
+Дополнительный best_balanced: 16 validation-городов, равномерная сетка 11 alpha,
+4 Sample на город/alpha, раз в 20 обновлений. Отдельно диагностируется alpha=.85.
+RNG изолирован, исходный best не меняется. Test/бенчмарки не участвуют в отборе.
 status.txt / status.json — прогресс; resources.csv — фактические ресурсы.
-runs/<model>/checkpoints — best.pt, last.pt, best_at_200.pt, at_200.pt, at_400.pt.
+runs/<model>/checkpoints — best.pt, best_balanced.pt, last.pt, best_at_200.pt,
+best_balanced_at_200.pt, at_200.pt, at_400.pt.
 training_state.pt — полное состояние после каждого обновления;
 training_at_200.pt / training_at_400.pt — полное состояние перед оценкой границы.
-Выбор best: минимальный sample validation cost, не результаты бенчмарков.
+Выбор best: прежний полный sample validation cost, как в v4.
+Выбор best_balanced: средний Sample-cost с равным весом 11 alpha на validation.
+Оба отбираются независимо; checkpoint_selection.json сохраняет шаг/критерий.
 evaluation/<model>__<task>/<checkpoint> — synthetic S5/S10 либо один бенчмарк.
 Для каждого города и alpha сохранены все 100 stochastic кандидатов и greedy.
 Greedy, best_of_1 (LC1), best_of_100 (LC100) имеют отдельные метрики и фронты.
 Периодические оценки at_200/at_400 не влияют на отбор checkpoint.
+Итоговые best и best_balanced оцениваются раздельно по всем четырём задачам.
 summary/metrics.csv — раздельные режимы; common_reference10 — дополнительная нормировка.
 Парето-атласы строятся по городам; график средних координат не является фронтом города.
 
@@ -1126,6 +1243,7 @@ def main(argv=None):
     parser.add_argument('--workers', type=int, choices=[1, 2, 3], default=3)
     parser.add_argument('--memory-gb', type=float, default=50.)
     parser.add_argument('--data-from', help='Directory containing r10_l12 and r5_l12 immutable datasets; copied into package')
+    parser.add_argument('--mirror-from', help='Prepared v4 package: verify that only gamma and GAE lambda change')
     parser.add_argument('--prepare-only', action='store_true', help='Package configs, source and data; never starts workers')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--skip-evaluation', action='store_true',
@@ -1169,28 +1287,35 @@ def main(argv=None):
             pool_graphs=32768, nodes=20, routes=10, length=12,
             validation_graphs=None, selection_graphs=16, test_graphs=64, k_graphs=10, synthetic_eval_graphs=10,
             preference_count=11, ks=[1, 100], batches=[128], minibatch=128, horizon=120,
-            main_updates=400, monitor_period=200, val_period=20, threads=4, poll_seconds=5)
+            main_updates=400, monitor_period=200, val_period=20, threads=4, poll_seconds=5,
+            gamma=1., gae_lambda=1., final_checkpoint_labels=['best','best_balanced'],
+            scalar_diagnostics=dict(reference_gamma=.95,
+                validation_graphs=16, validation_samples=4, validation_alphas=[0.,.5,.85,1.],
+                validation_batch_size=32, validation_period=20, seed=9105))
+        settings['scalar_diagnostics']['selection_alphas']=[i/(settings['preference_count']-1) for i in range(settings['preference_count'])]
+        settings['scalar_diagnostics']['validation_alphas']=sorted(set(settings['scalar_diagnostics']['validation_alphas']+settings['scalar_diagnostics']['selection_alphas']))
         counts = import_data(root, args.data_from)
         if counts != dict(train=29491, validation=3277, selection=16, test=64,
                           benchmarks=['mandl', 'mumford0'], nodes=20):
-            raise ValueError(f'v4 requires the agreed synthetic dataset sizes: {counts}')
+            raise ValueError(f'v5 requires the agreed synthetic dataset sizes: {counts}')
         state = dict(schema=SCHEMA, created=now(), settings=settings, jobs={}, choices={},
                      status='prepared', workers=args.workers, peak_memory_bytes=0, data_counts=counts)
         save_json(root / 'manifest.json', state)
         register_plan(root, state)
+        if args.mirror_from:verify_v4_mirror(root, args.mirror_from)
         state['source_hashes'] = snapshot(root)
         save_json(root / 'manifest.json', state)
         write_instructions(root)
         if args.skip_evaluation:
             (root / 'SKIP_EVALUATION').touch()
-        (root / 'status.txt').write_text('Prepared v4; no training, inference or worker processes started.\n', encoding='utf-8')
-        print(f'Portable v4 prepared, no workers started: {root}', flush=True)
+        (root / 'status.txt').write_text('Prepared v5; no training, inference or worker processes started.\n', encoding='utf-8')
+        print(f'Portable v5 prepared, no workers started: {root}', flush=True)
         return
     if not (args.resume or args.replot):
         parser.error('Use --prepare-only to package or --resume to explicitly start the prepared study')
     state = read_json(root / 'manifest.json')
     if state['schema'] != SCHEMA:
-        raise ValueError('This runner requires a v4 package; older studies retain their frozen runner')
+        raise ValueError('This runner requires a v5 package; older studies retain their frozen runner')
     verify_files(root, state['source_hashes'])
     verify_files(root, read_json(root / 'protocols/data-hashes.json'))
     if args.replot:

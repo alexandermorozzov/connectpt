@@ -90,7 +90,8 @@ class TrainingRecovery:
     data_fields = ('finished', 'route_count', 'graph_instances_loaded', 'graph_batches_loaded', 'episode_statistics')
     env_fields = ('state', 'result', 'params', 'steps', 'single_route', 'ended')
     critic_fields = ('_ret_mean', '_ret_var', '_ret_std', '_ret_initialized')
-    validation_fields = ('last_monitor_step', 'validated_cost', 'prefix_best')
+    validation_fields = ('last_monitor_step', 'validated_cost', 'prefix_best',
+                         'balanced_best_cost', 'balanced_best_step', 'balanced_prefix_best')
 
     def __init__(self, path, identity, *, milestone_period=200):
         self.path = Path(path)

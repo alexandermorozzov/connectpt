@@ -131,7 +131,7 @@ def replay_mask(masks, indices, batch_size, score, device):
     return ActionMask(**values)
 
 
-def update(env, policy, algorithm, critic, optimizer, batch):
+def update(env, policy, algorithm, critic, optimizer, batch, *, diagnostics=None):
     p = algorithm.params
     diagnostic_interval = p.gradient_diagnostics_interval
     if diagnostic_interval < 0:
@@ -165,6 +165,7 @@ def update(env, policy, algorithm, critic, optimizer, batch):
             per_goal_mse.append(value_stats["per_obj_mse"].detach())
             obs = env.observation(state)
             output = policy.evaluate(obs, mask, action)
+            raw_advantages = advantages
             if p.normalize_advantages:
                 advantages = normalize_advantages(advantages, per_objective=advantages.ndim > 1)
             log_ratio = output.logp - old_logp
@@ -174,6 +175,9 @@ def update(env, policy, algorithm, critic, optimizer, batch):
                 if initial_error > 2e-4:
                     raise RuntimeError(f"Initial replay ratio differs from 1: {initial_error}")
             clipped = ratios.clamp(1 - p.epsilon, 1 + p.epsilon)
+            if diagnostics is not None:
+                diagnostics.minibatch(ratios.detach(), advantages.detach(), raw_advantages.detach(),
+                                      preferences.detach(), epsilon=p.epsilon)
             surrogate = algorithm.surrogate(ratios, clipped, advantages, preferences)
             diversity = algorithm.diversity(policy, env, state, output, mask, diagnostics=diagnostic_interval > 0)
             if diagnostic_interval:

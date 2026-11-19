@@ -40,9 +40,11 @@ class TrainingResult:
     critic_snapshot: dict
 
 
-def collect(env, policy, algorithm, critic, data, horizon):
+def collect(env, policy, algorithm, critic, data, horizon, *, diagnostics=None):
     device = next(policy.parameters()).device
     data.start(env)
+    if diagnostics is not None:
+        diagnostics.start(data)
     states, outputs, masks, rewards, dones, scores, preferences = [], [], [], [], [], [], []
     objective_rewards, penalty_rewards = [], []
     terminal = {
@@ -56,6 +58,7 @@ def collect(env, policy, algorithm, critic, data, horizon):
             _, mask = env.observe()
             masks.append(mask)
             previous = algorithm.potential(env.result)
+            previous_result = env.result if diagnostics is not None else None
             trajectory = rollout(env, policy, max_steps=1)
             objective_rewards.append(trajectory.rewards[0][0])
             penalty_rewards.append(trajectory.rewards[0][1])
@@ -79,6 +82,8 @@ def collect(env, policy, algorithm, critic, data, horizon):
             preferences.append(pref / pref.sum(-1, keepdim=True).clamp_min(1e-8))
             scalar_reward = reward if reward.ndim == 1 else (reward * preferences[-1]).sum(-1)
             ended = done & active
+            if diagnostics is not None:
+                diagnostics.transition(previous_result, env.result, active, ended, env.state)
             episode_reward, episode_length = data.record_step(scalar_reward,ended,active)
             completed_rewards.append(episode_reward)
             completed_lengths.append(episode_length)
@@ -117,7 +122,7 @@ def collect(env, policy, algorithm, critic, data, horizon):
     return batch, terminal, torch.cat(completed_rewards), torch.cat(completed_lengths)
 
 
-def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget, *, validation, recovery=None):
+def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget, *, validation, recovery=None, diagnostics=None):
     if budget.n_iterations < 1 or budget.horizon < 1 or budget.val_period < 1:
         raise ValueError("training budgets must be positive")
     if budget.max_rollout_samples is not None and data.batch_size * budget.horizon > budget.max_rollout_samples:
@@ -181,11 +186,17 @@ def train(env, policy, algorithm, critic, optimizer, logger_list, data, budget, 
                         freeze=iteration == 0 and not budget.calibrate_before_validation)
         env.prepare_iteration(iteration, budget.force_nonhalt_until)
         data.get(progress)
-        batch, terminal, episode_rewards, episode_lengths = collect(
-            env, policy, algorithm, critic, data, budget.horizon
+        arguments = (env, policy, algorithm, critic, data, budget.horizon)
+        batch, terminal, episode_rewards, episode_lengths = (
+            collect(*arguments) if diagnostics is None else collect(*arguments, diagnostics=diagnostics)
         )
+        if diagnostics is not None:
+            diagnostics.rollout(batch, logger_list, iteration)
         log_values(algorithm, batch, logger_list, iteration)
-        stats = update(env, policy, algorithm, critic, optimizer, batch)
+        arguments = (env, policy, algorithm, critic, optimizer, batch)
+        stats = update(*arguments) if diagnostics is None else update(*arguments, diagnostics=diagnostics)
+        if diagnostics is not None:
+            diagnostics.flush_update(logger_list, iteration)
         log_iteration(env, algorithm, batch, stats, logger_list, data, budget, iteration,
                       started, episode_rewards, episode_lengths, terminal,
                       learning_rate=optimizer.param_groups[0]['lr'])

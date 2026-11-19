@@ -5,6 +5,15 @@ from ..objectives.const import METRIC_TAG_ALIASES
 
 
 @dataclass
+class ScalarDiagnosticRecord:
+    PHASE: ClassVar[str] = 'diag'
+    episode: dict = field(default_factory=dict)
+    critic: dict = field(default_factory=dict)
+    update: dict = field(default_factory=dict)
+    validation: dict = field(default_factory=dict)
+
+
+@dataclass
 class DataCounts:
     PHASE: ClassVar[str] = "time"
     training_graphs: int | None = None
