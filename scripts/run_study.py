@@ -1040,7 +1040,9 @@ def import_data(root, source):
             # Internal hard links avoid duplicate variant blobs. External files are copied.
             shared = root / 'data/r10_l12' / part / 'dataset.pt'
             target = destination / 'dataset.pt'
-            if target != shared and shared.exists() and file_hash(shared) == meta['artifacts']['dataset.pt']:
+            if target.is_file() and file_hash(target) == meta['artifacts']['dataset.pt']:
+                pass
+            elif target != shared and shared.exists() and file_hash(shared) == meta['artifacts']['dataset.pt']:
                 try:
                     os.link(shared, target)
                 except OSError:
@@ -1072,7 +1074,11 @@ def import_data(root, source):
     save_json(root / 'protocols/splits.json', splits)
     benchmarks = ('mandl', 'mumford0')
     for city in benchmarks:
-        shutil.copytree(REPO / 'datasets/instances' / city, root / 'data/benchmark' / city)
+        # Mirror the original bytes too (e.g. checkout line endings may differ).
+        origin = source / 'benchmark' / city
+        if not origin.is_dir():
+            origin = REPO / 'datasets/instances' / city
+        shutil.copytree(origin, root / 'data/benchmark' / city, dirs_exist_ok=True)
         load_instance(city, instances_dir=root / 'data/benchmark', require_routes=False)
     save_json(root / 'protocols/data-hashes.json', {
         p.relative_to(root).as_posix(): file_hash(p) for p in sorted((root / 'data').rglob('*')) if p.is_file()})
@@ -1202,6 +1208,8 @@ Windows: окружение source/.venv; запуск существующим 
 
 protocols/plan.json — полный план; protocols/configs — семь эффективных конфигов.
 protocols/v4-parity.json — проверка двух изменений и идентичности данных v4.
+При незавершённой подготовке: повторить --prepare-only с --retry-preparation
+и исходными --data-from / --mirror-from. Обученные серии повтор не перезаписывает.
 diag/episode, diag/critic, diag/update, diag/validation — компактные скаляры TB.
 Дополнительный best_balanced: 16 validation-городов, равномерная сетка 11 alpha,
 4 Sample на город/alpha, раз в 20 обновлений. Отдельно диагностируется alpha=.85.
@@ -1245,6 +1253,8 @@ def main(argv=None):
     parser.add_argument('--data-from', help='Directory containing r10_l12 and r5_l12 immutable datasets; copied into package')
     parser.add_argument('--mirror-from', help='Prepared v4 package: verify that only gamma and GAE lambda change')
     parser.add_argument('--prepare-only', action='store_true', help='Package configs, source and data; never starts workers')
+    parser.add_argument('--retry-preparation', action='store_true',
+                        help='Retry an incomplete prepare-only operation; refuses studies with training outputs')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--skip-evaluation', action='store_true',
                         help='Skip heavy monitoring/final evaluation; retain sample validation and full checkpoints')
@@ -1256,8 +1266,17 @@ def main(argv=None):
     root = Path(args.out_dir).expanduser().resolve()
     if args.prepare_only and (args.resume or args.replot or args.worker):
         parser.error('prepare-only cannot start/resume/replot a study')
+    if args.retry_preparation and not args.prepare_only:
+        parser.error('retry-preparation requires prepare-only; it never starts workers')
     if (args.resume or args.replot or args.worker) and (root / 'manifest.json').exists():
         frozen = root / 'source/scripts/run_study.py'
+        prepared = read_json(root / 'manifest.json')
+        if prepared.get('schema') == SCHEMA and (
+                prepared.get('status') in ('preparing', 'preparation_failed')
+                or not prepared.get('source_hashes') or not frozen.is_file()):
+            parser.error('Study preparation is incomplete; no workers were started. '
+                         'Inspect the prepare-only launcher log, then use --prepare-only '
+                         '--retry-preparation with the original data-from and mirror-from paths.')
         if Path(__file__).resolve() != frozen:
             os.environ.setdefault('CONNECTPT_STUDY_LAUNCH_ROOT', str(REPO))
             sys.path.insert(0, str(root / 'source'))
@@ -1278,7 +1297,17 @@ def main(argv=None):
     if args.prepare_only:
         if not args.data_from:
             parser.error('preparation requires --data-from DATA_DIRECTORY; no data or workers are generated')
-        if root.exists() and any(root.iterdir()):
+        if args.retry_preparation:
+            previous = read_json(root / 'manifest.json')
+            if (previous.get('schema') != SCHEMA or previous.get('source_hashes')
+                    or previous.get('status') not in ('preparing', 'preparation_failed', 'prepared')
+                    or 'started' in previous
+                    or any((root / name).exists() for name in ('runs', 'evaluation', '.controller.lock'))):
+                parser.error('Retry only supports incomplete preparation with no training outputs or completed snapshot')
+            if (previous['settings']['workers'] != args.workers
+                    or previous['settings']['memory_gb'] != args.memory_gb):
+                parser.error('Retry requires the original workers and memory-gb settings')
+        elif root.exists() and any(root.iterdir()):
             parser.error('preparation requires an empty, dedicated output directory')
         root.mkdir(parents=True, exist_ok=True)
         for name in ('environment', 'protocols/jobs', 'summary', 'figures'):
@@ -1299,15 +1328,22 @@ def main(argv=None):
                           benchmarks=['mandl', 'mumford0'], nodes=20):
             raise ValueError(f'v5 requires the agreed synthetic dataset sizes: {counts}')
         state = dict(schema=SCHEMA, created=now(), settings=settings, jobs={}, choices={},
-                     status='prepared', workers=args.workers, peak_memory_bytes=0, data_counts=counts)
+                     status='preparing', workers=args.workers, peak_memory_bytes=0, data_counts=counts)
         save_json(root / 'manifest.json', state)
         register_plan(root, state)
         if args.mirror_from:verify_v4_mirror(root, args.mirror_from)
+        if args.retry_preparation and (root / 'source').exists():
+            incomplete = root / 'source'
+            backup = root / 'environment' / f'incomplete-source-{time.time_ns()}'
+            if not incomplete.resolve().is_relative_to(root) or not backup.resolve().is_relative_to(root):
+                raise ValueError('Incomplete source must remain inside the study directory')
+            incomplete.rename(backup)
         state['source_hashes'] = snapshot(root)
-        save_json(root / 'manifest.json', state)
         write_instructions(root)
         if args.skip_evaluation:
             (root / 'SKIP_EVALUATION').touch()
+        state['status'] = 'prepared'
+        save_json(root / 'manifest.json', state)
         (root / 'status.txt').write_text('Prepared v5; no training, inference or worker processes started.\n', encoding='utf-8')
         print(f'Portable v5 prepared, no workers started: {root}', flush=True)
         return
